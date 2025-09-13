@@ -55,19 +55,31 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
 }
 
 std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
+    bool is_constant = false;
+
+    if (peek().type == TokenType::CONSTANT) {
+        consume();
+        is_constant = true;
+    }
+
     // Expect identifier next
     expect(TokenType::IDENTIFIER, "Expected identifier after 'data'");
     std::string name = tokens[position - 1].value;
 
-    // Expect assign '='
-    expect(TokenType::ASSIGN, "Expected '=' after variable name");
+    std::unique_ptr<ExpressionNode> value = nullptr;
 
-    auto value = parse_expression();
+    // Optional assignment
+    if (peek().type == TokenType::ASSIGN) {
+        consume(); // consume '='
+        value = parse_expression();
+    }
+
     if (peek().type == TokenType::SEMICOLON) consume();
 
     auto node = std::make_unique<VariableDeclarationNode>();
     node->identifier = name;
     node->value = std::move(value);
+    node->is_constant = is_constant;
     return node;
 }
 

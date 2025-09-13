@@ -49,6 +49,7 @@ struct StatementNode : public Node {};
 struct VariableDeclarationNode : public StatementNode {
     std::string identifier;
     std::unique_ptr<ExpressionNode> value;
+    bool is_constant = false;
 };
 
 struct AssignmentNode : public StatementNode {
