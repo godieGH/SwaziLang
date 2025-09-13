@@ -14,7 +14,14 @@ public:
     void evaluate(ProgramNode* program);
 
 private:
-    std::unordered_map<std::string, Value> environment;
+    // store both value + const flag
+    struct Variable {
+        Value value;
+        bool is_constant = false;
+    };
+
+    // map from name -> Variable (value + constness)
+    std::unordered_map<std::string, Variable> environment;
 
     // expression / statement evaluators
     Value evaluate_expression(ExpressionNode* expr);
