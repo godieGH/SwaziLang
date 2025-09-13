@@ -1,0 +1,1 @@
+. "/data/data/com.termux/files/home/htdocs/SwaziLang/deactivate_conanrunenv-release-armv8.sh"
