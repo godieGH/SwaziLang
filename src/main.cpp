@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
 
     try {
         // 1. Lexer
-        Lexer lexer(source_code);
+        Lexer lexer(source_code, argv[1]);
         std::vector<Token> tokens = lexer.tokenize();
 
         // 2. Parser

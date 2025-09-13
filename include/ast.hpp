@@ -2,10 +2,12 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include "token.hpp"   // <-- needed for Token
 
 // Base class for all AST nodes
 struct Node {
     virtual ~Node() = default;
+    Token token; // filename, line, column for this node (set by the parser)
 };
 
 // Expressions

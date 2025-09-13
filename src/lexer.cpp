@@ -1,9 +1,10 @@
 #include "lexer.hpp"
 #include <map>
 #include <cctype>
+#include <algorithm>
 
-Lexer::Lexer(std::string source) : source(source) {}
-
+Lexer::Lexer(const std::string& source, const std::string& filename)
+    : source(source), filename(filename) {}
 
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
@@ -15,7 +16,7 @@ std::vector<Token> Lexer::tokenize() {
         {"andika", TokenType::ANDIKA},
         {"kweli", TokenType::BOOLEAN},
         {"sikweli", TokenType::BOOLEAN},
-        // word-operators
+        // keyword-operators
         {"na", TokenType::AND},
         {"au", TokenType::OR},
         {"si", TokenType::NOT},
@@ -31,124 +32,199 @@ std::vector<Token> Lexer::tokenize() {
     while (position < source.size()) {
         char current = source[position];
 
-        // skip whitespace
+        // handle whitespace (and update line/col)
         if (std::isspace(static_cast<unsigned char>(current))) {
-            position++;
+            if (current == '\n') {
+                position++;
+                this->line++;
+                this->col = 1;
+            } else {
+                // space, tab, carriage return etc.
+                position++;
+                this->col++;
+            }
             continue;
         }
 
         // comments
         if (current == '/' && peek_char() == '/') {
             // single-line comment
+            // skip "//"
             position += 2;
-            while (position < source.size() && source[position] != '\n') position++;
+            this->col += 2;
+            while (position < source.size() && source[position] != '\n') {
+                position++;
+                this->col++;
+            }
+            // newline will be handled at top of loop (or afterwards)
             continue;
         }
         if (current == '/' && peek_char() == '*') {
             // block comment
             position += 2;
+            this->col += 2;
             while (position + 1 < source.size() && !(source[position] == '*' && peek_char() == '/')) {
-                position++;
+                if (source[position] == '\n') {
+                    position++;
+                    this->line++;
+                    this->col = 1;
+                } else {
+                    position++;
+                    this->col++;
+                }
             }
-            if (position + 1 < source.size()) position += 2;
+            if (position + 1 < source.size()) {
+                // skip closing "*/"
+                position += 2;
+                this->col += 2;
+            }
             continue;
         }
 
-        // two-char operators: check first
+        // two-char operators
         if (current == '*' && peek_char() == '*') {
-            tokens.push_back({TokenType::POWER, "**"});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::POWER, "**", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
         if (current == '>' && peek_char() == '=') {
-            tokens.push_back({TokenType::GREATEROREQUALTHAN, ">="});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::GREATEROREQUALTHAN, ">=", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
         if (current == '<' && peek_char() == '=') {
-            tokens.push_back({TokenType::LESSOREQUALTHAN, "<="});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::LESSOREQUALTHAN, "<=", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
         if (current == '=' && peek_char() == '=') {
-            tokens.push_back({TokenType::EQUALITY, "=="});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::EQUALITY, "==", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
         if (current == '!' && peek_char() == '=') {
-            tokens.push_back({TokenType::NOTEQUAL, "!="});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::NOTEQUAL, "!=", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
         if (current == '&' && peek_char() == '&') {
-            tokens.push_back({TokenType::AND, "&&"});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::AND, "&&", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
         if (current == '|' && peek_char() == '|') {
-            tokens.push_back({TokenType::OR, "||"});
+            int token_line = this->line;
+            int token_col = this->col;
+            tokens.push_back(Token{TokenType::OR, "||", this->filename, token_line, token_col});
             position += 2;
+            this->col += 2;
             continue;
         }
 
         // single-char tokens
         switch (current) {
-            case '+':
-                tokens.push_back({TokenType::PLUS, "+"});
-                position++;
+            case '+': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::PLUS, "+", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '-':
-                tokens.push_back({TokenType::MINUS, "-"});
-                position++;
+            }
+            case '-': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::MINUS, "-", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '*':
-                tokens.push_back({TokenType::STAR, "*"});
-                position++;
+            }
+            case '*': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::STAR, "*", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '/':
-                tokens.push_back({TokenType::SLASH, "/"});
-                position++;
+            }
+            case '/': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::SLASH, "/", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '%':
-                tokens.push_back({TokenType::PERCENT, "%"});
-                position++;
+            }
+            case '%': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::PERCENT, "%", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '=':
-                tokens.push_back({TokenType::ASSIGN, "="});
-                position++;
+            }
+            case '=': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::ASSIGN, "=", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '!':
-                tokens.push_back({TokenType::NOT, "!"});
-                position++;
+            }
+            case '!': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::NOT, "!", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '>':
-                tokens.push_back({TokenType::GREATERTHAN, ">"});
-                position++;
+            }
+            case '>': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::GREATERTHAN, ">", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '<':
-                tokens.push_back({TokenType::LESSTHAN, "<"});
-                position++;
+            }
+            case '<': {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::LESSTHAN, "<", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case '(':
-                tokens.push_back({TokenType::OPENPARENTHESIS, "("});
-                position++;
+            }
+            case '(' : {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::OPENPARENTHESIS, "(", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case ')':
-                tokens.push_back({TokenType::CLOSEPARENTHESIS, ")"});
-                position++;
+            }
+            case ')' : {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::CLOSEPARENTHESIS, ")", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case ',':
-                tokens.push_back({TokenType::COMMA, ","});
-                position++;
+            }
+            case ',' : {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::COMMA, ",", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
-            case ';':
-                tokens.push_back({TokenType::SEMICOLON, ";"});
-                position++;
+            }
+            case ';' : {
+                int token_line = this->line, token_col = this->col;
+                tokens.push_back(Token{TokenType::SEMICOLON, ";", this->filename, token_line, token_col});
+                position++; this->col++;
                 continue;
+            }
         }
 
         // numbers (integer or decimal)
         if (std::isdigit(static_cast<unsigned char>(current))) {
+            int token_line = this->line;
+            int token_col = this->col;
             std::string num;
             bool seen_dot = false;
             while (position < source.size() &&
@@ -157,14 +233,19 @@ std::vector<Token> Lexer::tokenize() {
                 if (source[position] == '.') seen_dot = true;
                 num.push_back(source[position]);
                 position++;
+                this->col++;
             }
-            tokens.push_back({TokenType::NUMBER, num});
+            tokens.push_back(Token{TokenType::NUMBER, num, this->filename, token_line, token_col});
             continue;
         }
 
         // strings with basic escapes
         if (current == '"') {
-            position++; // skip opening quote
+            int token_line = this->line;
+            int token_col = this->col;
+            // consume opening quote
+            position++;
+            this->col++;
             std::string str;
             while (position < source.size()) {
                 char ch = source[position];
@@ -173,51 +254,86 @@ std::vector<Token> Lexer::tokenize() {
                     if (next == '"' || next == '\\') {
                         str.push_back(next);
                         position += 2;
+                        this->col += 2;
                         continue;
                     } else if (next == 'n') {
                         str.push_back('\n');
                         position += 2;
+                        this->col += 2;
                         continue;
                     } else if (next == 't') {
                         str.push_back('\t');
                         position += 2;
+                        this->col += 2;
+                        continue;
+                    } else {
+                        // unknown escape, just take the escaped char
+                        str.push_back(next);
+                        position += 2;
+                        this->col += 2;
                         continue;
                     }
                 }
+                if (ch == '\n') {
+                    // unterminated multiline string or allow it; track lines
+                    position++;
+                    this->line++;
+                    this->col = 1;
+                    str.push_back('\n');
+                    continue;
+                }
                 if (ch == '"') {
                     position++; // skip closing quote
+                    this->col++;
                     break;
                 }
                 str.push_back(ch);
                 position++;
+                this->col++;
             }
-            tokens.push_back({TokenType::STRING, str});
+            tokens.push_back(Token{TokenType::STRING, str, this->filename, token_line, token_col});
             continue;
         }
 
         // identifiers and keywords (allow underscore)
         if (std::isalpha(static_cast<unsigned char>(current)) || current == '_') {
+            int token_line = this->line;
+            int token_col = this->col;
             std::string id;
             while (position < source.size() &&
                    (std::isalnum(static_cast<unsigned char>(source[position])) || source[position] == '_')) {
-                id.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(source[position]))));
+                id.push_back(source[position]); // keep original case
                 position++;
+                this->col++;
             }
-            auto it = keywords.find(id);
+            // lowercase copy for keyword matching
+            std::string id_lower = id;
+            std::transform(id_lower.begin(), id_lower.end(), id_lower.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+
+            auto it = keywords.find(id_lower);
             if (it != keywords.end()) {
-                tokens.push_back({it->second, id});
+                // store keyword lexeme as lowercase to keep consistent
+                tokens.push_back(Token{it->second, id_lower, this->filename, token_line, token_col});
             } else {
-                // keep original case? we lowercased for keyword matching; store identifier as-is
-                tokens.push_back({TokenType::IDENTIFIER, id});
+                tokens.push_back(Token{TokenType::IDENTIFIER, id, this->filename, token_line, token_col});
             }
             continue;
         }
 
         // unknown single character -> emit UNKNOWN
-        tokens.push_back({TokenType::UNKNOWN, std::string(1, current)});
-        position++;
+        {
+            int token_line = this->line;
+            int token_col = this->col;
+            std::string unk(1, current);
+            tokens.push_back(Token{TokenType::UNKNOWN, unk, this->filename, token_line, token_col});
+            position++;
+            this->col++;
+            continue;
+        }
     }
 
-    tokens.push_back({TokenType::EOF_TOKEN, ""});
+    // EOF token (record current position)
+    tokens.push_back(Token{TokenType::EOF_TOKEN, "", this->filename, this->line, this->col});
     return tokens;
 }
