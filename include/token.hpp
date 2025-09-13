@@ -56,4 +56,7 @@ enum class TokenType {
 struct Token {
     TokenType type;
     std::string value; // raw text or normalized value (e.g., "123", "\"hello\"", "kweli")
+    std::string filename;
+    int line;
+    int col;
 };
