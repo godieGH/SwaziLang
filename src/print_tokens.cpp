@@ -28,13 +28,12 @@ static std::string token_name(TokenType t) {
 }
 
 void print_tokens(const std::vector<Token>& tokens) {
-    std::cerr << "---- TOKEN DUMP (" << tokens.size() << " tokens) ----\n";
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        const Token &tok = tokens[i];
-        std::cerr << i << ": " << token_name(tok.type)
-                  << " value='" << tok.value << "'"
-                  << " file='" << tok.filename << "'"
-                  << " line=" << tok.line << " col=" << tok.col << "\n";
+    for (const auto &tok : tokens) {
+        std::cout
+            << "type=" << static_cast<int>(tok.type)
+            << " value=\"" << tok.value << "\""
+            << " loc=" << tok.loc.to_string()
+            << " len=" << tok.loc.length
+            << "\n";
     }
-    std::cerr << "---- END TOKEN DUMP ----\n";
 }

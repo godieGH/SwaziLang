@@ -1,76 +1,110 @@
 #pragma once
-#include <string>
 
-// Enum for all possible token types
+#include <string>
+#include <algorithm>
+
+// Token types (keep in sync with your parser/lexer)
 enum class TokenType {
     // keywords
     DATA,
-    CHAPISHA,   // print with newline
-    ANDIKA,     // print without newline
-    CONSTANT,   // thabiti
-    KAZI,       // function definition
-    RUDISHA,    // return
+    CHAPISHA,
+    ANDIKA,
+    CONSTANT,
+    KAZI,
+    RUDISHA,
+
+    // control-flow keywords (if / else)
+    KAMA,         // 'kama' (if)
+    VINGINEVYO,   // 'vinginevyo' (else)
 
     // literals & identifiers
     IDENTIFIER,
-    NUMBER,     // numeric literal
-    STRING,     // string literal
-    BOOLEAN,    // boolean literal (kweli / sikweli)
+    NUMBER,
+    STRING,
+    BOOLEAN,
 
     // punctuation
     SEMICOLON,
     COMMA,
-    OPENPARENTHESIS,   // (
-    CLOSEPARENTHESIS,  // )
-    OPENBRACE,         // {
-    CLOSEBRACE,        // }
-    COLON,             // : (before indented block)
+    OPENPARENTHESIS,
+    CLOSEPARENTHESIS,
+    OPENBRACE,
+    CLOSEBRACE,
+    COLON,
 
     // assignment / file end
-    ASSIGN,            // =
+    ASSIGN,
     EOF_TOKEN,
 
     // arithmetic
-    PLUS,              // +
-    MINUS,             // -
-    STAR,              // *
-    SLASH,             // /
-    PERCENT,           // %
-    POWER,             // **
-    
-    PLUS_ASSIGN,       // +=
-    MINUS_ASSIGN,      // -=
-    INCREMENT,         // ++
-    DECREMENT,         // --
+    PLUS,
+    MINUS,
+    STAR,
+    SLASH,
+    PERCENT,
+    POWER,
+
+    PLUS_ASSIGN,
+    MINUS_ASSIGN,
+    INCREMENT,
+    DECREMENT,
 
     // logical
-    AND,        // && or 'na'
-    OR,         // || or 'au'
-    NOT,        // ! or 'si'
+    AND,
+    OR,
+    NOT,
 
     // comparison
-    GREATERTHAN,         // >
-    GREATEROREQUALTHAN,  // >=
-    LESSTHAN,            // <
-    LESSOREQUALTHAN,     // <=
-    EQUALITY,            // == or 'sawa'
-    NOTEQUAL,            // != or 'sisawa'
-    
-    // indentation-based blocks
-    NEWLINE,             // newline separator
-    INDENT,              // indent increase
-    DEDENT,              // indent decrease
+    GREATERTHAN,
+    GREATEROREQUALTHAN,
+    LESSTHAN,
+    LESSOREQUALTHAN,
+    EQUALITY,
+    NOTEQUAL,
 
-    // other
-    COMMENT,             // optional: if you want to emit comments
+    // indentation-based blocks
+    NEWLINE,
+    INDENT,
+    DEDENT,
+
+    COMMENT,
     UNKNOWN
 };
 
-// Represents a single token
+// Small struct for token location / span in source
+struct TokenLocation {
+    std::string filename; // source filename (or "<repl>")
+    int line = 1;         // 1-based
+    int col  = 1;         // 1-based column of token start
+    int length = 0;       // token length in characters
+
+    TokenLocation() = default;
+    TokenLocation(const std::string& fn, int ln, int c, int len = 0)
+        : filename(fn), line(ln), col(c), length(len) {}
+
+    int end_col() const { return col + std::max(0, length - 1); }
+
+    std::string to_string() const {
+        return filename + ":" + std::to_string(line) + ":" + std::to_string(col);
+    }
+};
+
+// Represents a single token with location
 struct Token {
-    TokenType type;
-    std::string value;    // raw text or normalized value
-    std::string filename;
-    int line;
-    int col;
+    TokenType type = TokenType::UNKNOWN;
+    std::string value;      // raw text / normalized lexeme
+    TokenLocation loc;      // file:line:col and length/span
+
+    Token() = default;
+    Token(TokenType t, const std::string& v, const TokenLocation& l)
+        : type(t), value(v), loc(l) {}
+
+    const std::string& filename() const { return loc.filename; }
+    int line() const { return loc.line; }
+    int col() const { return loc.col; }
+    int length() const { return loc.length; }
+
+    std::string debug_string() const {
+        return loc.to_string() + " [" + value + "]";
+    }
 };

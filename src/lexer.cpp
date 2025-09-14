@@ -26,8 +26,10 @@ char Lexer::advance() {
     return c;
 }
 
-void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col) {
-    Token t{ type, value, filename, tok_line, tok_col };
+void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length) {
+    int len = tok_length >= 0 ? tok_length : static_cast<int>(value.size());
+    TokenLocation loc(filename.empty() ? "<repl>" : filename, tok_line, tok_col, len);
+    Token t{ type, value, loc };
     out.push_back(std::move(t));
 }
 
@@ -36,8 +38,8 @@ void Lexer::skip_line_comment() {
 }
 
 // scan double-quoted string with basic escapes
-void Lexer::scan_string(std::vector<Token>& out, int tok_line, int tok_col) {
-    // consumed opening quote is at current position
+void Lexer::scan_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
+    // start_index points to the opening quote position in src
     advance(); // skip opening '"'
     std::string val;
     while (!eof()) {
@@ -53,13 +55,14 @@ void Lexer::scan_string(std::vector<Token>& out, int tok_line, int tok_col) {
             else { val.push_back(nxt); advance(); }
             continue;
         }
-        // allow multiline strings: update line/col business handled by advance()
+        // allow multiline strings: advance updates line/col
         val.push_back(advance());
     }
-    add_token(out, TokenType::STRING, val, tok_line, tok_col);
+    int tok_length = static_cast<int>(i - start_index); // raw source length including quotes and escapes
+    add_token(out, TokenType::STRING, val, tok_line, tok_col, tok_length);
 }
 
-void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col) {
+void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string val;
     bool seen_dot = false;
     while (!eof()) {
@@ -68,10 +71,11 @@ void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col) {
         else if (c == '.' && !seen_dot && std::isdigit((unsigned char)peek_next())) { seen_dot = true; val.push_back(advance()); }
         else break;
     }
-    add_token(out, TokenType::NUMBER, val, tok_line, tok_col);
+    int tok_length = static_cast<int>(i - start_index);
+    add_token(out, TokenType::NUMBER, val, tok_line, tok_col, tok_length);
 }
 
-void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col) {
+void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string id;
     while (!eof()) {
         char c = peek();
@@ -96,15 +100,19 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"si", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
+
+        // control-flow keywords
+        {"kama", TokenType::KAMA},             // if
+        {"vinginevyo", TokenType::VINGINEVYO}  // else
     };
 
     auto it = keywords.find(id_lower);
+    int tok_length = static_cast<int>(i - start_index);
     if (it != keywords.end()) {
-        // For BOOLEAN token keep the lexeme so parser/evaluator can check value
-        if (it->second == TokenType::BOOLEAN) add_token(out, TokenType::BOOLEAN, id_lower, tok_line, tok_col);
-        else add_token(out, it->second, id_lower, tok_line, tok_col);
+        if (it->second == TokenType::BOOLEAN) add_token(out, TokenType::BOOLEAN, id_lower, tok_line, tok_col, tok_length);
+        else add_token(out, it->second, id_lower, tok_line, tok_col, tok_length);
     } else {
-        add_token(out, TokenType::IDENTIFIER, id, tok_line, tok_col);
+        add_token(out, TokenType::IDENTIFIER, id, tok_line, tok_col, tok_length);
     }
 }
 
@@ -115,9 +123,8 @@ void Lexer::handle_newline(std::vector<Token>& out) {
 
     int newline_line = line - 1; // token should point to the line that ended
     int newline_col = 1;
-    // emit NEWLINE only when not inside parentheses
     if (paren_level == 0) {
-        add_token(out, TokenType::NEWLINE, "", newline_line, newline_col);
+        add_token(out, TokenType::NEWLINE, "", newline_line, newline_col, 1);
 
         // compute indentation of next non-blank line
         size_t scan = i;
@@ -129,7 +136,6 @@ void Lexer::handle_newline(std::vector<Token>& out) {
             if (c == '\t') { newIndent += 4; scan++; continue; }
             if (c == '\r') { scan++; continue; }
             if (c == '\n') { scan++; continue; } // blank line: skip it
-            // found non-blank
             only_blank = false;
             break;
         }
@@ -138,11 +144,11 @@ void Lexer::handle_newline(std::vector<Token>& out) {
             int curIndent = indent_stack.back();
             if (newIndent > curIndent) {
                 indent_stack.push_back(newIndent);
-                add_token(out, TokenType::INDENT, "", line, 1);
+                add_token(out, TokenType::INDENT, "", line, 1, 0);
             } else {
                 while (newIndent < indent_stack.back()) {
                     indent_stack.pop_back();
-                    add_token(out, TokenType::DEDENT, "", line, 1);
+                    add_token(out, TokenType::DEDENT, "", line, 1, 0);
                 }
                 if (newIndent != indent_stack.back()) {
                     std::ostringstream ss;
@@ -153,7 +159,6 @@ void Lexer::handle_newline(std::vector<Token>& out) {
         }
 
         // advance i to skip those leading spaces/tabs so rest of lexing continues at content
-        // but do not skip over the next line's non-blank character
         while (!eof() && (peek() == ' ' || peek() == '\t' || peek() == '\r')) advance();
     }
 }
@@ -161,7 +166,7 @@ void Lexer::handle_newline(std::vector<Token>& out) {
 void Lexer::emit_remaining_dedents(std::vector<Token>& out) {
     while (indent_stack.size() > 1) {
         indent_stack.pop_back();
-        add_token(out, TokenType::DEDENT, "", line, col);
+        add_token(out, TokenType::DEDENT, "", line, col, 0);
     }
 }
 
@@ -185,50 +190,54 @@ void Lexer::scan_token(std::vector<Token>& out) {
     }
 
     // two-char operators
-    if (c == '*' && peek_next() == '*') { add_token(out, TokenType::POWER, "**", line, col); advance(); advance(); return; }
-    if (c == '=' && peek_next() == '=') { add_token(out, TokenType::EQUALITY, "==", line, col); advance(); advance(); return; }
-    if (c == '!' && peek_next() == '=') { add_token(out, TokenType::NOTEQUAL, "!=", line, col); advance(); advance(); return; }
-    if (c == '>' && peek_next() == '=') { add_token(out, TokenType::GREATEROREQUALTHAN, ">=", line, col); advance(); advance(); return; }
-    if (c == '<' && peek_next() == '=') { add_token(out, TokenType::LESSOREQUALTHAN, "<=", line, col); advance(); advance(); return; }
-    if (c == '+' && peek_next() == '+') { add_token(out, TokenType::INCREMENT, "++", line, col); advance(); advance(); return; }
-    if (c == '-' && peek_next() == '-') { add_token(out, TokenType::DECREMENT, "--", line, col); advance(); advance(); return; }
-    if (c == '+' && peek_next() == '=') { add_token(out, TokenType::PLUS_ASSIGN, "+=", line, col); advance(); advance(); return; }
-    if (c == '-' && peek_next() == '=') { add_token(out, TokenType::MINUS_ASSIGN, "-=", line, col); advance(); advance(); return; }
-    if (c == '&' && peek_next() == '&') { add_token(out, TokenType::AND, "&&", line, col); advance(); advance(); return; }
-    if (c == '|' && peek_next() == '|') { add_token(out, TokenType::OR, "||", line, col); advance(); advance(); return; }
+    if (c == '*' && peek_next() == '*') { add_token(out, TokenType::POWER, "**", line, col, 2); advance(); advance(); return; }
+    if (c == '=' && peek_next() == '=') { add_token(out, TokenType::EQUALITY, "==", line, col, 2); advance(); advance(); return; }
+    if (c == '!' && peek_next() == '=') { add_token(out, TokenType::NOTEQUAL, "!=", line, col, 2); advance(); advance(); return; }
+    if (c == '>' && peek_next() == '=') { add_token(out, TokenType::GREATEROREQUALTHAN, ">=", line, col, 2); advance(); advance(); return; }
+    if (c == '<' && peek_next() == '=') { add_token(out, TokenType::LESSOREQUALTHAN, "<=", line, col, 2); advance(); advance(); return; }
+    if (c == '+' && peek_next() == '+') { add_token(out, TokenType::INCREMENT, "++", line, col, 2); advance(); advance(); return; }
+    if (c == '-' && peek_next() == '-') { add_token(out, TokenType::DECREMENT, "--", line, col, 2); advance(); advance(); return; }
+    if (c == '+' && peek_next() == '=') { add_token(out, TokenType::PLUS_ASSIGN, "+=", line, col, 2); advance(); advance(); return; }
+    if (c == '-' && peek_next() == '=') { add_token(out, TokenType::MINUS_ASSIGN, "-=", line, col, 2); advance(); advance(); return; }
+    if (c == '&' && peek_next() == '&') { add_token(out, TokenType::AND, "&&", line, col, 2); advance(); advance(); return; }
+    if (c == '|' && peek_next() == '|') { add_token(out, TokenType::OR, "||", line, col, 2); advance(); advance(); return; }
 
     // single-char tokens & bookkeeping
     switch (c) {
-        case ';': add_token(out, TokenType::SEMICOLON, ";", line, col); advance(); return;
-        case ',': add_token(out, TokenType::COMMA, ",", line, col); advance(); return;
-        case '(': paren_level++; add_token(out, TokenType::OPENPARENTHESIS, "(", line, col); advance(); return;
-        case ')': if (paren_level > 0) paren_level--; add_token(out, TokenType::CLOSEPARENTHESIS, ")", line, col); advance(); return;
-        case '{': add_token(out, TokenType::OPENBRACE, "{", line, col); advance(); return;
-        case '}': add_token(out, TokenType::CLOSEBRACE, "}", line, col); advance(); return;
-        case ':': add_token(out, TokenType::COLON, ":", line, col); advance(); return;
-        case '=': add_token(out, TokenType::ASSIGN, "=", line, col); advance(); return;
-        case '+': add_token(out, TokenType::PLUS, "+", line, col); advance(); return;
-        case '-': add_token(out, TokenType::MINUS, "-", line, col); advance(); return;
-        case '*': add_token(out, TokenType::STAR, "*", line, col); advance(); return;
-        case '/': add_token(out, TokenType::SLASH, "/", line, col); advance(); return;
-        case '%': add_token(out, TokenType::PERCENT, "%", line, col); advance(); return;
-        case '>': add_token(out, TokenType::GREATERTHAN, ">", line, col); advance(); return;
-        case '<': add_token(out, TokenType::LESSTHAN, "<", line, col); advance(); return;
-        case '!': add_token(out, TokenType::NOT, "!", line, col); advance(); return;
-        case '"': scan_string(out, line, col); return;
+        case ';': add_token(out, TokenType::SEMICOLON, ";", line, col, 1); advance(); return;
+        case ',': add_token(out, TokenType::COMMA, ",", line, col, 1); advance(); return;
+        case '(': paren_level++; add_token(out, TokenType::OPENPARENTHESIS, "(", line, col, 1); advance(); return;
+        case ')': if (paren_level > 0) paren_level--; add_token(out, TokenType::CLOSEPARENTHESIS, ")", line, col, 1); advance(); return;
+        case '{': add_token(out, TokenType::OPENBRACE, "{", line, col, 1); advance(); return;
+        case '}': add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1); advance(); return;
+        case ':': add_token(out, TokenType::COLON, ":", line, col, 1); advance(); return;
+        case '=': add_token(out, TokenType::ASSIGN, "=", line, col, 1); advance(); return;
+        case '+': add_token(out, TokenType::PLUS, "+", line, col, 1); advance(); return;
+        case '-': add_token(out, TokenType::MINUS, "-", line, col, 1); advance(); return;
+        case '*': add_token(out, TokenType::STAR, "*", line, col, 1); advance(); return;
+        case '/': add_token(out, TokenType::SLASH, "/", line, col, 1); advance(); return;
+        case '%': add_token(out, TokenType::PERCENT, "%", line, col, 1); advance(); return;
+        case '>': add_token(out, TokenType::GREATERTHAN, ">", line, col, 1); advance(); return;
+        case '<': add_token(out, TokenType::LESSTHAN, "<", line, col, 1); advance(); return;
+        case '!': add_token(out, TokenType::NOT, "!", line, col, 1); advance(); return;
+        case '"': {
+            size_t start_index = i;
+            scan_string(out, line, col, start_index);
+            return;
+        }
         default: break;
     }
 
     // number
-    if (std::isdigit((unsigned char)c)) { scan_number(out, line, col); return; }
+    if (std::isdigit((unsigned char)c)) { size_t start_index = i; scan_number(out, line, col, start_index); return; }
 
     // identifier or keyword
-    if (std::isalpha((unsigned char)c) || c == '_') { scan_identifier_or_keyword(out, line, col); return; }
+    if (std::isalpha((unsigned char)c) || c == '_') { size_t start_index = i; scan_identifier_or_keyword(out, line, col, start_index); return; }
 
     // unknown char
     {
         std::string s(1, c);
-        add_token(out, TokenType::UNKNOWN, s, line, col);
+        add_token(out, TokenType::UNKNOWN, s, line, col, 1);
         advance();
         return;
     }
@@ -245,14 +254,14 @@ std::vector<Token> Lexer::tokenize() {
 
     while (!eof()) scan_token(out);
 
-    // ensure last line closed: emit a trailing NEWLINE if previous token not NEWLINE
+    // ensure last line closed: emit a trailing NEWLINE if previous token not NEWLINE/DEDENT
     if (out.empty() || (out.back().type != TokenType::NEWLINE && out.back().type != TokenType::DEDENT)) {
-        add_token(out, TokenType::NEWLINE, "", line, col);
+        add_token(out, TokenType::NEWLINE, "", line, col, 1);
     }
 
     emit_remaining_dedents(out);
 
     // final EOF token
-    add_token(out, TokenType::EOF_TOKEN, "", line, col);
+    add_token(out, TokenType::EOF_TOKEN, "", line, col, 0);
     return out;
 }

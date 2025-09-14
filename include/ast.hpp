@@ -44,6 +44,7 @@ struct CallExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> callee;
     std::vector<std::unique_ptr<ExpressionNode>> arguments;
 };
+
 // Statements
 struct StatementNode : public Node {};
 
@@ -66,6 +67,18 @@ struct PrintStatementNode : public StatementNode {
 
 struct ExpressionStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> expression;
+};
+
+// If statement: supports both colon+indent style and brace style
+// 'kama' <condition> : <INDENT> ... <DEDENT> [vinginevyo ...]
+// or 'kama' <condition> { ... } [vinginevyo { ... }]
+struct IfStatementNode : public StatementNode {
+    // token should point at the 'kama' keyword for diagnostics
+    // (parser must set node->token when creating this node)
+    std::unique_ptr<ExpressionNode> condition;
+    std::vector<std::unique_ptr<StatementNode>> then_body;
+    std::vector<std::unique_ptr<StatementNode>> else_body;
+    bool has_else = false;
 };
 
 // Program root

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ast.hpp"
+#include "token.hpp"
 #include <string>
 #include <variant>
 #include <unordered_map>
@@ -32,8 +33,8 @@ struct FunctionValue {
     // parameter names in order
     std::vector<std::string> parameters;
 
-    // pointer to function AST node (AST owns the node; ensure AST outlives function values)
-    FunctionDeclarationNode* body;
+    // shared ownership of function AST node (persisted inside evaluator)
+    std::shared_ptr<FunctionDeclarationNode> body;
 
     // closure environment captured at definition time
     EnvPtr closure;
@@ -45,7 +46,7 @@ struct FunctionValue {
     FunctionValue(
         const std::string& nm,
         const std::vector<std::string>& params,
-        FunctionDeclarationNode* b,
+        const std::shared_ptr<FunctionDeclarationNode>& b,
         const EnvPtr& env,
         const Token& tok
     )

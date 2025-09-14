@@ -4,7 +4,6 @@
 #include <sstream>
 #include <cmath>
 
-
 Evaluator::Evaluator()
   : global_env(std::make_shared<Environment>(nullptr)) {
     // Register builtins here if you want (e.g., chapisha), or leave empty.
@@ -88,14 +87,14 @@ bool Evaluator::to_bool(const Value& v) {
 // ----------------- Function calling -----------------
 
 Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, const Token& callToken) {
-    if (!fn) throw std::runtime_error("Attempt to call null function at " + callToken.filename);
+    if (!fn) throw std::runtime_error("Attempt to call null function at " + callToken.loc.to_string());
 
-    // arity check (simple)
+    // arity check (simple: require at least as many args as parameters)
     if (args.size() < fn->parameters.size()) {
         std::ostringstream ss;
         ss << "Function '" << (fn->name.empty() ? "<anonymous>" : fn->name)
            << "' expects " << fn->parameters.size() << " arguments but got " << args.size()
-           << " at " << callToken.filename << ":" << callToken.line;
+           << " at " << callToken.loc.to_string();
         throw std::runtime_error(ss.str());
     }
 
@@ -148,7 +147,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         if (!env) throw std::runtime_error("No environment when resolving identifier '" + id->name + "'");
         if (!env->has(id->name)) {
-            throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.filename + ":" + std::to_string(id->token.line));
+            throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.loc.to_string());
         }
         return env->get(id->name).value;
     }
@@ -161,7 +160,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         } else if (u->op == "-") {
             return Value{ -to_number(operand) };
         } else {
-            throw std::runtime_error("Unknown unary operator '" + u->op + "'");
+            throw std::runtime_error("Unknown unary operator '" + u->op + "' at " + u->token.loc.to_string());
         }
     }
 
@@ -170,11 +169,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         Value left = evaluate_expression(b->left.get(), env);
         Value right = evaluate_expression(b->right.get(), env);
 
-        // If operator is textual from keywords, rely on op string; otherwise map token types via op
         const std::string &op = b->op;
 
         if (op == "+" ) {
-            // string concatenation if either operand is string
             if (std::holds_alternative<std::string>(left) || std::holds_alternative<std::string>(right)) {
                 return Value{ to_string_value(left) + to_string_value(right) };
             }
@@ -192,7 +189,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         } else if (op == "**") {
             return Value{ std::pow(to_number(left), to_number(right)) };
         } else if (op == "==" || op == "sawa") {
-            // simple equality across numbers and strings/bools
             if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right))
                 return Value{ std::get<double>(left) == std::get<double>(right) };
             return Value{ to_string_value(left) == to_string_value(right) };
@@ -213,7 +209,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         } else if (op == "||" || op == "au") {
             return Value{ to_bool(left) || to_bool(right) };
         } else {
-            throw std::runtime_error("Unknown binary operator '" + op + "'");
+            throw std::runtime_error("Unknown binary operator '" + op + "' at " + b->token.loc.to_string());
         }
     }
 
@@ -226,14 +222,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         std::vector<Value> args;
         for (auto &arg : call->arguments) args.push_back(evaluate_expression(arg.get(), env));
 
-        // If callee is a function value, call it
         if (std::holds_alternative<FunctionPtr>(calleeVal)) {
             FunctionPtr fn = std::get<FunctionPtr>(calleeVal);
             return call_function(fn, args, call->token);
         }
 
-        // If callee is an identifier that resolved to a non-function, error
-        throw std::runtime_error("Attempted to call a non-function value at " + call->token.filename + ":" + std::to_string(call->token.line));
+        throw std::runtime_error("Attempted to call a non-function value at " + call->token.loc.to_string());
     }
 
     throw std::runtime_error("Unhandled expression node in evaluator");
@@ -258,17 +252,22 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     // AssignmentNode
     if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
         Value val = evaluate_expression(an->value.get(), env);
-        if (env->has(an->identifier)) {
-            auto &vref = env->get(an->identifier);
-            if (vref.is_constant) throw std::runtime_error("Cannot assign to constant '" + an->identifier + "'");
-            vref.value = val;
-        } else {
-            // If not declared, create in current env
-            Environment::Variable var;
-            var.value = val;
-            var.is_constant = false;
-            env->set(an->identifier, var);
+        // If variable exists in any env up the chain, update that variable (common semantics)
+        EnvPtr walk = env;
+        while (walk) {
+            auto it = walk->values.find(an->identifier);
+            if (it != walk->values.end()) {
+                if (it->second.is_constant) throw std::runtime_error("Cannot assign to constant '" + an->identifier + "' at " + an->token.loc.to_string());
+                it->second.value = val;
+                return;
+            }
+            walk = walk->parent;
         }
+        // Not found: create in current env
+        Environment::Variable var;
+        var.value = val;
+        var.is_constant = false;
+        env->set(an->identifier, var);
         return;
     }
 
@@ -293,18 +292,25 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
     // FunctionDeclarationNode
     if (auto fd = dynamic_cast<FunctionDeclarationNode*>(stmt)) {
-        // Create a FunctionValue and bind it in current environment by name
+        // Persist the function AST body into a shared_ptr owned by the evaluator/function value.
+        auto persisted = std::make_shared<FunctionDeclarationNode>();
+        persisted->name = fd->name;
+        persisted->parameters = fd->parameters;
+        persisted->token = fd->token;
+        // move statements out of the parser-owned node into persisted storage
+        persisted->body = std::move(fd->body);
+
         auto fn = std::make_shared<FunctionValue>(
-            fd->name,
-            fd->parameters,
-            fd,
+            persisted->name,
+            persisted->parameters,
+            persisted,
             env,
-            fd->token
+            persisted->token
         );
         Environment::Variable var;
         var.value = fn;
         var.is_constant = true; // functions are constants by default
-        env->set(fd->name, var);
+        env->set(persisted->name, var);
         return;
     }
 
@@ -318,19 +324,35 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         return;
     }
 
-    throw std::runtime_error("Unhandled statement node in evaluator");
+    // IfStatementNode (kama / vinginevyo)
+    if (auto ifn = dynamic_cast<IfStatementNode*>(stmt)) {
+        Value condVal = evaluate_expression(ifn->condition.get(), env);
+        bool cond = to_bool(condVal);
+
+        // execute chosen block in a new child environment so local declarations are block-scoped
+        if (cond) {
+            auto blockEnv = std::make_shared<Environment>(env);
+            for (auto &s : ifn->then_body) {
+                evaluate_statement(s.get(), blockEnv, return_value, did_return);
+                if (did_return && *did_return) return;
+            }
+        } else if (ifn->has_else) {
+            auto blockEnv = std::make_shared<Environment>(env);
+            for (auto &s : ifn->else_body) {
+                evaluate_statement(s.get(), blockEnv, return_value, did_return);
+                if (did_return && *did_return) return;
+            }
+        }
+        return;
+    }
+
+    throw std::runtime_error("Unhandled statement node in evaluator at " + stmt->token.loc.to_string());
 }
 
 // ----------------- Program evaluation -----------------
 
 void Evaluator::evaluate(ProgramNode* program) {
     if (!program) return;
-
-    // initialize global environment
-    //global_env = std::make_shared<Environment>(nullptr);
-
-    // Optionally register builtins (e.g., 'print' callable) -- here we rely on print statements,
-    // but you may want to add functions in global_env if desired.
 
     // Execute top-level statements
     Value dummy_ret;
