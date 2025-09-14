@@ -12,7 +12,7 @@ include_directories(include)
 file(GLOB SOURCES "src/*.cpp")
 
 # Create executable
-add_executable(swazi ${SOURCES})
+add_executable(Swazi ${SOURCES})
 
 # Optional: link external libs here
 # target_link_libraries(SwaziLang PRIVATE <lib>)

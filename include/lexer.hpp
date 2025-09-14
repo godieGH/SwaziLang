@@ -1,18 +1,37 @@
 #pragma once
+#include "token.hpp"
 #include <string>
 #include <vector>
-#include "token.hpp"
 
 class Lexer {
 public:
-    Lexer(const std::string& source, const std::string& filename);
-
+    Lexer(const std::string& source, const std::string& filename = "");
     std::vector<Token> tokenize();
 
 private:
-    std::string source;
-    std::string filename;
-    size_t position = 0;
-    int line = 1;           // track line numbers
-    int col = 1;            // track column numbers
+    const std::string src;
+    const std::string filename;
+    size_t i = 0;
+    int line = 1;
+    int col = 1;
+
+    // indentation stack (base 0)
+    std::vector<int> indent_stack;
+
+    // parentheses level (suppress NEWLINE inside parentheses)
+    int paren_level = 0;
+
+    // helpers
+    bool eof() const;
+    char peek(size_t offset = 0) const;
+    char peek_next() const;
+    char advance();
+    void add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col);
+    void scan_token(std::vector<Token>& out);
+    void scan_number(std::vector<Token>& out, int tok_line, int tok_col);
+    void scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col);
+    void scan_string(std::vector<Token>& out, int tok_line, int tok_col);
+    void skip_line_comment();
+    void handle_newline(std::vector<Token>& out);
+    void emit_remaining_dedents(std::vector<Token>& out);
 };

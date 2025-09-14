@@ -40,14 +40,46 @@ void Parser::expect(TokenType t, const std::string& errMsg) {
 std::unique_ptr<ProgramNode> Parser::parse() {
     auto program = std::make_unique<ProgramNode>();
     while (peek().type != TokenType::EOF_TOKEN) {
-        program->body.push_back(parse_statement());
+        // skip separators and stray dedent/indent at top-level
+        if (peek().type == TokenType::NEWLINE || peek().type == TokenType::SEMICOLON ||
+            peek().type == TokenType::DEDENT || peek().type == TokenType::INDENT) {
+            consume();
+            continue;
+        }
+        auto stmt = parse_statement();
+        if (stmt) program->body.push_back(std::move(stmt));
+        else break; // defensive: stop if parser returned null (EOF or similar)
     }
     return program;
 }
 
 // ---------- statements ----------
 std::unique_ptr<StatementNode> Parser::parse_statement() {
-    Token p = peek();
+    // skip leading newlines and any leading INDENT tokens before a statement
+    while (peek().type == TokenType::NEWLINE ||
+           peek().type == TokenType::INDENT) {
+        consume();
+    }
+
+    // If we've reached EOF after skipping separators, return null.
+    if (peek().type == TokenType::EOF_TOKEN) return nullptr;
+
+    // If the next token is a DEDENT (end of indented block) or a CLOSEBRACE
+    // (end of brace block), return null so the caller can handle block end.
+    if (peek().type == TokenType::DEDENT || peek().type == TokenType::CLOSEBRACE) {
+        return nullptr;
+    }
+
+    Token p = peek(); // now capture the first non-newline/non-indent token
+
+    if (p.type == TokenType::KAZI) {
+        consume(); // consume 'kazi'
+        return parse_function_declaration();
+    }
+    if (p.type == TokenType::RUDISHA) {
+        consume(); // consume 'rudisha'
+        return parse_return_statement();
+    }
     if (p.type == TokenType::DATA) {
         consume();
         return parse_variable_declaration();
@@ -62,7 +94,6 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
     }
     return parse_assignment_or_expression_statement();
 }
-
 std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
     bool is_constant = false;
 
@@ -212,6 +243,88 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
     stmt->expression = std::move(expr);
     return stmt;
 }
+
+std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
+    // The 'kazi' token was already consumed by parse_statement
+    
+    expect(TokenType::IDENTIFIER, "Expected function name after 'kazi'");
+    Token idTok = tokens[position - 1];
+    
+    auto funcNode = std::make_unique<FunctionDeclarationNode>();
+    funcNode->name = idTok.value;
+    funcNode->token = idTok;
+
+    // Parse parameters
+    while (peek().type == TokenType::IDENTIFIER) {
+        funcNode->parameters.push_back(consume().value);
+        if (!match(TokenType::COMMA)) {
+            break; // No more commas, so parameter list is done
+        }
+    }
+    
+    // Now, branch on the token that starts the function body
+    if (match(TokenType::COLON)) {
+        // --- Indentation-based body ---
+        expect(TokenType::NEWLINE, "Expected newline after ':' in function declaration");
+        expect(TokenType::INDENT, "Expected indented block for function body");
+        
+        // indentation-based body (defensive: parse_statement may return null at EOF)
+        while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
+            auto stmt = parse_statement();
+            if (!stmt) break; // EOF or nothing more
+            funcNode->body.push_back(std::move(stmt));
+        }
+        
+        expect(TokenType::DEDENT, "Expected dedent to close function body");
+        
+    } else if (match(TokenType::OPENBRACE)) {
+        // --- Brace-based body ---
+        // Loop but skip separators before attempting to parse a statement so that
+        // trailing NEWLINE/INDENT/DEDENT before '}' don't cause parse_statement to
+        // receive a '}' token unexpectedly.
+        while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
+            // consume any separators between statements
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+                consume();
+            }
+            if (peek().type == TokenType::CLOSEBRACE || peek().type == TokenType::EOF_TOKEN) break;
+            auto stmt = parse_statement();
+            if (!stmt) break;
+            funcNode->body.push_back(std::move(stmt));
+        }
+        
+        expect(TokenType::CLOSEBRACE, "Expected '}' to close function body");
+        
+    } else {
+        // --- Syntax Error ---
+        expect(TokenType::COLON, "Expected ':' or '{' to begin function body");
+    }
+    
+    return funcNode;
+}
+std::unique_ptr<StatementNode> Parser::parse_return_statement() {
+    // The 'rudisha' token was already consumed by parse_statement
+    Token kwTok = tokens[position - 1];
+
+    auto retNode = std::make_unique<ReturnStatementNode>();
+    retNode->token = kwTok;
+
+    // The return value is optional. If the next token is a semicolon or newline,
+    // it's a return with no value.
+    if (peek().type != TokenType::SEMICOLON && peek().type != TokenType::NEWLINE && peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::DEDENT) {
+        retNode->value = parse_expression();
+    }
+    
+    // Optionally consume a semicolon at the end of the statement
+    if (peek().type == TokenType::SEMICOLON) {
+        consume();
+    }
+    
+    return retNode;
+}
+
+
+
 // ---------- expressions (precedence) ----------
 std::unique_ptr<ExpressionNode> Parser::parse_expression() {
     return parse_logical_or();

@@ -41,10 +41,9 @@ struct BinaryExpressionNode : public ExpressionNode {
 };
 
 struct CallExpressionNode : public ExpressionNode {
-    std::unique_ptr<ExpressionNode> callee; // usually IdentifierNode
+    std::unique_ptr<ExpressionNode> callee;
     std::vector<std::unique_ptr<ExpressionNode>> arguments;
 };
-
 // Statements
 struct StatementNode : public Node {};
 
@@ -72,4 +71,16 @@ struct ExpressionStatementNode : public StatementNode {
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;
+};
+
+// Function declaration
+struct FunctionDeclarationNode : public StatementNode {
+    std::string name; // function name
+    std::vector<std::string> parameters; // parameter names
+    std::vector<std::unique_ptr<StatementNode>> body; // function body statements
+};
+
+// Return statement
+struct ReturnStatementNode : public StatementNode {
+    std::unique_ptr<ExpressionNode> value; // expression to return
 };
