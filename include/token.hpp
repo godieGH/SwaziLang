@@ -31,6 +31,11 @@ enum class TokenType {
     SLASH,      // /
     PERCENT,    // % (remainder)
     POWER,      // ** (exponent)
+    
+    PLUS_ASSIGN,
+    MINUS_ASSIGN,
+    INCREMENT,
+    DECREMENT,
 
     // logical
     AND,        // && or 'na'

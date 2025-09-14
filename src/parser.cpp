@@ -71,17 +71,22 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
         is_constant = true;
     }
 
-    // Expect identifier next and capture its token immediately
     expect(TokenType::IDENTIFIER, "Expected identifier after 'data'");
-    Token idTok = tokens[position - 1]; // identifier token
+    Token idTok = tokens[position - 1];
     std::string name = idTok.value;
 
     std::unique_ptr<ExpressionNode> value = nullptr;
 
-    // Optional assignment
-    if (peek().type == TokenType::ASSIGN) {
-        consume(); // consume '='
+    if (is_constant) {
+        // force an initializer for constants
+        expect(TokenType::ASSIGN, "Constant '" + name + "' must be initialized");
         value = parse_expression();
+    } else {
+        // non-constants: assignment is optional
+        if (peek().type == TokenType::ASSIGN) {
+            consume();
+            value = parse_expression();
+        }
     }
 
     if (peek().type == TokenType::SEMICOLON) consume();
@@ -122,20 +127,68 @@ std::unique_ptr<StatementNode> Parser::parse_print_statement(bool newline) {
 std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement() {
     if (peek().type == TokenType::IDENTIFIER) {
         Token idTok = consume();
+        std::string name = idTok.value;
+
         if (peek().type == TokenType::ASSIGN) {
-            // assignment
+            // normal assignment
             consume(); // '='
             auto value = parse_expression();
             if (peek().type == TokenType::SEMICOLON) consume();
             auto node = std::make_unique<AssignmentNode>();
-            node->identifier = idTok.value;
+            node->identifier = name;
             node->value = std::move(value);
             node->token = idTok;
             return node;
-        } else {
+        }
+        else if (peek().type == TokenType::PLUS_ASSIGN || peek().type == TokenType::MINUS_ASSIGN) {
+            Token opTok = consume(); // += or -=
+            auto right = parse_expression();
+
+            // build BinaryExpressionNode: x + right OR x - right
+            auto bin = std::make_unique<BinaryExpressionNode>();
+            bin->op = (opTok.type == TokenType::PLUS_ASSIGN) ? "+" : "-";
+            auto leftIdent = std::make_unique<IdentifierNode>();
+            leftIdent->name = name;
+            leftIdent->token = idTok;
+            bin->left = std::move(leftIdent);
+            bin->right = std::move(right);
+            bin->token = opTok;
+
+            auto assign = std::make_unique<AssignmentNode>();
+            assign->identifier = name;
+            assign->value = std::move(bin);
+            assign->token = idTok;
+            if (peek().type == TokenType::SEMICOLON) consume();
+            return assign;
+        }
+        else if (peek().type == TokenType::INCREMENT || peek().type == TokenType::DECREMENT) {
+            Token opTok = consume(); // ++ or --
+
+            // build BinaryExpressionNode: x + 1 OR x - 1
+            auto bin = std::make_unique<BinaryExpressionNode>();
+            bin->op = (opTok.type == TokenType::INCREMENT) ? "+" : "-";
+            auto leftIdent = std::make_unique<IdentifierNode>();
+            leftIdent->name = name;
+            leftIdent->token = idTok;
+            bin->left = std::move(leftIdent);
+
+            auto one = std::make_unique<NumericLiteralNode>();
+            one->value = 1;
+            one->token = opTok; // reuse operator token
+            bin->right = std::move(one);
+            bin->token = opTok;
+
+            auto assign = std::make_unique<AssignmentNode>();
+            assign->identifier = name;
+            assign->value = std::move(bin);
+            assign->token = idTok;
+            if (peek().type == TokenType::SEMICOLON) consume();
+            return assign;
+        }
+        else {
             // Could be call or identifier-expression statement
             auto ident = std::make_unique<IdentifierNode>();
-            ident->name = idTok.value;
+            ident->name = name;
             ident->token = idTok;
             if (peek().type == TokenType::OPENPARENTHESIS) {
                 auto call = parse_call(std::move(ident));
@@ -159,7 +212,6 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
     stmt->expression = std::move(expr);
     return stmt;
 }
-
 // ---------- expressions (precedence) ----------
 std::unique_ptr<ExpressionNode> Parser::parse_expression() {
     return parse_logical_or();
