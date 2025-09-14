@@ -8,6 +8,9 @@
 #include "parser.hpp"
 #include "evaluator.hpp"
 
+#include <filesystem> 
+namespace fs = std::filesystem;
+
 // Optional debug token printer (declare if you link it)
 // void print_tokens(const std::vector<Token>& tokens);
 
@@ -98,18 +101,67 @@ static void run_repl_mode() {
     }
 }
 
+static std::optional<fs::path> find_file_with_extensions(const fs::path &base) {
+    const std::vector<std::string> exts = { ".sl", ".swz" }; // order matters
+    fs::path dir = base.parent_path();                // may be empty
+    std::string filename = base.filename().string();  // bare filename (no dir)
+
+    for (const auto &ext : exts) {
+        fs::path candidate;
+        if (dir.empty()) {
+            candidate = fs::current_path() / (filename + ext);
+        } else {
+            candidate = dir / (filename + ext);
+        }
+        if (fs::exists(candidate)) return candidate;
+    }
+    return std::nullopt;
+}
+
+
+
 int main(int argc, char* argv[]) {
-    // If a filename is provided, run file mode. If "-i" or no args, start REPL.
     if (argc == 1) {
         run_repl_mode();
         return 0;
     }
+
     std::string arg = argv[1];
     if (arg == "-i") {
         run_repl_mode();
         return 0;
     }
-    // Otherwise treat argument as filename
-    run_file_mode(arg);
+
+    fs::path p(arg);
+    fs::path file_to_run;
+
+    if (p.has_extension()) {
+        // User provided explicit filename (e.g., app.sl or dir/app.swz)
+        if (fs::exists(p)) {
+            file_to_run = p;
+        } else {
+            std::cerr << "Error: File not found: " << p << std::endl;
+            return 1;
+        }
+    } else {
+        // Try basename with .sl/.swz in the provided directory (or current dir).
+        auto found = find_file_with_extensions(p);
+        if (found.has_value()) {
+            file_to_run = found.value();
+        } else {
+            // Build helpful error showing what was tried
+            fs::path dir = p.parent_path();
+            std::string filename = p.filename().string();
+            std::vector<fs::path> tried;
+            tried.push_back(dir.empty() ? fs::current_path() / (filename + ".sl") : dir / (filename + ".sl"));
+            tried.push_back(dir.empty() ? fs::current_path() / (filename + ".swz") : dir / (filename + ".swz"));
+
+            std::cerr << "Error: Could not find file for base name '" << arg << "'. Tried:\n";
+            for (const auto &t : tried) std::cerr << "  " << t << "\n";
+            return 1;
+        }
+    }
+
+    run_file_mode(file_to_run.string());
     return 0;
 }

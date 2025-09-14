@@ -16,6 +16,9 @@ enum class TokenType {
     // control-flow keywords (if / else)
     KAMA,         // 'kama' (if)
     VINGINEVYO,   // 'vinginevyo' (else)
+    FOR,
+    WHILE,
+    DOWHILE,
 
     // literals & identifiers
     IDENTIFIER,
