@@ -1,320 +1,342 @@
 #include "evaluator.hpp"
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
+#include <sstream>
 #include <cmath>
-#include <type_traits>
 
-// Helper: convert Value -> double (throws if not numeric)
+
+Evaluator::Evaluator()
+  : global_env(std::make_shared<Environment>(nullptr)) {
+    // Register builtins here if you want (e.g., chapisha), or leave empty.
+}
+
+// ----------------- Environment methods -----------------
+
+bool Environment::has(const std::string& name) const {
+    auto it = values.find(name);
+    if (it != values.end()) return true;
+    if (parent) return parent->has(name);
+    return false;
+}
+
+Environment::Variable& Environment::get(const std::string& name) {
+    auto it = values.find(name);
+    if (it != values.end()) return it->second;
+    if (parent) return parent->get(name);
+    throw std::runtime_error("Undefined variable '" + name + "'");
+}
+
+void Environment::set(const std::string& name, const Variable& var) {
+    // If variable exists in this environment, replace it here.
+    // Otherwise create in current environment (no automatic up-chain assignment).
+    values[name] = var;
+}
+
+// ----------------- Evaluator helpers -----------------
+
+static std::string value_type_name(const Value& v) {
+    if (std::holds_alternative<std::monostate>(v)) return "void";
+    if (std::holds_alternative<double>(v)) return "number";
+    if (std::holds_alternative<std::string>(v)) return "string";
+    if (std::holds_alternative<bool>(v)) return "boolean";
+    if (std::holds_alternative<FunctionPtr>(v)) return "function";
+    return "unknown";
+}
+
 double Evaluator::to_number(const Value& v) {
-   if (std::holds_alternative<double>(v)) return std::get<double>(v);
-   if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? 1.0 : 0.0;
-   // strings can't be implicitly converted in arithmetic here
-   throw std::runtime_error("Type error: expected number");
+    if (std::holds_alternative<double>(v)) return std::get<double>(v);
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? 1.0 : 0.0;
+    if (std::holds_alternative<std::string>(v)) {
+        const auto &s = std::get<std::string>(v);
+        try {
+            size_t idx = 0;
+            double d = std::stod(s, &idx);
+            if (idx == 0) throw std::invalid_argument("no conversion");
+            return d;
+        } catch (...) {
+            throw std::runtime_error("Cannot convert string '" + s + "' to number");
+        }
+    }
+    throw std::runtime_error("Cannot convert value of type " + value_type_name(v) + " to number");
 }
 
-// Helper: convert Value -> string
 std::string Evaluator::to_string_value(const Value& v) {
-   if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
-   if (std::holds_alternative<double>(v)) {
-      std::ostringstream ss;
-      ss << std::get<double>(v);
-      return ss.str();
-   }
-   if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
-   return {};
+    if (std::holds_alternative<std::monostate>(v)) return "";
+    if (std::holds_alternative<double>(v)) {
+        std::ostringstream ss;
+        double d = std::get<double>(v);
+        // print integers without decimal when appropriate
+        if (std::fabs(d - std::round(d)) < 1e-12) ss << (long long)std::llround(d);
+        else ss << d;
+        return ss.str();
+    }
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
+    if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
+    if (std::holds_alternative<FunctionPtr>(v)) return "<function:" + (std::get<FunctionPtr>(v)->name.empty() ? "<anon>" : std::get<FunctionPtr>(v)->name) + ">";
+    return "";
 }
 
-// Helper: convert Value -> bool (throws if not bool)
 bool Evaluator::to_bool(const Value& v) {
-   if (std::holds_alternative<bool>(v)) return std::get<bool>(v);
-   // permissive conversions for numbers: 0 -> false, non-zero -> true
-   if (std::holds_alternative<double>(v)) return std::get<double>(v) != 0.0;
-   // strings: non-empty -> true (optional; we keep strict and throw)
-   throw std::runtime_error("Type error: expected boolean");
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v);
+    if (std::holds_alternative<double>(v)) return std::get<double>(v) != 0.0;
+    if (std::holds_alternative<std::string>(v)) return !std::get<std::string>(v).empty();
+    if (std::holds_alternative<std::monostate>(v)) return false;
+    if (std::holds_alternative<FunctionPtr>(v)) return true;
+    return false;
 }
 
-static std::string format_location(const Token &t) {
-   if (t.filename.empty()) return std::string();
-   return " in file '" + t.filename + "' at line " + std::to_string(t.line) + ", column " + std::to_string(t.col);
+// ----------------- Function calling -----------------
+
+Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, const Token& callToken) {
+    if (!fn) throw std::runtime_error("Attempt to call null function at " + callToken.filename);
+
+    // arity check (simple)
+    if (args.size() < fn->parameters.size()) {
+        std::ostringstream ss;
+        ss << "Function '" << (fn->name.empty() ? "<anonymous>" : fn->name)
+           << "' expects " << fn->parameters.size() << " arguments but got " << args.size()
+           << " at " << callToken.filename << ":" << callToken.line;
+        throw std::runtime_error(ss.str());
+    }
+
+    // Create a new environment with closure as parent (lexical scoping)
+    auto local = std::make_shared<Environment>(fn->closure);
+
+    // Bind parameters
+    for (size_t i = 0; i < fn->parameters.size(); ++i) {
+        Environment::Variable var;
+        var.value = args[i];
+        var.is_constant = false;
+        local->set(fn->parameters[i], var);
+    }
+
+    // Execute the function body
+    Value ret_val = std::monostate{};
+    bool did_return = false;
+
+    for (auto &stmt_uptr : fn->body->body) {
+        evaluate_statement(stmt_uptr.get(), local, &ret_val, &did_return);
+        if (did_return) break;
+    }
+
+    if (did_return) return ret_val;
+    // If no return, return void (monostate)
+    return std::monostate{};
 }
 
-// Evaluate an expression node
-Value Evaluator::evaluate_expression(ExpressionNode* expr) {
-   if (!expr) throw std::runtime_error("Null expression");
+// ----------------- Expression evaluation -----------------
 
-   // small helpers that add location info when converters throw
-   auto ensure_number = [&](const Value &v, const Token &tok) -> double {
-      try {
-         return to_number(v);
-      } catch (const std::runtime_error &e) {
-         throw std::runtime_error(std::string(e.what()) + format_location(tok));
-      }
-   };
-   auto ensure_bool = [&](const Value &v, const Token &tok) -> bool {
-      try {
-         return to_bool(v);
-      } catch (const std::runtime_error &e) {
-         throw std::runtime_error(std::string(e.what()) + format_location(tok));
-      }
-   };
+Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
+    if (!expr) return std::monostate{};
 
-   // Literals
-   if (auto n = dynamic_cast<NumericLiteralNode*>(expr)) {
-      return n->value;
-   }
-   if (auto s = dynamic_cast<StringLiteralNode*>(expr)) {
-      return s->value;
-   }
-   if (auto b = dynamic_cast<BooleanLiteralNode*>(expr)) {
-      return b->value;
-   }
+    // Numeric literal
+    if (auto n = dynamic_cast<NumericLiteralNode*>(expr)) {
+        return Value{ n->value };
+    }
 
-   // Identifier (variable read)
-   if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
-      auto it = environment.find(id->name);
-      if (it != environment.end()) {
-         return it->second.value; // now we read value from Variable
-      }
-      throw std::runtime_error(
-         "Undefined variable '" + id->name + "'" + format_location(id->token)
-      );
-   }
+    // String literal
+    if (auto s = dynamic_cast<StringLiteralNode*>(expr)) {
+        return Value{ s->value };
+    }
 
-   // Unary
-   if (auto u = dynamic_cast<UnaryExpressionNode*>(expr)) {
-      Value v = evaluate_expression(u->operand.get());
-      if (u->op == "-" || u->op == "neg") {
-         double num = ensure_number(v, u->token);
-         return -num;
-      }
-      if (u->op == "!" || u->op == "not") {
-         bool bv = ensure_bool(v, u->token);
-         return !bv;
-      }
-      throw std::runtime_error(
-         "Unknown unary operator '" + u->op + "'" + format_location(u->token)
-      );
-   }
+    // Boolean literal
+    if (auto b = dynamic_cast<BooleanLiteralNode*>(expr)) {
+        return Value{ b->value };
+    }
 
-   // Binary
-   if (auto bin = dynamic_cast<BinaryExpressionNode*>(expr)) {
-      Value left = evaluate_expression(bin->left.get());
-      Value right = evaluate_expression(bin->right.get());
-      const std::string& op = bin->op;
-      const Token &loc = bin->token;
+    // Identifier
+    if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
+        if (!env) throw std::runtime_error("No environment when resolving identifier '" + id->name + "'");
+        if (!env->has(id->name)) {
+            throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.filename + ":" + std::to_string(id->token.line));
+        }
+        return env->get(id->name).value;
+    }
 
-      // Arithmetic: + supports string concatenation if either operand is string
-      if (op == "+") {
-         if (std::holds_alternative<std::string>(left) || std::holds_alternative<std::string>(right)) {
-            return to_string_value(left) + to_string_value(right);
-         }
-         double a = ensure_number(left, loc);
-         double b = ensure_number(right, loc);
-         return a + b;
-      }
-      if (op == "-") {
-         double a = ensure_number(left, loc);
-         double b = ensure_number(right, loc);
-         return a - b;
-      }
-      if (op == "*") {
-         double a = ensure_number(left, loc);
-         double b = ensure_number(right, loc);
-         return a * b;
-      }
-      if (op == "/") {
-         double a = ensure_number(left, loc);
-         double b = ensure_number(right, loc);
-         if (b == 0.0) throw std::runtime_error(std::string("Division by zero") + format_location(loc));
-         return a / b;
-      }
-      if (op == "%") {
-         double a = ensure_number(left, loc);
-         double b = ensure_number(right, loc);
-         if (b == 0.0) throw std::runtime_error(std::string("Division by zero (mod)") + format_location(loc));
-         return std::fmod(a, b);
-      }
-      if (op == "**") {
-         double a = ensure_number(left, loc);
-         double b = ensure_number(right, loc);
-         return std::pow(a, b);
-      }
+    // Unary
+    if (auto u = dynamic_cast<UnaryExpressionNode*>(expr)) {
+        Value operand = evaluate_expression(u->operand.get(), env);
+        if (u->op == "!" || u->op == "si") {
+            return Value{ !to_bool(operand) };
+        } else if (u->op == "-") {
+            return Value{ -to_number(operand) };
+        } else {
+            throw std::runtime_error("Unknown unary operator '" + u->op + "'");
+        }
+    }
 
-      // Comparisons (return bool)
-      if (op == ">") {
-         if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right)) {
-            return std::get<double>(left) > std::get<double>(right);
-         }
-         if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right)) {
-            return std::get<std::string>(left) > std::get<std::string>(right);
-         }
-         throw std::runtime_error(std::string("Type error: unsupported '>' operand types") + format_location(loc));
-      }
-      if (op == ">=") {
-         if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right)) {
-            return std::get<double>(left) >= std::get<double>(right);
-         }
-         if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right)) {
-            return std::get<std::string>(left) >= std::get<std::string>(right);
-         }
-         throw std::runtime_error(std::string("Type error: unsupported '>=' operand types") + format_location(loc));
-      }
-      if (op == "<") {
-         if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right)) {
-            return std::get<double>(left) < std::get<double>(right);
-         }
-         if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right)) {
-            return std::get<std::string>(left) < std::get<std::string>(right);
-         }
-         throw std::runtime_error(std::string("Type error: unsupported '<' operand types") + format_location(loc));
-      }
-      if (op == "<=") {
-         if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right)) {
-            return std::get<double>(left) <= std::get<double>(right);
-         }
-         if (std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right)) {
-            return std::get<std::string>(left) <= std::get<std::string>(right);
-         }
-         throw std::runtime_error(std::string("Type error: unsupported '<=' operand types") + format_location(loc));
-      }
+    // Binary
+    if (auto b = dynamic_cast<BinaryExpressionNode*>(expr)) {
+        Value left = evaluate_expression(b->left.get(), env);
+        Value right = evaluate_expression(b->right.get(), env);
 
-      // Equality & inequality (work across types reasonably)
-      if (op == "==" || op == "sawa") {
-         if (left.index() == right.index()) {
-            return left == right;
-         }
-         return false;
-      }
-      if (op == "!=" || op == "sisawa") {
-         if (left.index() == right.index()) {
-            return !(left == right);
-         }
-         return true;
-      }
+        // If operator is textual from keywords, rely on op string; otherwise map token types via op
+        const std::string &op = b->op;
 
-      // Logical (AND / OR)
-      if (op == "&&" || op == "na") {
-         bool a = ensure_bool(left, loc);
-         if (!a) return false; // short-circuit
-         bool b = ensure_bool(right, loc);
-         return a && b;
-      }
-      if (op == "||" || op == "au") {
-         bool a = ensure_bool(left, loc);
-         if (a) return true; // short-circuit
-         bool b = ensure_bool(right, loc);
-         return a || b;
-      }
-
-      throw std::runtime_error(std::string("Unknown binary operator: ") + op + format_location(loc));
-   }
-
-   // Call expression (for builtins)
-   if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
-      // expect callee to be identifier for builtins
-      if (auto calleeId = dynamic_cast<IdentifierNode*>(call->callee.get())) {
-         std::string fname = calleeId->name;
-         // evaluate args
-         std::vector<Value> args;
-         args.reserve(call->arguments.size());
-         for (auto &a: call->arguments) args.push_back(evaluate_expression(a.get()));
-
-         if (fname == "chapisha" || fname == "andika") {
-            // print args separated by space
-            for (size_t i = 0; i < args.size(); ++i) {
-               std::cout << to_string_value(args[i]);
-               if (i + 1 < args.size()) std::cout << " ";
+        if (op == "+" ) {
+            // string concatenation if either operand is string
+            if (std::holds_alternative<std::string>(left) || std::holds_alternative<std::string>(right)) {
+                return Value{ to_string_value(left) + to_string_value(right) };
             }
-            if (fname == "chapisha") std::cout << std::endl;
-            // return an empty string as the "void" value (safe)
-            return std::string("");
-         }
+            return Value{ to_number(left) + to_number(right) };
+        } else if (op == "-") {
+            return Value{ to_number(left) - to_number(right) };
+        } else if (op == "*") {
+            return Value{ to_number(left) * to_number(right) };
+        } else if (op == "/") {
+            return Value{ to_number(left) / to_number(right) };
+        } else if (op == "%") {
+            double a = to_number(left);
+            double b2 = to_number(right);
+            return Value{ std::fmod(a, b2) };
+        } else if (op == "**") {
+            return Value{ std::pow(to_number(left), to_number(right)) };
+        } else if (op == "==" || op == "sawa") {
+            // simple equality across numbers and strings/bools
+            if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right))
+                return Value{ std::get<double>(left) == std::get<double>(right) };
+            return Value{ to_string_value(left) == to_string_value(right) };
+        } else if (op == "!=" || op == "sisawa") {
+            if (std::holds_alternative<double>(left) && std::holds_alternative<double>(right))
+                return Value{ std::get<double>(left) != std::get<double>(right) };
+            return Value{ to_string_value(left) != to_string_value(right) };
+        } else if (op == ">" ) {
+            return Value{ to_number(left) > to_number(right) };
+        } else if (op == "<" ) {
+            return Value{ to_number(left) < to_number(right) };
+        } else if (op == ">=" ) {
+            return Value{ to_number(left) >= to_number(right) };
+        } else if (op == "<=" ) {
+            return Value{ to_number(left) <= to_number(right) };
+        } else if (op == "&&" || op == "na") {
+            return Value{ to_bool(left) && to_bool(right) };
+        } else if (op == "||" || op == "au") {
+            return Value{ to_bool(left) || to_bool(right) };
+        } else {
+            throw std::runtime_error("Unknown binary operator '" + op + "'");
+        }
+    }
 
-         // Other builtins can be added here.
-         throw std::runtime_error(std::string("Unknown function: ") + fname + format_location(calleeId->token));
-      }
-      throw std::runtime_error(std::string("Unsupported call expression (non-identifier callee)") + format_location(call->token));
-   }
+    // Call expression
+    if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
+        // Evaluate callee expression first
+        Value calleeVal = evaluate_expression(call->callee.get(), env);
 
-   // Fallback: include token from expr
-   throw std::runtime_error(std::string("Unknown expression type in evaluator") + format_location(expr->token));
+        // Evaluate arguments
+        std::vector<Value> args;
+        for (auto &arg : call->arguments) args.push_back(evaluate_expression(arg.get(), env));
+
+        // If callee is a function value, call it
+        if (std::holds_alternative<FunctionPtr>(calleeVal)) {
+            FunctionPtr fn = std::get<FunctionPtr>(calleeVal);
+            return call_function(fn, args, call->token);
+        }
+
+        // If callee is an identifier that resolved to a non-function, error
+        throw std::runtime_error("Attempted to call a non-function value at " + call->token.filename + ":" + std::to_string(call->token.line));
+    }
+
+    throw std::runtime_error("Unhandled expression node in evaluator");
 }
 
-// Evaluate a statement node
-void Evaluator::evaluate_statement(StatementNode* stmt) {
-   if (!stmt) return;
+// ----------------- Statement evaluation -----------------
 
-   if (auto decl = dynamic_cast<VariableDeclarationNode*>(stmt)) {
-      Value v;
-      if (decl->value) {
-         v = evaluate_expression(decl->value.get());
-      } else {
-         v = "undefined";
-      }
+void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return) {
+    if (!stmt) return;
 
-      auto it = environment.find(decl->identifier);
-      if (it != environment.end()) {
-         if (it->second.is_constant) {
-            throw std::runtime_error(std::string("Variable already declared as constant: ") + decl->identifier + format_location(decl->token));
-         }
-         it->second.value = v;
-         it->second.is_constant = decl->is_constant;
-         return;
-      }
+    // VariableDeclarationNode
+    if (auto vd = dynamic_cast<VariableDeclarationNode*>(stmt)) {
+        Value val = std::monostate{};
+        if (vd->value) val = evaluate_expression(vd->value.get(), env);
+        Environment::Variable var;
+        var.value = val;
+        var.is_constant = vd->is_constant;
+        env->set(vd->identifier, var);
+        return;
+    }
 
-      environment[decl->identifier] = Variable {
-         v,
-         decl->is_constant
-      };
-      return;
-   }
-   
-   if (auto assign = dynamic_cast<AssignmentNode*>(stmt)) {
-      Value v = evaluate_expression(assign->value.get());
-      auto it = environment.find(assign->identifier);
-      if (it == environment.end()) {
-         // implicit declaration on assignment -> create mutable variable
-         environment[assign->identifier] = Variable {
-            v,
-            false
-         };
-         return;
-      }
-      // variable exists; check if constant
-      if (it->second.is_constant) {
-         throw std::runtime_error(std::string("Cannot assign to constant: ") + assign->identifier + format_location(assign->token));
-      }
-      // update value
-      it->second.value = v; // <-- must assign to .value
-      return;
-   }
+    // AssignmentNode
+    if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
+        Value val = evaluate_expression(an->value.get(), env);
+        if (env->has(an->identifier)) {
+            auto &vref = env->get(an->identifier);
+            if (vref.is_constant) throw std::runtime_error("Cannot assign to constant '" + an->identifier + "'");
+            vref.value = val;
+        } else {
+            // If not declared, create in current env
+            Environment::Variable var;
+            var.value = val;
+            var.is_constant = false;
+            env->set(an->identifier, var);
+        }
+        return;
+    }
 
-   if (auto print = dynamic_cast<PrintStatementNode*>(stmt)) {
-      for (size_t i = 0; i < print->expressions.size(); ++i) {
-         Value v = evaluate_expression(print->expressions[i].get());
-         std::cout << to_string_value(v);
-         if (i + 1 < print->expressions.size()) std::cout << " ";
-      }
-      if (print->newline) std::cout << std::endl;
-      return;
-   }
+    // PrintStatementNode
+    if (auto ps = dynamic_cast<PrintStatementNode*>(stmt)) {
+        std::string out;
+        for (size_t i = 0; i < ps->expressions.size(); ++i) {
+            Value v = evaluate_expression(ps->expressions[i].get(), env);
+            out += to_string_value(v);
+            if (i + 1 < ps->expressions.size()) out += " ";
+        }
+        if (ps->newline) std::cout << out << std::endl;
+        else std::cout << out;
+        return;
+    }
 
-   if (auto exprStmt = dynamic_cast<ExpressionStatementNode*>(stmt)) {
-      // evaluate expression for side-effects (calls)
-      Value result = evaluate_expression(exprStmt->expression.get());
-      // ignore result
-      (void)result;
-      return;
-   }
+    // ExpressionStatementNode
+    if (auto es = dynamic_cast<ExpressionStatementNode*>(stmt)) {
+        evaluate_expression(es->expression.get(), env);
+        return;
+    }
 
-   throw std::runtime_error(std::string("Unknown statement type in evaluator") + format_location(stmt->token));
+    // FunctionDeclarationNode
+    if (auto fd = dynamic_cast<FunctionDeclarationNode*>(stmt)) {
+        // Create a FunctionValue and bind it in current environment by name
+        auto fn = std::make_shared<FunctionValue>(
+            fd->name,
+            fd->parameters,
+            fd,
+            env,
+            fd->token
+        );
+        Environment::Variable var;
+        var.value = fn;
+        var.is_constant = true; // functions are constants by default
+        env->set(fd->name, var);
+        return;
+    }
+
+    // ReturnStatementNode
+    if (auto rs = dynamic_cast<ReturnStatementNode*>(stmt)) {
+        if (did_return) *did_return = true;
+        if (return_value) {
+            if (rs->value) *return_value = evaluate_expression(rs->value.get(), env);
+            else *return_value = std::monostate{};
+        }
+        return;
+    }
+
+    throw std::runtime_error("Unhandled statement node in evaluator");
 }
 
-// Evaluate program
+// ----------------- Program evaluation -----------------
+
 void Evaluator::evaluate(ProgramNode* program) {
-   if (!program) return;
-   for (auto &s: program->body) {
-      evaluate_statement(s.get());
-   }
+    if (!program) return;
+
+    // initialize global environment
+    //global_env = std::make_shared<Environment>(nullptr);
+
+    // Optionally register builtins (e.g., 'print' callable) -- here we rely on print statements,
+    // but you may want to add functions in global_env if desired.
+
+    // Execute top-level statements
+    Value dummy_ret;
+    bool did_return = false;
+    for (auto &stmt_uptr : program->body) {
+        evaluate_statement(stmt_uptr.get(), global_env, &dummy_ret, &did_return);
+        if (did_return) break;
+    }
 }

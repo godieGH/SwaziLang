@@ -7,35 +7,41 @@ enum class TokenType {
     DATA,
     CHAPISHA,   // print with newline
     ANDIKA,     // print without newline
+    CONSTANT,   // thabiti
+    KAZI,       // function definition
+    RUDISHA,    // return
 
     // literals & identifiers
     IDENTIFIER,
-    NUMBER,     // numeric literal (formerly NAMBA)
-    STRING,     // string literal (formerly NENO)
+    NUMBER,     // numeric literal
+    STRING,     // string literal
     BOOLEAN,    // boolean literal (kweli / sikweli)
 
     // punctuation
     SEMICOLON,
     COMMA,
-    OPENPARENTHESIS,  // (
-    CLOSEPARENTHESIS, // )
+    OPENPARENTHESIS,   // (
+    CLOSEPARENTHESIS,  // )
+    OPENBRACE,         // {
+    CLOSEBRACE,        // }
+    COLON,             // : (before indented block)
 
     // assignment / file end
-    ASSIGN,     // =
+    ASSIGN,            // =
     EOF_TOKEN,
 
     // arithmetic
-    PLUS,       // +
-    MINUS,      // -
-    STAR,       // *
-    SLASH,      // /
-    PERCENT,    // % (remainder)
-    POWER,      // ** (exponent)
+    PLUS,              // +
+    MINUS,             // -
+    STAR,              // *
+    SLASH,             // /
+    PERCENT,           // %
+    POWER,             // **
     
-    PLUS_ASSIGN,
-    MINUS_ASSIGN,
-    INCREMENT,
-    DECREMENT,
+    PLUS_ASSIGN,       // +=
+    MINUS_ASSIGN,      // -=
+    INCREMENT,         // ++
+    DECREMENT,         // --
 
     // logical
     AND,        // && or 'na'
@@ -50,17 +56,20 @@ enum class TokenType {
     EQUALITY,            // == or 'sawa'
     NOTEQUAL,            // != or 'sisawa'
     
-    CONSTANT,
-    
-    // other (comments etc.)
-    COMMENT,     // optional: if you want to emit or capture comments
+    // indentation-based blocks
+    NEWLINE,             // newline separator
+    INDENT,              // indent increase
+    DEDENT,              // indent decrease
+
+    // other
+    COMMENT,             // optional: if you want to emit comments
     UNKNOWN
 };
 
 // Represents a single token
 struct Token {
     TokenType type;
-    std::string value; // raw text or normalized value (e.g., "123", "\"hello\"", "kweli")
+    std::string value;    // raw text or normalized value
     std::string filename;
     int line;
     int col;
