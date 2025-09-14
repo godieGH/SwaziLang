@@ -44,6 +44,11 @@ private:
     // control-flow parsing
     std::unique_ptr<StatementNode> parse_if_statement();
 
+    // loops
+    std::unique_ptr<StatementNode> parse_for_statement();      // parses 'kwa (...) { ... }' or 'kwa (...) : <INDENT> ... <DEDENT>'
+    std::unique_ptr<StatementNode> parse_while_statement();    // parses 'wakati <cond> { ... }' or 'wakati <cond> : <INDENT> ... <DEDENT>'
+    std::unique_ptr<StatementNode> parse_do_while_statement(); // parses 'fanya { ... } wakati <cond>' or 'fanya : <INDENT> ... wakati <cond>'
+
     // helper to parse a block of statements either from an INDENT/DEDENT
     // or from brace-style { ... }. accept_brace_style==true allows '{ ... }',
     // otherwise will expect INDENT-style (called after COLON/NEWLINE).

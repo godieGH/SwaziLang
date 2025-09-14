@@ -103,7 +103,12 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
 
         // control-flow keywords
         {"kama", TokenType::KAMA},             // if
-        {"vinginevyo", TokenType::VINGINEVYO}  // else
+        {"vinginevyo", TokenType::VINGINEVYO}, // else
+
+        // loop-related keywords
+        {"kwa", TokenType::FOR},               // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...
+        {"wakati", TokenType::WHILE},          // while style: wakati a < 6: ...  or wakati a < 8 { ... }
+        {"fanya", TokenType::DOWHILE}          // do-while: fanya: <INDENT> ... wakati cond
     };
 
     auto it = keywords.find(id_lower);

@@ -81,6 +81,28 @@ struct IfStatementNode : public StatementNode {
     bool has_else = false;
 };
 
+// For loop: kwa(<init>; <cond>; <post>) { ... }  OR kwa(<init>; <cond>; <post>): <INDENT> ... <DEDENT>
+// - init may be a variable declaration or an assignment/expression (we represent it as a StatementNode)
+// - cond and post are expressions and are optional (allow C-like empty slots)
+struct ForStatementNode : public StatementNode {
+    std::unique_ptr<StatementNode> init;           // optional (e.g., data i = 0) or assignment/expression
+    std::unique_ptr<ExpressionNode> condition;     // optional (e.g., i < 10)
+    std::unique_ptr<ExpressionNode> post;          // optional (e.g., i++, i += 2)
+    std::vector<std::unique_ptr<StatementNode>> body;
+};
+
+// While loop: "wakati <condition> { ... }" or "wakati <condition>: <INDENT> ... <DEDENT>"
+struct WhileStatementNode : public StatementNode {
+    std::unique_ptr<ExpressionNode> condition;
+    std::vector<std::unique_ptr<StatementNode>> body;
+};
+
+// Do-while loop: "fanya: <INDENT> ... <DEDENT> wakati <condition>" or "fanya { ... } wakati <condition>"
+struct DoWhileStatementNode : public StatementNode {
+    std::vector<std::unique_ptr<StatementNode>> body;
+    std::unique_ptr<ExpressionNode> condition; // the trailing 'wakati' condition
+};
+
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;
