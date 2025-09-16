@@ -12,7 +12,7 @@
 namespace fs = std::filesystem;
 
 // Optional debug token printer (declare if you link it)
-// void print_tokens(const std::vector<Token>& tokens);
+void print_tokens(const std::vector<Token>& tokens);
 
 static bool is_likely_incomplete_input(const std::string &err) {
     // Treat these parser expectations as "incomplete" so REPL will continue reading.
@@ -38,8 +38,12 @@ static void run_file_mode(const std::string &filename) {
     try {
         Lexer lexer(source_code, filename);
         std::vector<Token> tokens = lexer.tokenize();
+        
+        //print_tokens(tokens);
+        
         Parser parser(tokens);
         std::unique_ptr<ProgramNode> ast = parser.parse();
+        
         Evaluator evaluator;
         evaluator.evaluate(ast.get());
     } catch (const std::exception &e) {
@@ -77,7 +81,7 @@ static void run_repl_mode() {
             std::vector<Token> tokens = lexer.tokenize();
 
             // Optional: debug token printing
-            // print_tokens(tokens);
+            //print_tokens(tokens);
 
             Parser parser(tokens);
             std::unique_ptr<ProgramNode> ast = parser.parse();

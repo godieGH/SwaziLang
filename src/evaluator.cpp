@@ -151,63 +151,67 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    }
 
    if (auto b = dynamic_cast<BinaryExpressionNode*>(expr)) {
-      
+
       // --- handle ++ / -- and += / -= as side-effecting ops when left is identifier ---
-if (b->token.type == TokenType::INCREMENT ||
-    b->token.type == TokenType::DECREMENT ||
-    b->token.type == TokenType::PLUS_ASSIGN ||
-    b->token.type == TokenType::MINUS_ASSIGN) {
+      if (b->token.type == TokenType::INCREMENT ||
+         b->token.type == TokenType::DECREMENT ||
+         b->token.type == TokenType::PLUS_ASSIGN ||
+         b->token.type == TokenType::MINUS_ASSIGN) {
 
-    // left must be an identifier for these side-effect ops
-    if (auto leftIdent = dynamic_cast<IdentifierNode*>(b->left.get())) {
-        // Resolve current value (but do NOT shadow lookup semantics: update the variable in its defining env)
-        EnvPtr walk = env;
-        while (walk) {
-            auto it = walk->values.find(leftIdent->name);
-            if (it != walk->values.end()) {
-                if (it->second.is_constant) {
-                    throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string());
-                }
+         // left must be an identifier for these side-effect ops
+         if (auto leftIdent = dynamic_cast<IdentifierNode*>(b->left.get())) {
+            // Resolve current value (but do NOT shadow lookup semantics: update the variable in its defining env)
+            EnvPtr walk = env;
+            while (walk) {
+               auto it = walk->values.find(leftIdent->name);
+               if (it != walk->values.end()) {
+                  if (it->second.is_constant) {
+                     throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string());
+                  }
 
-                double oldv = to_number(it->second.value);
-                double delta = 0.0;
+                  double oldv = to_number(it->second.value);
+                  double delta = 0.0;
 
-                if (b->token.type == TokenType::INCREMENT) {
-                    delta = 1.0;
-                } else if (b->token.type == TokenType::DECREMENT) {
-                    delta = -1.0;
-                } else {
-                    // For += / -= evaluate right side
-                    Value rightVal = evaluate_expression(b->right.get(), env);
-                    double rv = to_number(rightVal);
-                    delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
-                }
+                  if (b->token.type == TokenType::INCREMENT) {
+                     delta = 1.0;
+                  } else if (b->token.type == TokenType::DECREMENT) {
+                     delta = -1.0;
+                  } else {
+                     // For += / -= evaluate right side
+                     Value rightVal = evaluate_expression(b->right.get(), env);
+                     double rv = to_number(rightVal);
+                     delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+                  }
 
-                double newv = oldv + delta;
-                it->second.value = newv;
-                return Value{ newv };
+                  double newv = oldv + delta;
+                  it->second.value = newv;
+                  return Value {
+                     newv
+                  };
+               }
+               walk = walk->parent;
             }
-            walk = walk->parent;
-        }
 
-        // If not found in any parent, create in current env (same behavior as assignment elsewhere)
-        double start = 0.0;
-        if (b->token.type == TokenType::INCREMENT) start = 1.0;
-        else if (b->token.type == TokenType::DECREMENT) start = -1.0;
-        else {
-            Value rightVal = evaluate_expression(b->right.get(), env);
-            double rv = to_number(rightVal);
-            start = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
-        }
-        Environment::Variable var;
-        var.value = start;
-        var.is_constant = false;
-        env->set(leftIdent->name, var);
-        return Value{ start };
-    }
-    // if left isn't identifier fallthrough to normal binary handling (or throw)
-}
-      
+            // If not found in any parent, create in current env (same behavior as assignment elsewhere)
+            double start = 0.0;
+            if (b->token.type == TokenType::INCREMENT) start = 1.0;
+            else if (b->token.type == TokenType::DECREMENT) start = -1.0;
+            else {
+               Value rightVal = evaluate_expression(b->right.get(), env);
+               double rv = to_number(rightVal);
+               start = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+            }
+            Environment::Variable var;
+            var.value = start;
+            var.is_constant = false;
+            env->set(leftIdent->name, var);
+            return Value {
+               start
+            };
+         }
+         // if left isn't identifier fallthrough to normal binary handling (or throw)
+      }
+
       Value left = evaluate_expression(b->left.get(), env);
       Value right = evaluate_expression(b->right.get(), env);
       const std::string &op = b->op;
@@ -316,6 +320,21 @@ if (b->token.type == TokenType::INCREMENT ||
       throw std::runtime_error("Attempted to call a non-function value at " + call->token.loc.to_string());
    }
 
+
+   if (auto t = dynamic_cast<TernaryExpressionNode*>(expr)) {
+      // Evaluate condition first
+      Value condVal = evaluate_expression(t->condition.get(), env);
+      if (to_bool(condVal)) {
+         // condition true → evaluate thenExpr
+         return evaluate_expression(t->thenExpr.get(), env);
+      } else {
+         // condition false → evaluate elseExpr
+         return evaluate_expression(t->elseExpr.get(), env);
+      }
+   }
+
+
+
    throw std::runtime_error("Unhandled expression node in evaluator");
 }
 
@@ -326,14 +345,14 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
    if (auto vd = dynamic_cast<VariableDeclarationNode*>(stmt)) {
       Value val = std::monostate {};
-      
+
       if (vd->value) val = evaluate_expression(vd->value.get(), env);
       Environment::Variable var {
          val,
          vd->is_constant
       };
-      if (vd->is_constant && std::holds_alternative<std::monostate>(val)) {
-       throw std::runtime_error("Constant '" + vd->identifier + "' must be initialized at " + vd->token.loc.to_string());
+      if (vd->is_constant && std::holds_alternative < std::monostate > (val)) {
+         throw std::runtime_error("Constant '" + vd->identifier + "' must be initialized at " + vd->token.loc.to_string());
       }
       env->set(vd->identifier, var);
       return;

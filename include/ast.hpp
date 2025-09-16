@@ -2,47 +2,97 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include "token.hpp"   // <-- needed for Token
+#include "token.hpp"  
 
 // Base class for all AST nodes
 struct Node {
     virtual ~Node() = default;
     Token token; // filename, line, column for this node (set by the parser)
+
+    // Add a virtual to_string so derived nodes can override safely.
+    // Default implementation is minimal; derived nodes can provide richer text.
+    virtual std::string to_string() const {
+        return "<node>";
+    }
 };
 
 // Expressions
-struct ExpressionNode : public Node {};
+struct ExpressionNode : public Node {
+    // Optionally override default string representation for expressions:
+    // virtual std::string to_string() const override { return "<expr>"; }
+};
 
 struct NumericLiteralNode : public ExpressionNode {
     double value;
+    std::string to_string() const override {
+        return std::to_string(value);
+    }
 };
 
 struct StringLiteralNode : public ExpressionNode {
     std::string value;
+    std::string to_string() const override {
+        return "\"" + value + "\"";
+    }
 };
 
 struct BooleanLiteralNode : public ExpressionNode {
     bool value;
+    std::string to_string() const override {
+        return value ? "kweli" : "sikweli";
+    }
 };
 
 struct IdentifierNode : public ExpressionNode {
     std::string name;
+    std::string to_string() const override {
+        return name;
+    }
 };
 
 struct UnaryExpressionNode : public ExpressionNode {
     std::string op; // e.g. "!" or "-"
     std::unique_ptr<ExpressionNode> operand;
+    std::string to_string() const override {
+        return "(" + op + operand->to_string() + ")";
+    }
 };
 
 struct BinaryExpressionNode : public ExpressionNode {
     std::string op; // e.g. "+", "*", "==", "&&"
     std::unique_ptr<ExpressionNode> left;
     std::unique_ptr<ExpressionNode> right;
+    std::string to_string() const override {
+        return "(" + left->to_string() + " " + op + " " + right->to_string() + ")";
+    }
 };
 
 struct CallExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> callee;
     std::vector<std::unique_ptr<ExpressionNode>> arguments;
+    std::string to_string() const override {
+        std::string s = callee->to_string() + "(";
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            if (i) s += ", ";
+            s += arguments[i]->to_string();
+        }
+        s += ")";
+        return s;
+    }
+};
+
+// TernaryExpressionNode
+struct TernaryExpressionNode : ExpressionNode {
+    std::unique_ptr<ExpressionNode> condition;
+    std::unique_ptr<ExpressionNode> thenExpr;
+    std::unique_ptr<ExpressionNode> elseExpr;
+    // removed duplicate Token token; use Node::token instead
+
+    std::string to_string() const override {
+        return "(" + condition->to_string() + " ? " +
+               thenExpr->to_string() + " : " +
+               elseExpr->to_string() + ")";
+    }
 };
 
 // Statements
@@ -103,11 +153,6 @@ struct DoWhileStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> condition; // the trailing 'wakati' condition
 };
 
-// Program root
-struct ProgramNode : public Node {
-    std::vector<std::unique_ptr<StatementNode>> body;
-};
-
 // Function declaration
 struct FunctionDeclarationNode : public StatementNode {
     std::string name; // function name
@@ -118,4 +163,9 @@ struct FunctionDeclarationNode : public StatementNode {
 // Return statement
 struct ReturnStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> value; // expression to return
+};
+
+// Program root
+struct ProgramNode : public Node {
+    std::vector<std::unique_ptr<StatementNode>> body;
 };
