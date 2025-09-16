@@ -34,6 +34,7 @@ enum class TokenType {
     OPENBRACE,
     CLOSEBRACE,
     COLON,
+    QUESTIONMARK,
 
     // assignment / file end
     ASSIGN,
