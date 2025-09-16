@@ -664,30 +664,39 @@ std::unique_ptr < ExpressionNode > Parser::parse_expression() {
 std::unique_ptr < ExpressionNode > Parser::parse_ternary() {
    auto cond = parse_logical_or();
 
-   if (peek().type != TokenType::QUESTIONMARK) {
+  if (peek().type != TokenType::QUESTIONMARK) {
       return cond;
    }
 
-   Token qTok = consume(); // consume '?'
+  Token qTok = consume(); // consume '?'
 
-   // Allow newlines before thenExpr
-   while (peek().type == TokenType::NEWLINE) consume();
+  // helper: treat NEWLINE/INDENT/DEDENT as formatting around ternary parts
+   auto skip_formatting = [&]() {
+      while (peek().type == TokenType::NEWLINE ||
+            peek().type == TokenType::INDENT ||
+             peek().type == TokenType::DEDENT) {
+        consume();
+      }
+  };
+
+   // Allow formatting tokens before thenExpr
+   skip_formatting();
    auto thenExpr = parse_ternary();
 
-   // Allow newlines before ':'
-   while (peek().type == TokenType::NEWLINE) consume();
+  // Allow formatting tokens before ':'
+   skip_formatting();
    expect(TokenType::COLON, "Expected ':' after ternary 'then' expression");
 
-   // Allow newlines before elseExpr
-   while (peek().type == TokenType::NEWLINE) consume();
+  // Allow formatting tokens before elseExpr
+  skip_formatting();
    auto elseExpr = parse_ternary();
 
    auto node = std::make_unique < TernaryExpressionNode > ();
    node->token = qTok;
-   node->condition = std::move(cond);
+  node->condition = std::move(cond);
    node->thenExpr = std::move(thenExpr);
-   node->elseExpr = std::move(elseExpr);
-   return node;
+  node->elseExpr = std::move(elseExpr);
+  return node;
 }
 
 
