@@ -1,7 +1,8 @@
-#include "print_tokens.hpp"
+#include "print_debug.hpp"
 #include <iostream>
 #include <unordered_map>
 #include <string>
+#include <iomanip>
 
 static std::string token_name(TokenType t) {
     static const std::unordered_map<TokenType, std::string> names = {
@@ -23,17 +24,57 @@ static std::string token_name(TokenType t) {
         {TokenType::COMMENT,"COMMENT"}, {TokenType::UNKNOWN,"UNKNOWN"}
     };
     auto it = names.find(t);
-    if (it != names.end()) return it->second;
-    return "TOKEN(?)";
+    return it != names.end() ? it->second : "TOKEN(?)";
+}
+
+static std::string escape(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
 }
 
 void print_tokens(const std::vector<Token>& tokens) {
-    for (const auto &tok : tokens) {
-        std::cout
-            << "type=" << static_cast<int>(tok.type)
-            << " value=\"" << tok.value << "\""
-            << " loc=" << tok.loc.to_string()
-            << " len=" << tok.loc.length
-            << "\n";
+    std::cout << "[\n";
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const auto& tok = tokens[i];
+        std::cout << "  {\n";
+        std::cout << "    \"type\": \"" << token_name(tok.type) << "\",\n";
+        std::cout << "    \"value\": \"" << escape(tok.value) << "\",\n";
+        std::cout << "    \"loc\": \"" << tok.loc.to_string() << "\",\n";
+        std::cout << "    \"length\": " << tok.loc.length << "\n";
+        std::cout << "  }" << (i + 1 < tokens.size() ? "," : "") << "\n";
     }
+    std::cout << "]\n";
+}
+
+void print_program_debug(ProgramNode* ast, int indent) {
+    if (!ast) {
+        std::cout << "{}\n";
+        return;
+    }
+
+    std::string ind(indent, ' ');
+    std::cout << ind << "{\n";
+    std::cout << ind << "  \"type\": \"Program\",\n";
+    std::cout << ind << "  \"body\": [\n";
+
+    for (size_t i = 0; i < ast->body.size(); ++i) {
+        auto* stmt = ast->body[i].get();
+        if (!stmt) {
+            std::cout << ind << "    null";
+        } else {
+            std::cout << ind << "    {\n";
+            std::cout << ind << "      \"nodeType\": \"" << typeid(*stmt).name() << "\",\n";
+            std::cout << ind << "      \"token\": \"" << escape(stmt->token.loc.to_string()) << "\"\n";
+            std::cout << ind << "    }";
+        }
+        if (i + 1 < ast->body.size()) std::cout << ",";
+        std::cout << "\n";
+    }
+
+    std::cout << ind << "  ]\n";
+    std::cout << ind << "}\n";
 }
