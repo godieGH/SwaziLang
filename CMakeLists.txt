@@ -5,14 +5,14 @@ project(SwaziLang VERSION 1.3.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Include headers
-include_directories(include)
-
 # Source files
-file(GLOB SOURCES "src/*.cpp")
+file(GLOB_RECURSE SOURCES "src/*.cpp")
 
-# Create executable
+# Create executable target
 add_executable(swazi ${SOURCES})
 
-# Optional: link external libs here
-# target_link_libraries(SwaziLang PRIVATE <lib>)
+# Include headers for this target
+target_include_directories(swazi PRIVATE include)
+
+# Optional: link external libraries
+# target_link_libraries(swazi PRIVATE <lib>)
