@@ -3,7 +3,9 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <sstream>
+#include <algorithm>
 
+// Constructor
 Lexer::Lexer(const std::string& source, const std::string& filename)
     : src(source), filename(filename), i(0), line(1), col(1)
 {
@@ -37,19 +39,21 @@ void Lexer::skip_line_comment() {
     while (!eof() && peek() != '\n') advance();
 }
 
-// scan double-quoted string with basic escapes
-void Lexer::scan_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
-    // start_index points to the opening quote position in src
-    advance(); // skip opening '"'
+// scan quoted string with basic escapes; supports single and double quotes
+// start_index points to the opening quote position in src
+void Lexer::scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index, char quote) {
+    // skip opening quote
+    advance();
     std::string val;
     while (!eof()) {
         char c = peek();
-        if (c == '"') { advance(); break; }
+        if (c == quote) { advance(); break; }
         if (c == '\\') {
             advance(); // backslash
             char nxt = peek();
             if (nxt == 'n') { val.push_back('\n'); advance(); }
             else if (nxt == 't') { val.push_back('\t'); advance(); }
+            else if (nxt == '\'' ) { val.push_back('\''); advance(); }
             else if (nxt == '"' ) { val.push_back('"'); advance(); }
             else if (nxt == '\\') { val.push_back('\\'); advance(); }
             else { val.push_back(nxt); advance(); }
@@ -59,7 +63,113 @@ void Lexer::scan_string(std::vector<Token>& out, int tok_line, int tok_col, size
         val.push_back(advance());
     }
     int tok_length = static_cast<int>(i - start_index); // raw source length including quotes and escapes
-    add_token(out, TokenType::STRING, val, tok_line, tok_col, tok_length);
+
+    TokenType tt = TokenType::STRING;
+    if (quote == '\'') tt = TokenType::SINGLE_QUOTED_STRING;
+
+    add_token(out, tt, val, tok_line, tok_col, tok_length);
+}
+
+// scan template literal with full interpolation support.
+// Emits TEMPLATE_CHUNK tokens (may be empty), TEMPLATE_EXPR_START ("${"),
+// then emits normal tokens for the expression, and when the top-level '}' of the
+// interpolation is encountered emits TEMPLATE_EXPR_END and resumes chunking.
+// Finally emits TEMPLATE_END when the closing backtick is found.
+void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
+    // consume opening backtick
+    advance();
+
+    std::string chunk;
+    // initial chunk start position: after the opening backtick
+    int chunk_start_line = line;
+    int chunk_start_col = col;
+
+    auto emit_chunk = [&]() {
+        // Always emit a chunk token (may be empty)
+        add_token(out, TokenType::TEMPLATE_CHUNK, chunk, chunk_start_line, chunk_start_col, -1);
+        chunk.clear();
+    };
+
+    while (!eof()) {
+        char c = peek();
+
+        // closing backtick: emit final chunk then TEMPLATE_END token and return
+        if (c == '`') {
+            advance();
+            emit_chunk();
+            add_token(out, TokenType::TEMPLATE_END, "`", line, col, 1);
+            return;
+        }
+
+        // escape sequences inside template text
+        if (c == '\\') {
+            advance();
+            char nxt = peek();
+            if (nxt == 'n') { chunk.push_back('\n'); advance(); }
+            else if (nxt == 't') { chunk.push_back('\t'); advance(); }
+            else if (nxt == '`') { chunk.push_back('`'); advance(); }
+            else if (nxt == '\\') { chunk.push_back('\\'); advance(); }
+            else { chunk.push_back(nxt); advance(); }
+            continue;
+        }
+
+        // interpolation start: "${"
+        if (c == '$' && peek_next() == '{') {
+            // emit current chunk (may be empty)
+            emit_chunk();
+
+            int expr_line = line;
+            int expr_col  = col;
+            // consume '${'
+            advance(); // $
+            advance(); // {
+            add_token(out, TokenType::TEMPLATE_EXPR_START, "${", expr_line, expr_col, 2);
+
+            // Now lex tokens for the embedded expression until the matching top-level '}'.
+            int brace_depth = 0;
+            while (!eof()) {
+                // If we are at a '}' and brace_depth == 0 it's the interpolation end.
+                if (peek() == '}' && brace_depth == 0) {
+                    int end_line = line;
+                    int end_col = col;
+                    advance(); // consume '}'
+                    add_token(out, TokenType::TEMPLATE_EXPR_END, "}", end_line, end_col, 1);
+
+                    // next chunk starts at current line/col
+                    chunk_start_line = line;
+                    chunk_start_col = col;
+                    break;
+                }
+
+                // If next is '{' inside expression increase nesting and let scan_token emit tokens
+                if (peek() == '{') {
+                    brace_depth++;
+                    scan_token(out); // will emit OPENBRACE token etc
+                    continue;
+                }
+                if (peek() == '}') {
+                    // nested close brace inside expression: let scan_token emit token and decrement depth
+                    scan_token(out);
+                    brace_depth = std::max(0, brace_depth - 1);
+                    continue;
+                }
+
+                // Otherwise lex normally the expression content
+                scan_token(out);
+            }
+            // continue scanning template chunks
+            continue;
+        }
+
+        // default: add character to chunk (advance updates line/col)
+        chunk.push_back(advance());
+    }
+
+    // Unterminated template (reached EOF)
+    std::ostringstream ss;
+    ss << "Unterminated template literal in file '" << (filename.empty() ? "<repl>" : filename)
+       << "' starting at line " << tok_line << ", col " << tok_col;
+    throw std::runtime_error(ss.str());
 }
 
 void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
@@ -82,9 +192,6 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         if (std::isalnum((unsigned char)c) || c == '_') id.push_back(advance());
         else break;
     }
-
-    std::string id_lower = id;
-    for (auto &ch : id_lower) ch = static_cast<char>(std::tolower((unsigned char)ch));
 
     static const std::unordered_map<std::string, TokenType> keywords = {
         {"data", TokenType::DATA},
@@ -111,11 +218,11 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"fanya", TokenType::DOWHILE}          // do-while: fanya: <INDENT> ... wakati cond
     };
 
-    auto it = keywords.find(id_lower);
+    auto it = keywords.find(id);
     int tok_length = static_cast<int>(i - start_index);
     if (it != keywords.end()) {
-        if (it->second == TokenType::BOOLEAN) add_token(out, TokenType::BOOLEAN, id_lower, tok_line, tok_col, tok_length);
-        else add_token(out, it->second, id_lower, tok_line, tok_col, tok_length);
+        if (it->second == TokenType::BOOLEAN) add_token(out, TokenType::BOOLEAN, id, tok_line, tok_col, tok_length);
+        else add_token(out, it->second, id, tok_line, tok_col, tok_length);
     } else {
         add_token(out, TokenType::IDENTIFIER, id, tok_line, tok_col, tok_length);
     }
@@ -228,7 +335,17 @@ void Lexer::scan_token(std::vector<Token>& out) {
         case '!': add_token(out, TokenType::NOT, "!", line, col, 1); advance(); return;
         case '"': {
             size_t start_index = i;
-            scan_string(out, line, col, start_index);
+            scan_quoted_string(out, line, col, start_index, '"');
+            return;
+        }
+        case '\'': {
+            size_t start_index = i;
+            scan_quoted_string(out, line, col, start_index, '\'');
+            return;
+        }
+        case '`': {
+            size_t start_index = i;
+            scan_template(out, line, col, start_index);
             return;
         }
         default: break;

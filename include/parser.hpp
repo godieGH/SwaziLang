@@ -1,3 +1,4 @@
+// (snippet) add declaration to existing parser.hpp
 #pragma once
 #include <vector>
 #include <memory>
@@ -31,6 +32,9 @@ class Parser {
    std::unique_ptr < ExpressionNode > parse_unary();
    std::unique_ptr < ExpressionNode > parse_primary();
    std::unique_ptr < ExpressionNode > parse_call(std::unique_ptr < ExpressionNode > callee);
+
+   // NEW: helper to parse a template literal (backtick-style). Implementation in expressions.cpp
+   std::unique_ptr<ExpressionNode> parse_template_literal();
 
    // statements
    std::unique_ptr < StatementNode > parse_statement();

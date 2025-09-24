@@ -133,6 +133,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string arg = argv[1];
+    
     if (arg == "-i") {
         run_repl_mode();
         return 0;
@@ -141,6 +142,7 @@ int main(int argc, char* argv[]) {
     fs::path p(arg);
     fs::path file_to_run;
 
+    
     if (p.has_extension()) {
         // User provided explicit filename (e.g., app.sl or dir/app.swz)
         if (fs::exists(p)) {
@@ -167,7 +169,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
-
+    
     run_file_mode(file_to_run.string());
     return 0;
 }

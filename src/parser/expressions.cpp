@@ -176,6 +176,80 @@ std::unique_ptr < ExpressionNode > Parser::parse_unary() {
    return parse_primary();
 }
 
+std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
+   // This function supports two lexer styles:
+   // 1) Simple lexer: emits one TEMPLATE_STRING token containing the whole content
+   //    -> we produce TemplateLiteralNode with quasis = { value } and no expressions.
+   // 2) Full interpolation lexer: emits a sequence like:
+   //    TEMPLATE_CHUNK("Hello "), TEMPLATE_EXPR_START, ...expr tokens..., TEMPLATE_EXPR_END, TEMPLATE_CHUNK(", world"), ... , TEMPLATE_END
+   //    -> we consume the chunks/exprs and produce quasis+expressions accordingly.
+   auto node = std::make_unique<TemplateLiteralNode>();
+
+   Token t = peek();
+   if (t.type == TokenType::TEMPLATE_STRING) {
+      Token tok = consume();
+      node->quasis.push_back(tok.value);
+      node->token = tok;
+      return node;
+   }
+
+   // expect the first chunk (lexer should emit TEMPLATE_CHUNK even if empty)
+   if (t.type != TokenType::TEMPLATE_CHUNK) {
+      throw std::runtime_error("Expected template chunk or template-string at " + t.loc.to_string());
+   }
+
+   // first chunk
+   Token chunkTok = consume();
+   node->quasis.push_back(chunkTok.value);
+   node->token = chunkTok;
+
+   // now loop: while next is TEMPLATE_EXPR_START parse expression, then expect a following CHUNK (or end)
+   while (peek().type == TokenType::TEMPLATE_EXPR_START) {
+      consume(); // consume TEMPLATE_EXPR_START (the "${")
+      // parse the embedded expression
+      auto expr = parse_expression();
+      node->expressions.push_back(std::move(expr));
+
+      // accept either a dedicated TEMPLATE_EXPR_END or a plain CLOSEBRACE (fallback)
+      if (peek().type == TokenType::TEMPLATE_EXPR_END) {
+         consume();
+      } else if (peek().type == TokenType::CLOSEBRACE) {
+         consume();
+      } else {
+         Token bad = peek();
+         throw std::runtime_error("Expected '}' to close template expression at " + bad.loc.to_string());
+      }
+
+      // after closing the expression, the lexer should provide the next chunk (possibly empty),
+      // or the TEMPLATE_END if the template ended right after the expression.
+      if (peek().type == TokenType::TEMPLATE_CHUNK) {
+         Token nextChunk = consume();
+         node->quasis.push_back(nextChunk.value);
+      } else if (peek().type == TokenType::TEMPLATE_END) {
+         // end: push an empty final chunk so quasis.size() == expressions.size()+1
+         node->quasis.push_back("");
+         consume(); // consume TEMPLATE_END
+         break;
+      } else {
+         Token bad = peek();
+         throw std::runtime_error("Expected template chunk or end after interpolation at " + bad.loc.to_string());
+      }
+   }
+
+   // If loop ended without seeing TEMPLATE_END, allow a final TEMPLATE_END now (some lexers may emit it)
+   if (peek().type == TokenType::TEMPLATE_END) {
+      consume();
+   }
+
+   // Ensure invariant: quasis.size() == expressions.size() + 1
+   if (node->quasis.size() != node->expressions.size() + 1) {
+      // normalize by appending empty chunk if needed
+      while (node->quasis.size() < node->expressions.size() + 1) node->quasis.push_back("");
+   }
+
+   return node;
+}
+
 std::unique_ptr < ExpressionNode > Parser::parse_primary() {
    Token t = peek();
    if (t.type == TokenType::NUMBER) {
@@ -185,13 +259,22 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       n->token = numTok;
       return n;
    }
-   if (t.type == TokenType::STRING) {
+
+   // accept both double-quoted and single-quoted strings
+   if (t.type == TokenType::STRING || t.type == TokenType::SINGLE_QUOTED_STRING) {
       Token s = consume();
       auto node = std::make_unique < StringLiteralNode > ();
       node->value = s.value;
       node->token = s;
       return node;
    }
+
+   // template literals: either a single TEMPLATE_STRING token (no interpolation)
+   // or interpolation-aware sequence starting with TEMPLATE_CHUNK
+   if (t.type == TokenType::TEMPLATE_STRING || t.type == TokenType::TEMPLATE_CHUNK) {
+      return parse_template_literal();
+   }
+
    if (t.type == TokenType::BOOLEAN) {
       Token b = consume();
       auto node = std::make_unique < BooleanLiteralNode > ();
@@ -221,7 +304,6 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       "Unexpected token '" + tok.value + "' at " + tok.loc.to_string()
    );
 }
-
 std::unique_ptr < ExpressionNode > Parser::parse_call(std::unique_ptr < ExpressionNode > callee) {
    expect(TokenType::OPENPARENTHESIS, "Expected '(' in call");
    Token openTok = tokens[position - 1]; // the '(' token
@@ -236,3 +318,5 @@ std::unique_ptr < ExpressionNode > Parser::parse_call(std::unique_ptr < Expressi
    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after call arguments");
    return call;
 }
+
+

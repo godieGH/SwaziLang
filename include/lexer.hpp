@@ -34,7 +34,14 @@ private:
     void scan_token(std::vector<Token>& out);
     void scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
     void scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
-    void scan_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
+
+    // scan quoted (single/double) string (handles escapes)
+    void scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index, char quote);
+
+    // scan template literal (backticks) with support for full interpolation:
+    // Emits TEMPLATE_CHUNK, TEMPLATE_EXPR_START, TEMPLATE_EXPR_END and TEMPLATE_END tokens.
+    void scan_template(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
+
     void skip_line_comment();
     void handle_newline(std::vector<Token>& out);
     void emit_remaining_dedents(std::vector<Token>& out);

@@ -14,6 +14,26 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    if (auto s = dynamic_cast<StringLiteralNode*>(expr)) return Value {
       s->value
    };
+
+   // Template literal evaluation: concatenate quasis and evaluated expressions.
+   if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {
+      // quasis.size() is expected to be expressions.size() + 1, but tolerate mismatches.
+      std::string out;
+      size_t exprCount = tpl->expressions.size();
+      size_t quasiCount = tpl->quasis.size();
+
+      // Iterate through quasis and interleave expression values.
+      for (size_t i = 0; i < quasiCount; ++i) {
+         out += tpl->quasis[i];
+         if (i < exprCount) {
+            Value ev = evaluate_expression(tpl->expressions[i].get(), env);
+            out += to_string_value(ev);
+         }
+      }
+
+      return Value { out };
+   }
+
    if (auto b = dynamic_cast<BooleanLiteralNode*>(expr)) return Value {
       b->value
    };

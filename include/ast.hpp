@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <sstream>
 #include "token.hpp"  
 
 // Base class for all AST nodes
@@ -92,6 +93,37 @@ struct TernaryExpressionNode : ExpressionNode {
         return "(" + condition->to_string() + " ? " +
                thenExpr->to_string() + " : " +
                elseExpr->to_string() + ")";
+    }
+};
+
+// Template literal node (supports template strings with interpolated expressions).
+// Representation follows the common "quasis + expressions" model:
+// - quasis: vector of raw string chunks (size == expressions.size() + 1)
+// - expressions: vector of ExpressionNode*, each inserted between quasis
+//
+// Example template: `Hello ${name}, you have ${n} messages`
+// quasis = ["Hello ", ", you have ", " messages"]
+// expressions = [ IdentifierNode("name"), IdentifierNode("n") ]
+struct TemplateLiteralNode : public ExpressionNode {
+    // raw (unescaped) string chunks between expressions; there are always
+    // expressions.size() + 1 quasis (possibly empty strings at ends)
+    std::vector<std::string> quasis;
+
+    // embedded expressions that get evaluated and concatenated between quasis
+    std::vector<std::unique_ptr<ExpressionNode>> expressions;
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "`";
+        size_t exprCount = expressions.size();
+        for (size_t i = 0; i < quasis.size(); ++i) {
+            ss << quasis[i];
+            if (i < exprCount) {
+                ss << "${" << expressions[i]->to_string() << "}";
+            }
+        }
+        ss << "`";
+        return ss.str();
     }
 };
 

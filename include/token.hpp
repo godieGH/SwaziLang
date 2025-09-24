@@ -23,7 +23,13 @@ enum class TokenType {
     // literals & identifiers
     IDENTIFIER,
     NUMBER,
-    STRING,
+    STRING,                // double-quoted string
+    SINGLE_QUOTED_STRING,  // single-quoted string (')
+    TEMPLATE_STRING,       // backtick whole string (simple mode, no interpolation)
+    TEMPLATE_CHUNK,        // raw chunk inside a template literal (full interpolation mode)
+    TEMPLATE_EXPR_START,   // "${"
+    TEMPLATE_EXPR_END,     // "}" that closes interpolation
+    TEMPLATE_END,          // closing backtick (optional: some lexers emit it)
     BOOLEAN,
 
     // punctuation
