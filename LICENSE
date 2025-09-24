@@ -1,0 +1,48 @@
+Proprietary License for Interpreter
+-----------------------------------
+
+Copyright (c) 2025 [SwaziLang]
+
+This software (the "Interpreter") is proprietary software. All rights are
+reserved. No part of the Interpreter may be copied, modified, distributed,
+or used in any form without prior written permission from the copyright
+holder, except as expressly permitted in writing.
+
+You are not granted any rights to the Interpreter, including but not limited
+to its source code, binaries, or documentation, beyond what is required by
+law.
+
+Language Specification and Grammar
+----------------------------------
+
+The language rules, syntax, and grammar defined for this project (the
+"Language") are licensed under the MIT License:
+
+MIT License
+
+Copyright (c) 2025 [SwaziLang]
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the Language specification and associated documentation files (the
+"Language"), to deal in the Language without restriction, including without
+limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Language, and to permit persons to
+whom the Language is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Language.
+
+THE LANGUAGE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE LANGUAGE OR THE USE OR OTHER DEALINGS
+IN THE LANGUAGE.
+
+Summary
+-------
+
+- Interpreter = proprietary, closed source, no rights granted without explicit permission.
+- Language rules/grammar = MIT licensed, free for anyone to use, edit, or create their own interpreters.
+
