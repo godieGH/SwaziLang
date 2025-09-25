@@ -322,6 +322,9 @@ void Lexer::scan_token(std::vector<Token>& out) {
         case ')': if (paren_level > 0) paren_level--; add_token(out, TokenType::CLOSEPARENTHESIS, ")", line, col, 1); advance(); return;
         case '{': add_token(out, TokenType::OPENBRACE, "{", line, col, 1); advance(); return;
         case '}': add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1); advance(); return;
+        case '[': add_token(out, TokenType::OPENBRACKET, "[", line, col, 1); advance(); return;
+        case ']': add_token(out, TokenType::CLOSEBRACKET, "]", line, col, 1); advance(); return;
+        case '.': add_token(out, TokenType::DOT, ".", line, col, 1); advance(); return;
         case ':': add_token(out, TokenType::COLON, ":", line, col, 1); advance(); return;
         case '?': add_token(out, TokenType::QUESTIONMARK, "?", line, col, 1); advance(); return;
         case '=': add_token(out, TokenType::ASSIGN, "=", line, col, 1); advance(); return;

@@ -1,4 +1,3 @@
-// src/parser/statements.cpp
 #include "parser.hpp"
 #include <stdexcept>
 #include <cctype>
@@ -65,85 +64,123 @@ std::unique_ptr < StatementNode > Parser::parse_print_statement(bool newline) {
    return node;
 }
 
+// Parse an assignment or expression statement starting with an identifier (or general expression fallback).
+// This version builds full postfix expressions (member, index, calls) from the initial identifier,
+// so forms like arr[0] = 1 and arr.ongeza(4) parse correctly. For compound ops (+=, ++/--)
+// we only support them when the target is a simple IdentifierNode (preserves previous semantics).
 std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_statement() {
    if (peek().type == TokenType::IDENTIFIER) {
       Token idTok = consume();
       std::string name = idTok.value;
 
+      // start with a simple IdentifierNode but keep it typed as ExpressionNode so
+      // we can later replace it with MemberExpressionNode / IndexExpressionNode etc.
+      std::unique_ptr<ExpressionNode> nodeExpr = std::make_unique<IdentifierNode>();
+      // initialize identifier specifics
+      static_cast<IdentifierNode*>(nodeExpr.get())->name = name;
+      static_cast<IdentifierNode*>(nodeExpr.get())->token = idTok;
+
+      // Postfix expansion: accept calls, member access, indexing
+      while (true) {
+         if (peek().type == TokenType::OPENPARENTHESIS) {
+            // call: convert current nodeExpr into a CallExpressionNode
+            nodeExpr = parse_call(std::move(nodeExpr));
+            continue;
+         }
+         if (peek().type == TokenType::DOT) {
+            Token dotTok = consume(); // consume '.'
+            expect(TokenType::IDENTIFIER, "Expected identifier after '.'");
+            Token propTok = tokens[position - 1];
+            auto mem = std::make_unique<MemberExpressionNode>();
+            mem->object = std::move(nodeExpr);
+            mem->property = propTok.value;
+            mem->token = dotTok;
+            nodeExpr = std::move(mem);
+            continue;
+         }
+         if (peek().type == TokenType::OPENBRACKET) {
+            Token openIdx = consume(); // consume '['
+            auto idxExpr = parse_expression();
+            expect(TokenType::CLOSEBRACKET, "Expected ']' after index expression");
+            auto idxNode = std::make_unique<IndexExpressionNode>();
+            idxNode->object = std::move(nodeExpr);
+            idxNode->index = std::move(idxExpr);
+            idxNode->token = openIdx;
+            nodeExpr = std::move(idxNode);
+            continue;
+         }
+         break;
+      }
+
+      // At this point nodeExpr is the full left-side expression (Identifier, Member, Index, Call)
+      // If next token is '=', create an AssignmentNode with target = nodeExpr
       if (peek().type == TokenType::ASSIGN) {
-         // normal assignment
          consume(); // '='
          auto value = parse_expression();
          if (peek().type == TokenType::SEMICOLON) consume();
-         auto node = std::make_unique < AssignmentNode > ();
-         node->identifier = name;
-         node->value = std::move(value);
-         node->token = idTok;
-         return node;
+         auto assign = std::make_unique<AssignmentNode>();
+         assign->target = std::move(nodeExpr);
+         assign->value = std::move(value);
+         assign->token = idTok;
+         return assign;
       }
-      else if (peek().type == TokenType::PLUS_ASSIGN || peek().type == TokenType::MINUS_ASSIGN) {
+
+      // Support += / -= only when target is a simple identifier (preserve previous behavior)
+      if (peek().type == TokenType::PLUS_ASSIGN || peek().type == TokenType::MINUS_ASSIGN) {
+         if (!dynamic_cast<IdentifierNode*>(nodeExpr.get())) {
+            Token opTok = peek();
+            throw std::runtime_error("Compound assignment is only supported for simple identifiers at " + opTok.loc.to_string());
+         }
          Token opTok = consume(); // += or -=
          auto right = parse_expression();
 
-         // build BinaryExpressionNode: x + right OR x - right
-         auto bin = std::make_unique < BinaryExpressionNode > ();
+         // build BinaryExpressionNode: left + right OR left - right
+         auto bin = std::make_unique<BinaryExpressionNode>();
          bin->op = (opTok.type == TokenType::PLUS_ASSIGN) ? "+": "-";
-         auto leftIdent = std::make_unique < IdentifierNode > ();
-         leftIdent->name = name;
-         leftIdent->token = idTok;
-         bin->left = std::move(leftIdent);
+         bin->left = std::move(nodeExpr); // left is the identifier
          bin->right = std::move(right);
          bin->token = opTok;
 
-         auto assign = std::make_unique < AssignmentNode > ();
-         assign->identifier = name;
+         auto assign = std::make_unique<AssignmentNode>();
+         // bin->left is the identifier, move it into target (it is typed as ExpressionNode)
+         assign->target = std::move(bin->left);
          assign->value = std::move(bin);
          assign->token = idTok;
          if (peek().type == TokenType::SEMICOLON) consume();
          return assign;
       }
-      else if (peek().type == TokenType::INCREMENT || peek().type == TokenType::DECREMENT) {
-         Token opTok = consume(); // ++ or --
 
+      // Support ++ / -- only for simple identifiers (statement like x++ or x--)
+      if (peek().type == TokenType::INCREMENT || peek().type == TokenType::DECREMENT) {
+         if (!dynamic_cast<IdentifierNode*>(nodeExpr.get())) {
+            Token opTok = peek();
+            throw std::runtime_error("Increment/decrement is only supported for simple identifiers at " + opTok.loc.to_string());
+         }
+         Token opTok = consume();
          // build BinaryExpressionNode: x + 1 OR x - 1
-         auto bin = std::make_unique < BinaryExpressionNode > ();
+         auto bin = std::make_unique<BinaryExpressionNode>();
          bin->op = (opTok.type == TokenType::INCREMENT) ? "+": "-";
-         auto leftIdent = std::make_unique < IdentifierNode > ();
-         leftIdent->name = name;
-         leftIdent->token = idTok;
-         bin->left = std::move(leftIdent);
-
-         auto one = std::make_unique < NumericLiteralNode > ();
+         bin->left = std::move(nodeExpr);
+         auto one = std::make_unique<NumericLiteralNode>();
          one->value = 1;
-         one->token = opTok; // reuse operator token
+         one->token = opTok;
          bin->right = std::move(one);
          bin->token = opTok;
 
-         auto assign = std::make_unique < AssignmentNode > ();
-         assign->identifier = name;
+         auto assign = std::make_unique<AssignmentNode>();
+         // assign target is the identifier (moved from bin->left)
+         assign->target = std::move(bin->left);
          assign->value = std::move(bin);
          assign->token = idTok;
          if (peek().type == TokenType::SEMICOLON) consume();
          return assign;
       }
-      else {
-         // Could be call or identifier-expression statement
-         auto ident = std::make_unique < IdentifierNode > ();
-         ident->name = name;
-         ident->token = idTok;
-         if (peek().type == TokenType::OPENPARENTHESIS) {
-            auto call = parse_call(std::move(ident));
-            auto stmt = std::make_unique < ExpressionStatementNode > ();
-            stmt->expression = std::move(call);
-            if (peek().type == TokenType::SEMICOLON) consume();
-            return stmt;
-         } else {
-            auto stmt = std::make_unique < ExpressionStatementNode > ();
-            stmt->expression = std::move(ident);
-            if (peek().type == TokenType::SEMICOLON) consume();
-            return stmt;
-         }
-      }
+
+      // Otherwise it's an expression statement: return the fully-expanded expression (call/member/index)
+      if (peek().type == TokenType::SEMICOLON) consume();
+      auto stmt = std::make_unique<ExpressionStatementNode>();
+      stmt->expression = std::move(nodeExpr);
+      return stmt;
    }
 
    // fallback: expression statement

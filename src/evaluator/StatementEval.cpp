@@ -1,4 +1,3 @@
-// src/evaluator/statementEval.cpp
 #include "evaluator.hpp"
 #include <iostream>
 #include <cmath>
@@ -24,24 +23,58 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
       return;
    }
 
+   // Assignment: target is now an ExpressionNode (IdentifierNode / IndexExpressionNode / MemberExpressionNode)
    if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
-      Value val = evaluate_expression(an->value.get(), env);
-      EnvPtr walk = env;
-      while (walk) {
-         auto it = walk->values.find(an->identifier);
-         if (it != walk->values.end()) {
-            if (it->second.is_constant) throw std::runtime_error("Cannot assign to constant '" + an->identifier + "' at " + an->token.loc.to_string());
-            it->second.value = val;
-            return;
+      Value rhs = evaluate_expression(an->value.get(), env);
+
+      // Identifier target: update variable in enclosing environment (search up chain) or create in current env
+      if (auto id = dynamic_cast<IdentifierNode*>(an->target.get())) {
+         EnvPtr walk = env;
+         while (walk) {
+            auto it = walk->values.find(id->name);
+            if (it != walk->values.end()) {
+               if (it->second.is_constant) throw std::runtime_error("Cannot assign to constant '" + id->name + "' at " + id->token.loc.to_string());
+               it->second.value = rhs;
+               return;
+            }
+            walk = walk->parent;
          }
-         walk = walk->parent;
+         // not found -> create in current env
+         Environment::Variable var {
+            rhs,
+            false
+         };
+         env->set(id->name, var);
+         return;
       }
-      Environment::Variable var {
-         val,
-         false
-      };
-      env->set(an->identifier, var);
-      return;
+
+      // Index target: a[b] = rhs
+      if (auto idx = dynamic_cast<IndexExpressionNode*>(an->target.get())) {
+         Value objVal = evaluate_expression(idx->object.get(), env);
+         Value indexVal = evaluate_expression(idx->index.get(), env);
+         long long rawIndex = static_cast<long long>(to_number(indexVal));
+         if (!std::holds_alternative<ArrayPtr>(objVal)) {
+            throw std::runtime_error("Attempted index assignment on non-array at " + idx->token.loc.to_string());
+         }
+         ArrayPtr arr = std::get<ArrayPtr>(objVal);
+         if (!arr) {
+            throw std::runtime_error("Cannot assign into null array at " + idx->token.loc.to_string());
+         }
+         if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
+         size_t uidx = static_cast<size_t>(rawIndex);
+         if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
+         arr->elements[uidx] = rhs;
+         return;
+      }
+
+      // Member target: obj.prop = rhs
+      if (auto mem = dynamic_cast<MemberExpressionNode*>(an->target.get())) {
+         // We do not currently support arbitrary property assignment on values.
+         // If you want map-like objects or property bags, we can add them.
+         throw std::runtime_error("Member assignment not supported at " + mem->token.loc.to_string());
+      }
+
+      throw std::runtime_error("Unsupported assignment target at " + an->token.loc.to_string());
    }
 
    if (auto ps = dynamic_cast<PrintStatementNode*>(stmt)) {
@@ -104,33 +137,26 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
    // --- NEW: ForStatementNode (kwa) ---
    if (auto fn = dynamic_cast<ForStatementNode*>(stmt)) {
-      // The entire loop (init, cond, post, body) lives in a new scope.
       auto forEnv = std::make_shared < Environment > (env);
 
-      // 1. Initializer runs once in the new scope.
       if (fn->init) {
          evaluate_statement(fn->init.get(), forEnv, nullptr, nullptr);
       }
 
       while (true) {
-         // 2. Condition check. Default to true if no condition.
          bool condition_met = true;
          if (fn->condition) {
             Value condVal = evaluate_expression(fn->condition.get(), forEnv);
             condition_met = to_bool(condVal);
          }
-         if (!condition_met) {
-            break;
-         }
+         if (!condition_met) break;
 
-         // 3. Body execution in its own sub-scope to isolate declarations per iteration.
          auto bodyEnv = std::make_shared < Environment > (forEnv);
          for (auto &s: fn->body) {
             evaluate_statement(s.get(), bodyEnv, return_value, did_return);
-            if (did_return && *did_return) return; // Propagate return upwards
+            if (did_return && *did_return) return;
          }
 
-         // 4. Post-expression evaluation.
          if (fn->post) {
             evaluate_expression(fn->post.get(), forEnv);
          }
@@ -144,7 +170,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
          auto bodyEnv = std::make_shared < Environment > (env);
          for (auto &s: wn->body) {
             evaluate_statement(s.get(), bodyEnv, return_value, did_return);
-            if (did_return && *did_return) return; // Propagate return
+            if (did_return && *did_return) return;
          }
       }
       return;
@@ -157,7 +183,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
          auto bodyEnv = std::make_shared < Environment > (env);
          for (auto &s: dwn->body) {
             evaluate_statement(s.get(), bodyEnv, return_value, did_return);
-            if (did_return && *did_return) return; // Propagate return
+            if (did_return && *did_return) return;
          }
          condVal = evaluate_expression(dwn->condition.get(), bodyEnv);
       } while (to_bool(condVal));

@@ -1,5 +1,5 @@
-// src/parser/expressions.cpp
 #include "parser.hpp"
+#include <iostream>
 #include <stdexcept>
 #include <cctype>
 #include <sstream>
@@ -12,39 +12,39 @@ std::unique_ptr < ExpressionNode > Parser::parse_expression() {
 std::unique_ptr < ExpressionNode > Parser::parse_ternary() {
    auto cond = parse_logical_or();
 
-  if (peek().type != TokenType::QUESTIONMARK) {
+   if (peek().type != TokenType::QUESTIONMARK) {
       return cond;
    }
 
-  Token qTok = consume(); // consume '?'
+   Token qTok = consume(); // consume '?'
 
-  // helper: treat NEWLINE/INDENT/DEDENT as formatting around ternary parts
+   // helper: treat NEWLINE/INDENT/DEDENT as formatting around ternary parts
    auto skip_formatting = [&]() {
       while (peek().type == TokenType::NEWLINE ||
-            peek().type == TokenType::INDENT ||
-             peek().type == TokenType::DEDENT) {
-        consume();
+         peek().type == TokenType::INDENT ||
+         peek().type == TokenType::DEDENT) {
+         consume();
       }
-  };
+   };
 
    // Allow formatting tokens before thenExpr
    skip_formatting();
    auto thenExpr = parse_ternary();
 
-  // Allow formatting tokens before ':'
+   // Allow formatting tokens before ':'
    skip_formatting();
    expect(TokenType::COLON, "Expected ':' after ternary 'then' expression");
 
-  // Allow formatting tokens before elseExpr
-  skip_formatting();
+   // Allow formatting tokens before elseExpr
+   skip_formatting();
    auto elseExpr = parse_ternary();
 
    auto node = std::make_unique < TernaryExpressionNode > ();
    node->token = qTok;
-  node->condition = std::move(cond);
+   node->condition = std::move(cond);
    node->thenExpr = std::move(thenExpr);
-  node->elseExpr = std::move(elseExpr);
-  return node;
+   node->elseExpr = std::move(elseExpr);
+   return node;
 }
 
 
@@ -173,17 +173,54 @@ std::unique_ptr < ExpressionNode > Parser::parse_unary() {
       node->token = op;
       return node;
    }
-   return parse_primary();
+
+   // parse primary expression first
+   auto node = parse_primary();
+
+   // Postfix loop: handle calls, member access (obj.prop), and indexing (obj[index])
+   while (true) {
+      if (peek().type == TokenType::OPENPARENTHESIS) {
+         // call: convert current node into a CallExpressionNode via parse_call
+         node = parse_call(std::move(node));
+         continue;
+      }
+      if (peek().type == TokenType::DOT) {
+         Token dotTok = consume(); // consume '.'
+         // expect identifier after dot
+         expect(TokenType::IDENTIFIER, "Expected identifier after '.'");
+         Token propTok = tokens[position - 1];
+         auto mem = std::make_unique<MemberExpressionNode>();
+         mem->object = std::move(node);
+         mem->property = propTok.value;
+         mem->token = dotTok;
+         node = std::move(mem);
+         continue;
+      }
+      if (peek().type == TokenType::OPENBRACKET) {
+         Token openIdx = consume(); // consume '['
+         auto idxExpr = parse_expression();
+         expect(TokenType::CLOSEBRACKET, "Expected ']' after index expression");
+         auto idxNode = std::make_unique<IndexExpressionNode>();
+         idxNode->object = std::move(node);
+         idxNode->index = std::move(idxExpr);
+         idxNode->token = openIdx;
+         node = std::move(idxNode);
+         continue;
+      }
+      break;
+   }
+
+   return node;
 }
 
-std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
+std::unique_ptr < ExpressionNode > Parser::parse_template_literal() {
    // This function supports two lexer styles:
    // 1) Simple lexer: emits one TEMPLATE_STRING token containing the whole content
    //    -> we produce TemplateLiteralNode with quasis = { value } and no expressions.
    // 2) Full interpolation lexer: emits a sequence like:
    //    TEMPLATE_CHUNK("Hello "), TEMPLATE_EXPR_START, ...expr tokens..., TEMPLATE_EXPR_END, TEMPLATE_CHUNK(", world"), ... , TEMPLATE_END
    //    -> we consume the chunks/exprs and produce quasis+expressions accordingly.
-   auto node = std::make_unique<TemplateLiteralNode>();
+   auto node = std::make_unique < TemplateLiteralNode > ();
 
    Token t = peek();
    if (t.type == TokenType::TEMPLATE_STRING) {
@@ -287,9 +324,7 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       auto ident = std::make_unique < IdentifierNode > ();
       ident->name = id.value;
       ident->token = id;
-      if (peek().type == TokenType::OPENPARENTHESIS) {
-         return parse_call(std::move(ident));
-      }
+      // do NOT consume '(' here; postfix handling in parse_unary will handle calls, indexing, members
       return ident;
    }
    if (t.type == TokenType::OPENPARENTHESIS) {
@@ -298,6 +333,22 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after expression");
       return inner;
    }
+
+   if (t.type == TokenType::OPENBRACKET) {
+      Token openTok = consume();
+      auto arrayNode = std::make_unique < ArrayExpressionNode > ();
+      arrayNode->token = openTok;
+
+      if (peek().type != TokenType::CLOSEBRACKET) {
+         do {
+            arrayNode->elements.push_back(parse_expression());
+         } while (match(TokenType::COMMA));
+      }
+
+      expect(TokenType::CLOSEBRACKET, "Expected ']' after array elements");
+      return arrayNode;
+   }
+
 
    Token tok = peek();
    throw std::runtime_error(
@@ -318,5 +369,3 @@ std::unique_ptr < ExpressionNode > Parser::parse_call(std::unique_ptr < Expressi
    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after call arguments");
    return call;
 }
-
-

@@ -1,4 +1,3 @@
-// src/parser/control_flow.cpp
 #include "parser.hpp"
 #include <stdexcept>
 #include <cctype>
@@ -93,7 +92,13 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
                consume();
                auto value = parse_expression();
                auto node = std::make_unique < AssignmentNode > ();
-               node->identifier = name;
+
+               // assignment target is an IdentifierNode now
+               auto targetIdent = std::make_unique<IdentifierNode>();
+               targetIdent->name = name;
+               targetIdent->token = idTok;
+               node->target = std::move(targetIdent);
+
                node->value = std::move(value);
                node->token = idTok;
                initStmt = std::move(node);
@@ -109,7 +114,13 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
                bin->right = std::move(right);
                bin->token = opTok;
                auto assign = std::make_unique < AssignmentNode > ();
-               assign->identifier = name;
+
+               // target identifier for assignment
+               auto targetIdent = std::make_unique<IdentifierNode>();
+               targetIdent->name = name;
+               targetIdent->token = idTok;
+               assign->target = std::move(targetIdent);
+
                assign->value = std::move(bin);
                assign->token = idTok;
                initStmt = std::move(assign);
@@ -127,7 +138,13 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
                bin->right = std::move(one);
                bin->token = opTok;
                auto assign = std::make_unique < AssignmentNode > ();
-               assign->identifier = name;
+
+               // target identifier for assignment
+               auto targetIdent = std::make_unique<IdentifierNode>();
+               targetIdent->name = name;
+               targetIdent->token = idTok;
+               assign->target = std::move(targetIdent);
+
                assign->value = std::move(bin);
                assign->token = idTok;
                initStmt = std::move(assign);

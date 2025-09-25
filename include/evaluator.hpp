@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
+#include <functional>
 
 // Forward declaration
 class Environment;
@@ -16,14 +17,24 @@ struct FunctionValue;
 using FunctionPtr = std::shared_ptr<FunctionValue>;
 using EnvPtr = std::shared_ptr<Environment>;
 
+// Forward-declare ArrayValue so Value can hold a pointer to it (avoids recursive-instantiation issues)
+struct ArrayValue;
+using ArrayPtr = std::shared_ptr<ArrayValue>;
+
 // Include a "no-value" variant so we can represent undefined/void returns cleanly.
 using Value = std::variant<
     std::monostate,        // represents undefined / no value
     double,
     std::string,
     bool,
-    FunctionPtr
+    FunctionPtr,
+    ArrayPtr
 >;
+
+// Now that Value is defined, define ArrayValue containing a vector of Values.
+struct ArrayValue {
+    std::vector<Value> elements;
+};
 
 // Function value: closure with parameters, body, and defining environment
 struct FunctionValue {
@@ -42,7 +53,11 @@ struct FunctionValue {
     // token for error locations / diagnostics
     Token token;
 
-    // constructor: accept const refs to avoid overload/temporary binding problems
+    // If native, this is filled and called by call_function.
+    bool is_native = false;
+    std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> native_impl;
+
+    // constructor: user-defined function
     FunctionValue(
         const std::string& nm,
         const std::vector<std::string>& params,
@@ -55,6 +70,23 @@ struct FunctionValue {
         , body(b)
         , closure(env)
         , token(tok)
+        , is_native(false)
+    {}
+
+    // constructor: native function
+    FunctionValue(
+        const std::string& nm,
+        std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl,
+        const EnvPtr& env,
+        const Token& tok
+    )
+        : name(nm)
+        , parameters()
+        , body(nullptr)
+        , closure(env)
+        , token(tok)
+        , is_native(true)
+        , native_impl(std::move(impl))
     {}
 };
 
@@ -102,4 +134,7 @@ private:
     double to_number(const Value& v);
     std::string to_string_value(const Value& v);
     bool to_bool(const Value& v);
+
+    // value equality helper (deep for arrays, tolerant for mixed number/string)
+    bool is_equal(const Value& a, const Value& b);
 };

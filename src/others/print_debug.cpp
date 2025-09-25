@@ -12,6 +12,7 @@ static std::string token_name(TokenType t) {
         {TokenType::BOOLEAN,"BOOLEAN"}, {TokenType::SEMICOLON,"SEMICOLON"}, {TokenType::COMMA,"COMMA"},
         {TokenType::OPENPARENTHESIS,"OPENPARENTHESIS"}, {TokenType::CLOSEPARENTHESIS,"CLOSEPARENTHESIS"},
         {TokenType::OPENBRACE,"OPENBRACE"}, {TokenType::CLOSEBRACE,"CLOSEBRACE"},
+        {TokenType::OPENBRACKET,"OPENBRACKET"}, {TokenType::CLOSEBRACKET,"CLOSEBRACKET"},
         {TokenType::COLON,"COLON"}, {TokenType::ASSIGN,"ASSIGN"}, {TokenType::EOF_TOKEN,"EOF_TOKEN"},
         {TokenType::PLUS,"PLUS"}, {TokenType::MINUS,"MINUS"}, {TokenType::STAR,"STAR"}, {TokenType::SLASH,"SLASH"},
         {TokenType::PERCENT,"PERCENT"}, {TokenType::POWER,"POWER"}, {TokenType::PLUS_ASSIGN,"PLUS_ASSIGN"},

@@ -82,6 +82,24 @@ struct CallExpressionNode : public ExpressionNode {
     }
 };
 
+// Member expression: obj.prop (e.g., arr.idadi, str.herufi, arr.ongeza)
+struct MemberExpressionNode : public ExpressionNode {
+    std::unique_ptr<ExpressionNode> object;
+    std::string property; // property name (identifier part)
+    std::string to_string() const override {
+        return object->to_string() + "." + property;
+    }
+};
+
+// Index expression: obj[expr] (e.g., arr[0], arr[i+1])
+struct IndexExpressionNode : public ExpressionNode {
+    std::unique_ptr<ExpressionNode> object;
+    std::unique_ptr<ExpressionNode> index;
+    std::string to_string() const override {
+        return object->to_string() + "[" + (index ? index->to_string() : "") + "]";
+    }
+};
+
 // TernaryExpressionNode
 struct TernaryExpressionNode : ExpressionNode {
     std::unique_ptr<ExpressionNode> condition;
@@ -127,6 +145,24 @@ struct TemplateLiteralNode : public ExpressionNode {
     }
 };
 
+
+
+struct ArrayExpressionNode : public ExpressionNode {
+    std::vector<std::unique_ptr<ExpressionNode>> elements;
+
+    std::string to_string() const override {
+        std::string s = "[";
+        for (size_t i = 0; i < elements.size(); ++i) {
+            if (i) s += ", ";
+            s += elements[i]->to_string();
+        }
+        s += "]";
+        return s;
+    }
+};
+
+
+
 // Statements
 struct StatementNode : public Node {};
 
@@ -136,8 +172,9 @@ struct VariableDeclarationNode : public StatementNode {
     bool is_constant = false;
 };
 
+// Assignment: target can be an identifier or an index/member expression (e.g., a = 1; a[0] = x; obj.prop = y)
 struct AssignmentNode : public StatementNode {
-    std::string identifier;
+    std::unique_ptr<ExpressionNode> target; // IdentifierNode or IndexExpressionNode or MemberExpressionNode
     std::unique_ptr<ExpressionNode> value;
 };
 

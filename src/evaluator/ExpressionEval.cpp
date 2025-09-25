@@ -3,8 +3,10 @@
 #include <cmath>
 #include <stdexcept>
 #include <sstream>
+#include <functional>
+#include <algorithm>
+#include <cctype>
 
-// ----------------- Expression evaluation -----------------
 Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    if (!expr) return std::monostate {};
 
@@ -31,7 +33,23 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          }
       }
 
-      return Value { out };
+      return Value {
+         out
+      };
+   }
+
+   // ---- Array literal evaluation: [elem, elem, ...] ----
+   if (auto arrNode = dynamic_cast<ArrayExpressionNode*>(expr)) {
+      auto arrVal = std::make_shared < ArrayValue > ();
+      arrVal->elements.reserve(arrNode->elements.size());
+      for (auto &elemPtr: arrNode->elements) {
+         // elements can be any expression (including nested arrays)
+         Value ev = evaluate_expression(elemPtr.get(), env);
+         arrVal->elements.push_back(std::move(ev));
+      }
+      return Value {
+         arrVal
+      };
    }
 
    if (auto b = dynamic_cast<BooleanLiteralNode*>(expr)) return Value {
@@ -44,6 +62,843 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.loc.to_string());
       }
       return env->get(id->name).value;
+   }
+
+   // Member access: object.property (e.g., arr.idadi, arr.ongeza, str.herufi)
+   if (auto mem = dynamic_cast<MemberExpressionNode*>(expr)) {
+      Value objVal = evaluate_expression(mem->object.get(), env);
+
+      // String property 'herufi' (length)
+      if (std::holds_alternative < std::string > (objVal) && mem->property == "herufi") {
+         const std::string &s = std::get < std::string > (objVal);
+         return Value {
+            static_cast<double > (s.size())
+         };
+      }
+
+      // String methods/properties
+      if (std::holds_alternative < std::string > (objVal)) {
+         const std::string s_val = std::get < std::string > (objVal);
+         const std::string &prop = mem->property;
+
+         // helper to create native function values (captures s_val and this)
+         auto make_fn = [this,
+            s_val,
+            env,
+            mem](std::function < Value(const std::vector < Value>&, EnvPtr, const Token&) > impl) -> Value {
+            auto native_impl = [impl](const std::vector < Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+               return impl(args, callEnv, token);
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:string.") + mem->property, native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         };
+
+         // herufiNdogo() -> toLowerCase
+         if (prop == "herufiNdogo") {
+            return make_fn([s_val](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               std::string out = s_val;
+               for (auto &c: out) c = static_cast<char > (std::tolower(static_cast<unsigned char > (c)));
+               return Value {
+                  out
+               };
+            });
+         }
+
+         // herufiKubwa() -> toUpperCase
+         if (prop == "herufiKubwa") {
+            return make_fn([s_val](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               std::string out = s_val;
+               for (auto &c: out) c = static_cast<char > (std::toupper(static_cast<unsigned char > (c)));
+               return Value {
+                  out
+               };
+            });
+         }
+
+         // sawazisha() -> trim()
+         if (prop == "sawazisha") {
+            return make_fn([s_val](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               size_t a = 0, b = s_val.size();
+               while (a < b && std::isspace(static_cast<unsigned char > (s_val[a]))) ++a;
+               while (b > a && std::isspace(static_cast<unsigned char > (s_val[b-1]))) --b;
+               return Value {
+                  s_val.substr(a, b - a)
+               };
+            });
+         }
+
+         // anzaNa(prefix) -> startsWith
+         if (prop == "anzaNa") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.anzaNa inahitaji hoja 1 at " + token.loc.to_string());
+               std::string pref = to_string_value(args[0]);
+               if (pref.size() > s_val.size()) return Value {
+                  false
+               };
+               return Value {
+                  s_val.rfind(pref, 0) == 0
+               };
+            });
+         }
+
+         // ishaNa(suffix) -> endsWith
+         if (prop == "ishaNa") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.ishaNa inahitaji hoja 1 at " + token.loc.to_string());
+               std::string suf = to_string_value(args[0]);
+               if (suf.size() > s_val.size()) return Value {
+                  false
+               };
+               return Value {
+                  s_val.compare(s_val.size() - suf.size(), suf.size(), suf) == 0
+               };
+            });
+         }
+
+         // kuna(sub) -> includes
+         if (prop == "kuna") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.kuna inahitaji hoja 1 at " + token.loc.to_string());
+               std::string sub = to_string_value(args[0]);
+               return Value {
+                  s_val.find(sub) != std::string::npos
+               };
+            });
+         }
+
+         // tafuta(sub, fromIndex?) -> indexOf
+         if (prop == "tafuta") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.tafuta inahitaji hoja 1 at " + token.loc.to_string());
+               std::string sub = to_string_value(args[0]);
+               size_t from = 0;
+               if (args.size() >= 2) from = static_cast<size_t > (std::max(0LL, static_cast<long long > (to_number(args[1]))));
+               size_t pos = s_val.find(sub, from);
+               if (pos == std::string::npos) return Value {
+                  static_cast<double > (-1)
+               };
+               return Value {
+                  static_cast<double > (pos)
+               };
+            });
+         }
+
+         // slesi(start?, end?) -> substring-like slice
+         if (prop == "slesi") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               long long n = static_cast<long long > (s_val.size());
+               long long start = 0;
+               long long end = n;
+               if (args.size() >= 1) start = static_cast<long long > (to_number(args[0]));
+               if (args.size() >= 2) end = static_cast<long long > (to_number(args[1]));
+               if (start < 0) start = std::max(0LL, n + start);
+               if (end < 0) end = std::max(0LL, n + end);
+               start = std::min(std::max(0LL, start), n);
+               end = std::min(std::max(0LL, end), n);
+               return Value {
+                  s_val.substr((size_t)start, (size_t)(end - start))
+               };
+            });
+         }
+
+         // badilisha(old, neu) -> replace first occurrence
+         if (prop == "badilisha") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.size() < 2) throw std::runtime_error("str.badilisha inahitaji hoja 2 at " + token.loc.to_string());
+               std::string oldv = to_string_value(args[0]);
+               std::string newv = to_string_value(args[1]);
+               std::string out = s_val;
+               size_t pos = out.find(oldv);
+               if (pos != std::string::npos) out.replace(pos, oldv.size(), newv);
+               return Value {
+                  out
+               };
+            });
+         }
+
+         // badilishaZote(old, neu) -> replace all occurrences
+         if (prop == "badilishaZote") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.size() < 2) throw std::runtime_error("str.badilishaZote inahitaji hoja 2 at " + token.loc.to_string());
+               std::string oldv = to_string_value(args[0]);
+               std::string newv = to_string_value(args[1]);
+               if (oldv.empty()) return Value {
+                  s_val
+               }; // avoid infinite loop
+               std::string out;
+               size_t pos = 0, prev = 0;
+               while ((pos = s_val.find(oldv, prev)) != std::string::npos) {
+                  out.append(s_val, prev, pos - prev);
+                  out.append(newv);
+                  prev = pos + oldv.size();
+               }
+               out.append(s_val, prev, std::string::npos);
+               return Value {
+                  out
+               };
+            });
+         }
+
+         // gawanya(separator?) -> split into ArrayPtr
+         if (prop == "gawanya") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               std::string sep;
+               bool useSep = false;
+               if (!args.empty()) {
+                  sep = to_string_value(args[0]); useSep = true;
+               }
+               auto out = std::make_shared < ArrayValue > ();
+               if (!useSep) {
+                  for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value {
+                     std::string(1, s_val[i])
+                  });
+                  return Value {
+                     out
+                  };
+               }
+               if (sep.empty()) {
+                  for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value {
+                     std::string(1, s_val[i])
+                  });
+                  return Value {
+                     out
+                  };
+               }
+               size_t pos = 0, prev = 0;
+               while ((pos = s_val.find(sep, prev)) != std::string::npos) {
+                  out->elements.push_back(Value {
+                     s_val.substr(prev, pos - prev)
+                  });
+                  prev = pos + sep.size();
+               }
+               out->elements.push_back(Value {
+                  s_val.substr(prev)
+               });
+               return Value {
+                  out
+               };
+            });
+         }
+
+         // unganisha(other) -> concat and return new string
+         if (prop == "unganisha") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.unganisha inahitaji hoja 1 at " + token.loc.to_string());
+               return Value {
+                  s_val + to_string_value(args[0])
+               };
+            });
+         }
+
+         // rudia(n) -> repeat string n times
+         if (prop == "rudia") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.rudia inahitaji hoja 1 at " + token.loc.to_string());
+               long long n = static_cast<long long > (to_number(args[0]));
+               if (n <= 0) return Value {
+                  std::string()
+               };
+               std::string out;
+               out.reserve(s_val.size() * (size_t)n);
+               for (long long i = 0; i < n; ++i) out += s_val;
+               return Value {
+                  out
+               };
+            });
+         }
+
+         // herufiYa(index) -> charAt (single-char string or empty)
+         if (prop == "herufiYa") {
+            return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("str.herufiKwa inahitaji hoja 1 at " + token.loc.to_string());
+               long long idx = static_cast<long long > (to_number(args[0]));
+               if (idx < 0 || (size_t)idx >= s_val.size()) return Value {
+                  std::string()
+               };
+               return Value {
+                  std::string(1, s_val[(size_t)idx])
+               };
+            });
+         }
+
+         // No matching string property -> fall through to unknown property error below
+      }
+
+
+
+      // --- Number methods & properties (place this after string methods, before array methods) ---
+      if (std::holds_alternative < double > (objVal)) {
+         double num = std::get < double > (objVal);
+         const std::string &prop = mem->property;
+
+         // ---------- Properties ----------
+         if (prop == "isiyoSahihi") {
+            return Value {
+               std::isnan(num)
+            };
+         }
+         if (prop == "isiyoNaMwisho") {
+            return Value {
+               !std::isfinite(num)
+            };
+         }
+         if (prop == "nzima") {
+            return Value {
+               std::isfinite(num) && std::floor(num) == num
+            };
+         }
+         if (prop == "desimali") {
+            return Value {
+               std::isfinite(num) && std::floor(num) != num
+            };
+         }
+         if (prop == "chanya") {
+            return Value {
+               num > 0
+            };
+         }
+         if (prop == "hasi") {
+            return Value {
+               num < 0
+            };
+         }
+         // boolean "is" properties: odd, even, prime
+         if (prop == "witiri" || prop == "shufwa" || prop == "tasa") {
+            // quick guards: must be finite and integer
+            if (!std::isfinite(num) || std::floor(num) != num) {
+               return Value {
+                  false
+               };
+            }
+
+            // avoid UB on cast if number too large for signed long long
+            if (num > static_cast<double > (LLONG_MAX) || num < static_cast<double > (LLONG_MIN)) {
+               return Value {
+                  false
+               };
+            }
+
+            long long n = static_cast<long long > (std::llround(num)); // safe now
+
+            if (prop == "witiri") {
+               // odd
+               return Value {
+                  (n % 2) != 0
+               };
+            }
+
+            if (prop == "shufwa") {
+               // even
+               return Value {
+                  (n % 2) == 0
+               };
+            }
+
+            // niTasa -> primality (simple trial division)
+            if (prop == "tasa") {
+               if (n < 2) return Value {
+                  false
+               };
+               if (n % 2 == 0) return Value {
+                  n == 2
+               }; // even >2 => composite
+
+               long long limit = static_cast<long long > (std::sqrt((long double)n));
+               for (long long i = 3; i <= limit; i += 2) {
+                  if (n % i == 0) return Value {
+                     false
+                  };
+               }
+               return Value {
+                  true
+               };
+            }
+         }
+
+
+         // ---------- Methods (return FunctionValue) ----------
+
+         // abs -> n.abs()
+         if (prop == "abs") {
+            auto native_impl = [num](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               return Value {
+                  std::fabs(num)
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.abs"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+
+         // round / kadiria
+         if (prop == "kadiria") {
+            auto native_impl = [num](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               return Value {
+                  static_cast<double > (std::round(num))
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.kadiria"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+         if (prop == "kadiriajuu") {
+            auto native_impl = [num](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               return Value {
+                  static_cast<double > (std::ceil(num))
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.kadiriajuu"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+         if (prop == "kadiriachini") {
+            auto native_impl = [num](const std::vector < Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+               return Value {
+                  static_cast<double > (std::floor(num))
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.kadiriachini"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+
+         // kipeo / kipeuo: power & nth-root
+         // n.kipeo(b?) => n**b  (default: square if no arg)
+         // n.kipeuo(b?) => nth-root (default: square root if no arg)
+         if (prop == "kipeo") {
+            auto native_impl = [this,
+               num](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) {
+                  return Value {
+                     num * num
+                  }; // square by default
+               }
+               double b = to_number(args[0]);
+               return Value {
+                  std::pow(num, b)
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.kipeo"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+         if (prop == "kipeuo") {
+            auto native_impl = [this,
+               num](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) {
+                  if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha thamani hasi");
+                  return Value {
+                     std::sqrt(num)
+                  }; // sqrt default
+               }
+               double b = to_number(args[0]);
+               if (b == 0) throw std::runtime_error("Huwezi kugawa kwa sifuri kwenye kipeuo");
+               // nth root: num^(1/b)
+               return Value {
+                  std::pow(num, 1.0 / b)
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.kipeuo"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+
+         // n.kubwa / n.ndogo -> compare n to args; single-arg returns number, multi-arg returns new array
+         if (prop == "kubwa" || prop == "ndogo") {
+            bool wantMax = (prop == "kubwa");
+
+            auto native_impl = [this,
+               num,
+               wantMax](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) {
+                  throw std::runtime_error(std::string("n.") + (wantMax ? "kubwa": "ndogo") +
+                     " needs at least 1 argument at " + token.loc.to_string());
+               }
+
+               if (args.size() == 1) {
+                  double a = to_number(args[0]);
+                  return Value {
+                     wantMax ? std::max(num, a): std::min(num, a)
+                  };
+               }
+
+               // multiple args -> return array of pairwise comparisons: for each arg return max/min(num, arg)
+               auto out = std::make_shared < ArrayValue > ();
+               out->elements.reserve(args.size());
+               for (const auto &a: args) {
+                  double v = to_number(a);
+                  double res = wantMax ? std::max(num, v): std::min(num, v);
+                  out->elements.push_back(Value {
+                     res
+                  });
+               }
+               return Value {
+                  out
+               };
+            };
+
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.") + prop, native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+
+
+         // toFixed(digits?)
+         if (prop == "kadiriaKwa") {
+            auto native_impl = [this,
+               num](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               int digits = 0;
+               if (!args.empty()) digits = static_cast<int > (to_number(args[0]));
+               std::ostringstream oss;
+               oss.setf(std::ios::fixed);
+               oss.precision(std::max(0, digits));
+               oss << num;
+               return Value {
+                  oss.str()
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.toFixed"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+
+         // kwaKiwango(factor) -> num * factor
+         if (prop == "kwaKiwango") {
+            auto native_impl = [this,
+               num](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+               if (args.empty()) throw std::runtime_error("n.kwaKiwango needs atleast one argument at " + token.loc.to_string());
+               double factor = to_number(args[0]);
+               return Value {
+                  num * factor
+               };
+            };
+            auto fn = std::make_shared < FunctionValue > (std::string("native:number.kwaKiwango"), native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+
+         // If none matched, fallthrough to unknown prop logic below
+      }
+
+
+
+      // Array properties & methods
+      if (std::holds_alternative < ArrayPtr > (objVal)) {
+         ArrayPtr arr = std::get < ArrayPtr > (objVal);
+
+         // length property
+         if (mem->property == "idadi") {
+            return Value {
+               static_cast<double > (arr ? arr->elements.size(): 0)
+            };
+         }
+
+         // Accept multiple synonyms for common operations (keeps compatibility)
+         const std::string &prop = mem->property;
+
+         // Recognized array method names
+         if (prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
+            prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
+            prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
+            prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chagua" || prop == "punguza" || prop == "unganisha") {
+
+            auto native_impl = [this,
+               arr,
+               prop](const std::vector < Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+               if (!arr) return std::monostate {};
+
+               // push: ongeza(value...)
+               if (prop == "ongeza") {
+                  if (args.empty()) throw std::runtime_error("arr.ongeza inahitaji angalau 1 hoja at " + token.loc.to_string());
+                  arr->elements.insert(arr->elements.end(), args.begin(), args.end());
+                  return Value {
+                     static_cast<double > (arr->elements.size())
+                  };
+               }
+
+               // pop (from end) : toa
+               if (prop == "toa") {
+                  if (arr->elements.empty()) return std::monostate {};
+                  Value v = arr->elements.back();
+                  arr->elements.pop_back();
+                  return v;
+               }
+
+               // remove by value: ondoa(value) -> removes first occurrence, returns boolean
+               if (prop == "ondoa" && !args.empty()) {
+                  auto it = std::find_if(arr->elements.begin(), arr->elements.end(), [&](const Value& elem) {
+                     return is_equal(elem, args[0]);
+                  });
+                  if (it != arr->elements.end()) {
+                     arr->elements.erase(it);
+                     return Value {
+                        true
+                     };
+                  }
+                  return Value {
+                     false
+                  };
+               }
+
+               // shift: ondoaMwanzo
+               if (prop == "ondoaMwanzo") {
+                  if (arr->elements.empty()) return std::monostate {};
+                  Value v = arr->elements.front();
+                  arr->elements.erase(arr->elements.begin());
+                  return v;
+               }
+
+               // unshift: ongezaMwanzo(...)
+               if (prop == "ongezaMwanzo") {
+                  if (args.empty()) throw std::runtime_error("arr.ongezaMwanzo inahitaji angalau 1 hoja at " + token.loc.to_string());
+                  arr->elements.insert(arr->elements.begin(), args.begin(), args.end());
+                  return Value {
+                     static_cast<double > (arr->elements.size())
+                  };
+               }
+
+               // insert(value, index)
+               if (prop == "ingiza") {
+                  if (args.size() < 2) throw std::runtime_error("arr.ingiza inahitaji hoja 2 (thamani, faharasa) at " + token.loc.to_string());
+                  const Value& val = args[0];
+                  long long idx = static_cast<long long > (to_number(args[1]));
+                  if (idx < 0) idx = 0;
+                  size_t uidx = static_cast<size_t > (std::min < long long > (idx, static_cast<long long > (arr->elements.size())));
+                  arr->elements.insert(arr->elements.begin() + uidx, val);
+                  return Value {
+                     static_cast<double > (arr->elements.size())
+                  };
+               }
+
+               // clear: futa()
+               if (prop == "futa") {
+                  arr->elements.clear();
+                  return std::monostate {};
+               }
+
+               // extend: panua(otherArray)
+               if (prop == "panua") {
+                  if (args.empty() || !std::holds_alternative < ArrayPtr > (args[0])) {
+                     throw std::runtime_error("arr.panua inahitaji safu kama hoja at " + token.loc.to_string());
+                  }
+
+                  ArrayPtr other = std::get < ArrayPtr > (args[0]);
+
+                  auto out = std::make_shared < ArrayValue > ();
+                  if (arr) {
+                     // copy all elements of the current array
+                     out->elements.insert(out->elements.end(), arr->elements.begin(), arr->elements.end());
+                  }
+                  if (other) {
+                     // append all elements of the other array
+                     out->elements.insert(out->elements.end(), other->elements.begin(), other->elements.end());
+                  }
+
+                  return Value {
+                     out
+                  };
+               }
+
+
+               // reverse: geuza()
+               if (prop == "geuza") {
+                  std::reverse(arr->elements.begin(), arr->elements.end());
+                  return Value {
+                     arr
+                  };
+               }
+
+               // sort: panga([comparator])
+               if (prop == "panga") {
+                  if (args.empty()) {
+                     // default: lexicographic by to_string_value
+                     std::sort(arr->elements.begin(), arr->elements.end(), [this](const Value& A, const Value& B) {
+                        return to_string_value(A) < to_string_value(B);
+                     });
+                  } else {
+                     if (!std::holds_alternative < FunctionPtr > (args[0])) throw std::runtime_error("arr.panga expects comparator function at " + token.loc.to_string());
+                     FunctionPtr cmp = std::get < FunctionPtr > (args[0]);
+                     std::sort(arr->elements.begin(), arr->elements.end(), [&](const Value& A, const Value& B) {
+                        Value res = call_function(cmp, {
+                           A, B
+                        }, token);
+                        // comparator should return number <0,0,>0 similar to JS - we treat negative as A<B
+                        return to_number(res) < 0;
+                     });
+                  }
+                  return Value {
+                     arr
+                  };
+               }
+
+               // indexOf: tafuta(value) -> returns index or -1
+               if (prop == "tafuta") {
+                  if (args.empty()) throw std::runtime_error("arr.tafuta inahitaji hoja 1 at " + token.loc.to_string());
+                  for (size_t i = 0; i < arr->elements.size(); ++i) {
+                     if (is_equal(arr->elements[i], args[0])) return Value {
+                        static_cast<double > (i)
+                     };
+                  }
+                  return Value {
+                     static_cast<double > (-1)
+                  };
+               }
+
+               // includes: kuna(value)
+               if (prop == "kuna") {
+                  if (args.empty()) throw std::runtime_error("arr.kuna inahitaji hoja 1 at " + token.loc.to_string());
+                  for (const auto& e: arr->elements) if (is_equal(e, args[0])) return Value {
+                     true
+                  };
+                  return Value {
+                     false
+                  };
+               }
+
+               // slice: pachika(start?, end?) or slesi
+               if (prop == "slesi") {
+                  long long n = static_cast<long long > (arr->elements.size());
+                  long long start = 0;
+                  long long end = n;
+                  if (args.size() >= 1) start = static_cast<long long > (to_number(args[0]));
+                  if (args.size() >= 2) end = static_cast<long long > (to_number(args[1]));
+                  // normalize negative
+                  if (start < 0) start = std::max(0LL, n + start);
+                  if (end < 0) end = std::max(0LL, n + end);
+                  start = std::min(std::max(0LL, start), n);
+                  end = std::min(std::max(0LL, end), n);
+                  auto out = std::make_shared < ArrayValue > ();
+                  for (long long i = start; i < end; ++i) out->elements.push_back(arr->elements[(size_t)i]);
+                  return Value {
+                     out
+                  };
+               }
+
+               // map: badili(fn)
+               if (prop == "badili") {
+                  if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0])) throw std::runtime_error("arr.badili inahitaji kazi kama hoja at " + token.loc.to_string());
+                  FunctionPtr mapper = std::get < FunctionPtr > (args[0]);
+                  auto out = std::make_shared < ArrayValue > ();
+                  for (size_t i = 0; i < arr->elements.size(); ++i) {
+                     Value res = call_function(mapper, {
+                        arr->elements[i], Value {
+                           static_cast<double > (i)
+                        }
+                     }, token);
+                     out->elements.push_back(res);
+                  }
+                  return Value {
+                     out
+                  };
+               }
+
+
+               // filter: chagua(fn) -> returns new array with elements where fn(elem, index) is truthy
+               if (prop == "chagua") {
+                  if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
+                  throw std::runtime_error("arr.chagua inahitaji kazi kama hoja at " + token.loc.to_string());
+                  FunctionPtr predicate = std::get < FunctionPtr > (args[0]);
+
+                  auto out = std::make_shared < ArrayValue > ();
+                  for (size_t i = 0; i < arr->elements.size(); ++i) {
+                     Value res = call_function(predicate, {
+                        arr->elements[i], Value {
+                           static_cast<double > (i)
+                        }
+                     }, token);
+                     if (to_bool(res)) out->elements.push_back(arr->elements[i]);
+                  }
+                  return Value {
+                     out
+                  };
+               }
+
+               // reduce: punguza(fn, initial?) -> reduce array to single value
+               if (prop == "punguza") {
+                  if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
+                  throw std::runtime_error("arr.punguza inahitaji kazi kama hoja at " + token.loc.to_string());
+                  FunctionPtr reducer = std::get < FunctionPtr > (args[0]);
+
+                  size_t startIndex = 0;
+                  Value acc;
+
+                  if (args.size() >= 2) {
+                     // initial provided
+                     acc = args[1];
+                     startIndex = 0;
+                  } else {
+                     // no initial: use first element as acc (JS-like). If empty -> error.
+                     if (arr->elements.empty()) throw std::runtime_error("arr.punguza on empty array without initial at " + token.loc.to_string());
+                     acc = arr->elements[0];
+                     startIndex = 1;
+                  }
+
+                  for (size_t i = startIndex; i < arr->elements.size(); ++i) {
+                     acc = call_function(reducer, {
+                        acc, arr->elements[i], Value {
+                           static_cast<double > (i)
+                        }
+                     }, token);
+                  }
+                  return acc;
+               }
+
+               // join: unganisha(separator?) -> returns string (elements coerced to string)
+               if (prop == "unganisha") {
+                  std::string sep = ",";
+                  if (!args.empty()) sep = to_string_value(args[0]); // coerce separator to string
+
+                  std::ostringstream oss;
+                  for (size_t i = 0; i < arr->elements.size(); ++i) {
+                     if (i) oss << sep;
+                     oss << to_string_value(arr->elements[i]);
+                  }
+                  return Value {
+                     oss.str()
+                  };
+               }
+
+
+               // default fallback
+               return std::monostate {};
+            };
+
+            auto fn = std::make_shared < FunctionValue > (std::string("native:array.") + prop, native_impl, env, mem->token);
+            return Value {
+               fn
+            };
+         }
+      }
+      // For other non-array/non-string objects, return undefined for unknown props
+      throw std::runtime_error("Unknown property '" + mem->property + "' on value at " + mem->token.loc.to_string());
+   }
+
+   // Indexing: obj[index]
+   if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
+      Value objVal = evaluate_expression(idx->object.get(), env);
+      Value indexVal = evaluate_expression(idx->index.get(), env);
+      long long rawIndex = static_cast<long long > (to_number(indexVal));
+      if (std::holds_alternative < ArrayPtr > (objVal)) {
+         ArrayPtr arr = std::get < ArrayPtr > (objVal);
+         if (!arr) return std::monostate {};
+         // JS-like behavior: negative indices not supported for read here; clamp
+         if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
+            return std::monostate {};
+         }
+         return arr->elements[(size_t)rawIndex];
+      }
+      throw std::runtime_error("Attempted to index non-array value at " + idx->token.loc.to_string());
    }
 
    if (auto u = dynamic_cast<UnaryExpressionNode*>(expr)) {
@@ -239,8 +1094,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          return evaluate_expression(t->elseExpr.get(), env);
       }
    }
-
-
 
    throw std::runtime_error("Unhandled expression node in evaluator");
 }
