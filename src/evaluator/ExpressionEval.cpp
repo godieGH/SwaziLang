@@ -611,7 +611,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          if (prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
             prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
             prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
-            prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chagua" || prop == "punguza" || prop == "unganisha") {
+            prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chagua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
 
             auto native_impl = [this,
                arr,
@@ -651,6 +651,23 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   };
                }
 
+               // remove all by value: ondoaZote(value) -> removes all occurrences, returns count removed
+               if (prop == "ondoaZote" && !args.empty()) {
+                  size_t before = arr->elements.size();
+                  arr->elements.erase(
+                     std::remove_if(arr->elements.begin(), arr->elements.end(),
+                        [&](const Value& elem) {
+                           return is_equal(elem, args[0]);
+                        }),
+                     arr->elements.end()
+                  );
+                  size_t removed = before - arr->elements.size();
+                  return Value {
+                     static_cast<double > (removed)
+                  };
+               }
+
+
                // shift: ondoaMwanzo
                if (prop == "ondoaMwanzo") {
                   if (arr->elements.empty()) return std::monostate {};
@@ -670,7 +687,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                // insert(value, index)
                if (prop == "ingiza") {
-                  if (args.size() < 2) throw std::runtime_error("arr.ingiza inahitaji hoja 2 (thamani, faharasa) at " + token.loc.to_string());
+                  if (args.size() < 2) throw std::runtime_error("arr.ingiza needs atleast 2 arguments (value, index) at " + token.loc.to_string());
                   const Value& val = args[0];
                   long long idx = static_cast<long long > (to_number(args[1]));
                   if (idx < 0) idx = 0;
@@ -743,17 +760,65 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                }
 
                // indexOf: tafuta(value) -> returns index or -1
+               // indexOf with optional start and backward-search sentinel: tafuta(value, start?)
                if (prop == "tafuta") {
                   if (args.empty()) throw std::runtime_error("arr.tafuta inahitaji hoja 1 at " + token.loc.to_string());
-                  for (size_t i = 0; i < arr->elements.size(); ++i) {
-                     if (is_equal(arr->elements[i], args[0])) return Value {
+
+                  const Value& target = args[0];
+                  long long n = static_cast<long long > (arr->elements.size());
+
+                  // empty array -> not found
+                  if (n == 0) return Value {
+                     static_cast<double > (-1)
+                  };
+
+                  // parse start if provided
+                  long long startNum = 0;
+                  bool backwardMode = false; // when start == -1 => search backwards from last to first
+
+                  if (args.size() >= 2) {
+                     startNum = static_cast<long long > (to_number(args[1])); // cast like other parts of your code
+                     if (startNum == -1) {
+                        backwardMode = true;
+                     }
+                  }
+
+                  // Backward search mode: start from last element and move to index 0
+                  if (backwardMode) {
+                     for (long long i = n - 1; i >= 0; --i) {
+                        if (is_equal(arr->elements[(size_t)i], target)) return Value {
+                           static_cast<double > (i)
+                        };
+                        if (i == 0) break; // avoid negative wrap when i is unsigned in some contexts
+                     }
+                     return Value {
+                        static_cast<double > (-1)
+                     };
+                  }
+
+                  // Forward search mode:
+                  // Normalize negative start as offset from end (like JS semantics for negative fromIndex)
+                  long long startIndex = startNum;
+                  if (args.size() >= 2 && startIndex < 0) {
+                     startIndex = std::max(0LL, n + startIndex);
+                  }
+
+                  // If startIndex is past the end, nothing to search
+                  if (startIndex >= n) return Value {
+                     static_cast<double > (-1)
+                  };
+
+                  for (long long i = startIndex; i < n; ++i) {
+                     if (is_equal(arr->elements[(size_t)i], target)) return Value {
                         static_cast<double > (i)
                      };
                   }
+
                   return Value {
                      static_cast<double > (-1)
                   };
                }
+
 
                // includes: kuna(value)
                if (prop == "kuna") {
@@ -785,6 +850,38 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   };
                }
 
+               // splice: pachika(start, deleteCount, ...items)
+               if (prop == "pachika") {
+                  if (args.size() < 2)
+                  throw std::runtime_error("arr.pachika needs at least 2 args at " + token.loc.to_string());
+
+                  long long start = static_cast<long long > (to_number(args[0]));
+                  long long delCount = static_cast<long long > (to_number(args[1]));
+
+                  if (start < 0) start = std::max(0LL, (long long)arr->elements.size() + start);
+                  start = std::min(start, (long long)arr->elements.size());
+                  delCount = std::max(0LL, std::min(delCount, (long long)arr->elements.size() - start));
+
+                  auto out = std::make_shared < ArrayValue > ();
+                  out->elements.insert(out->elements.end(),
+                     arr->elements.begin() + start,
+                     arr->elements.begin() + start + delCount);
+
+                  // erase deleted
+                  arr->elements.erase(arr->elements.begin() + start,
+                     arr->elements.begin() + start + delCount);
+
+                  // insert new items if any
+                  if (args.size() > 2) {
+                     arr->elements.insert(arr->elements.begin() + start, args.begin() + 2, args.end());
+                  }
+
+                  return Value {
+                     out
+                  }; // return deleted elements
+               }
+
+
                // map: badili(fn)
                if (prop == "badili") {
                   if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0])) throw std::runtime_error("arr.badili inahitaji kazi kama hoja at " + token.loc.to_string());
@@ -804,10 +901,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                }
 
 
-               // filter: chagua(fn) -> returns new array with elements where fn(elem, index) is truthy
+               // filter: chagua(fn) -> returns new array with elements where fn(elem, index, arr) is truthy
                if (prop == "chagua") {
                   if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
-                  throw std::runtime_error("arr.chagua inahitaji kazi kama hoja at " + token.loc.to_string());
+                  throw std::runtime_error("arr.chagua needs a filter function as an argument at " + token.loc.to_string());
                   FunctionPtr predicate = std::get < FunctionPtr > (args[0]);
 
                   auto out = std::make_shared < ArrayValue > ();
@@ -815,6 +912,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                      Value res = call_function(predicate, {
                         arr->elements[i], Value {
                            static_cast<double > (i)
+                        },
+                        Value {
+                           arr
                         }
                      }, token);
                      if (to_bool(res)) out->elements.push_back(arr->elements[i]);
@@ -880,6 +980,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             };
          }
       }
+
+
       // For other non-array/non-string objects, return undefined for unknown props
       throw std::runtime_error("Unknown property '" + mem->property + "' on value at " + mem->token.loc.to_string());
    }
@@ -1097,3 +1199,4 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
    throw std::runtime_error("Unhandled expression node in evaluator");
 }
+
