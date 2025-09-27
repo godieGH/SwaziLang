@@ -235,20 +235,50 @@ void Lexer::handle_newline(std::vector<Token>& out) {
 
     int newline_line = line - 1; // token should point to the line that ended
     int newline_col = 1;
+
+    // Only do indentation tracking when not inside parens/brackets (same as before)
     if (paren_level == 0) {
+        // Emit a NEWLINE token for the logical line break
         add_token(out, TokenType::NEWLINE, "", newline_line, newline_col, 1);
 
-        // compute indentation of next non-blank line
+        // Scan forward to find the first non-blank, non-comment line.
+        // When found, compute its indentation (spaces/tabs) as newIndent.
         size_t scan = i;
-        int newIndent = 0;
         bool only_blank = true;
+        int newIndent = 0;
+        size_t first_code_pos = scan; // will hold index of first non-space character on the code line
+
         while (scan < src.size()) {
             char c = src[scan];
-            if (c == ' ') { newIndent++; scan++; continue; }
-            if (c == '\t') { newIndent += 4; scan++; continue; }
+
+            // Skip CR and bare newlines (completely blank lines)
             if (c == '\r') { scan++; continue; }
-            if (c == '\n') { scan++; continue; } // blank line: skip it
+            if (c == '\n')  { scan++; continue; }
+
+            // Skip whole line comments: '#' style
+            if (c == '#') {
+                // skip until end of this line
+                while (scan < src.size() && src[scan] != '\n') scan++;
+                continue;
+            }
+
+            // Skip '//' style comments
+            if (c == '/' && (scan + 1) < src.size() && src[scan + 1] == '/') {
+                scan += 2;
+                while (scan < src.size() && src[scan] != '\n') scan++;
+                continue;
+            }
+
+            // Found a non-blank, non-comment line. Compute its indent (count leading spaces/tabs)
             only_blank = false;
+            size_t j = scan;
+            newIndent = 0;
+            while (j < src.size()) {
+                if (src[j] == ' ') { newIndent += 1; j++; }
+                else if (src[j] == '\t') { newIndent += 4; j++; } // tab == 4 spaces
+                else break;
+            }
+            first_code_pos = j; // first non-space char index on that code line
             break;
         }
 
@@ -264,14 +294,19 @@ void Lexer::handle_newline(std::vector<Token>& out) {
                 }
                 if (newIndent != indent_stack.back()) {
                     std::ostringstream ss;
-                    ss << "Indentation error in file '" << filename << "' at line " << line;
+                    ss << "Indentation error in file '" << (filename.empty() ? "<repl>" : filename)
+                       << "' at line " << line;
                     throw std::runtime_error(ss.str());
                 }
             }
+
+            // Advance the lexer index to the first non-space of that next code line
+            // (use advance() so line/col counters stay correct)
+            while (!eof() && i < first_code_pos) advance();
         }
 
-        // advance i to skip those leading spaces/tabs so rest of lexing continues at content
-        while (!eof() && (peek() == ' ' || peek() == '\t' || peek() == '\r')) advance();
+        // If only_blank == true we do nothing (blank/comment-only rest of file) and
+        // leave i where it is. The next scan_token() call will handle further newlines.
     }
 }
 
