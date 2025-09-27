@@ -3,6 +3,41 @@
 #include <cmath>
 #include <stdexcept>
 #include <sstream>
+#include <string>
+#include <stdexcept>
+
+static std::string to_property_key(const Value &v) {
+   // string first
+   if (auto ps = std::get_if < std::string > (&v)) {
+      return *ps;
+   }
+
+   // number -> canonical integer if whole, otherwise decimal string
+   if (auto pd = std::get_if < double > (&v)) {
+      double d = *pd;
+      if (!std::isfinite(d)) {
+         throw std::runtime_error("Invalid number for property key");
+      }
+      double floor_d = std::floor(d);
+      if (d == floor_d) {
+         // whole number — print as integer to match typical JS-like semantics
+         return std::to_string(static_cast<long long > (d));
+      }
+      return std::to_string(d);
+   }
+
+   // boolean
+   if (auto pb = std::get_if < bool > (&v)) {
+      return *pb ? "true": "false";
+   }
+
+   // null/undefined handling: depending on your Value types implement accordingly.
+   // If you have a NullTag/UndefinedTag type, handle here (example below is generic)
+   // if (std::holds_alternative<NullPtr>(v)) return "null";
+
+   throw std::runtime_error("Cannot convert value to property key");
+}
+
 
 // ----------------- Statement evaluation -----------------
 void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return) {
@@ -48,30 +83,117 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
          return;
       }
 
-      // Index target: a[b] = rhs
       if (auto idx = dynamic_cast<IndexExpressionNode*>(an->target.get())) {
          Value objVal = evaluate_expression(idx->object.get(), env);
          Value indexVal = evaluate_expression(idx->index.get(), env);
-         long long rawIndex = static_cast<long long>(to_number(indexVal));
-         if (!std::holds_alternative<ArrayPtr>(objVal)) {
-            throw std::runtime_error("Attempted index assignment on non-array at " + idx->token.loc.to_string());
+
+         // array path (unchanged)
+         if (std::holds_alternative < ArrayPtr > (objVal)) {
+            long long rawIndex = static_cast<long long > (to_number(indexVal));
+            ArrayPtr arr = std::get < ArrayPtr > (objVal);
+            if (!arr) {
+               throw std::runtime_error("Cannot assign into null array at " + idx->token.loc.to_string());
+            }
+            if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
+            size_t uidx = static_cast<size_t > (rawIndex);
+            if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
+            arr->elements[uidx] = rhs;
+            return;
          }
-         ArrayPtr arr = std::get<ArrayPtr>(objVal);
-         if (!arr) {
-            throw std::runtime_error("Cannot assign into null array at " + idx->token.loc.to_string());
+
+         // object property path: o[key] = rhs
+         if (std::holds_alternative < ObjectPtr > (objVal)) {
+            ObjectPtr op = std::get < ObjectPtr > (objVal);
+            std::string prop = to_property_key(indexVal); // your helper to convert index to string
+
+            auto it = op->properties.find(prop);
+            if (it != op->properties.end()) {
+               if (it->second.is_private) {
+                  // only allow if current '$' / '$this' equals the same object
+                  bool allowed = false;
+                  if (env) {
+                     if (env->has("$")) {
+                        Value thisVal = env->get("$").value;
+                        if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
+                     }
+                     if (!allowed && env->has("$this")) {
+                        Value thisVal = env->get("$this").value;
+                        if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
+                     }
+                  }
+                  if (!allowed) {
+                     throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string());
+                  }
+               }
+               if (it->second.is_readonly) {
+                  throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
+               }
+
+               // update existing descriptor
+               it->second.value = rhs;
+               it->second.token = idx->token;
+            } else {
+               // new public property
+               PropertyDescriptor desc;
+               desc.value = rhs;
+               desc.is_private = false;
+               desc.is_readonly = false;
+               desc.token = idx->token;
+               op->properties[prop] = std::move(desc);
+            }
+            return;
          }
-         if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
-         size_t uidx = static_cast<size_t>(rawIndex);
-         if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
-         arr->elements[uidx] = rhs;
-         return;
+
+         throw std::runtime_error("Attempted index assignment on non-array/non-object at " + idx->token.loc.to_string());
       }
 
-      // Member target: obj.prop = rhs
       if (auto mem = dynamic_cast<MemberExpressionNode*>(an->target.get())) {
-         // We do not currently support arbitrary property assignment on values.
-         // If you want map-like objects or property bags, we can add them.
-         throw std::runtime_error("Member assignment not supported at " + mem->token.loc.to_string());
+         Value objVal = evaluate_expression(mem->object.get(), env);
+         if (!std::holds_alternative < ObjectPtr > (objVal)) {
+            throw std::runtime_error("Member assignment on non-object at " + mem->token.loc.to_string());
+         }
+         ObjectPtr op = std::get < ObjectPtr > (objVal);
+
+         // use the rhs already evaluated earlier: Value rhs = evaluate_expression(an->value.get(), env);
+         auto it = op->properties.find(mem->property);
+         if (it != op->properties.end()) {
+            // existing property - enforce privacy / readonly
+            if (it->second.is_private) {
+               // allow only when current '$' / '$this' points to the same object
+               bool allowed = false;
+               if (env) {
+                  if (env->has("$")) {
+                     Value thisVal = env->get("$").value;
+                     if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
+                  }
+                  if (!allowed && env->has("$this")) {
+                     Value thisVal = env->get("$this").value;
+                     if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
+                  }
+               }
+               if (!allowed) {
+                  throw std::runtime_error("Cannot assign to private property '" + mem->property + "' from outside at " + mem->token.loc.to_string());
+               }
+            }
+
+            if (it->second.is_readonly) {
+               throw std::runtime_error("Cannot assign to read-only property '" + mem->property + "' at " + mem->token.loc.to_string());
+            }
+
+            // allowed: update in-place (preserve flags)
+            it->second.value = rhs;
+            it->second.token = mem->token;
+            return;
+         } else {
+            // not found -> create new public property (external code must not create private '@' properties)
+            PropertyDescriptor desc;
+            desc.value = rhs;
+            desc.is_private = false;
+            desc.is_readonly = false;
+            desc.token = mem->token;
+            op->properties[mem->property] = std::move(desc);
+            return;
+         }
       }
 
       throw std::runtime_error("Unsupported assignment target at " + an->token.loc.to_string());

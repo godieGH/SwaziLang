@@ -21,15 +21,31 @@ using EnvPtr = std::shared_ptr < Environment >;
 struct ArrayValue;
 using ArrayPtr = std::shared_ptr < ArrayValue >;
 
-// Include a "no-value" variant so we can represent undefined/void returns cleanly.
-using Value = std::variant <
-std::monostate, // represents undefined / no value
-double,
-std::string,
-bool,
-FunctionPtr,
-ArrayPtr >;
 
+struct ObjectValue;
+using ObjectPtr = std::shared_ptr<ObjectValue>;
+
+using Value = std::variant<
+    std::monostate,
+    double,
+    std::string,
+    bool,
+    FunctionPtr,   
+    ArrayPtr,
+    ObjectPtr
+>;
+
+
+struct PropertyDescriptor {
+    Value value;
+    bool is_private = false;
+    bool is_readonly = false;
+    Token token;
+};
+
+struct ObjectValue {
+    std::unordered_map<std::string, PropertyDescriptor> properties;
+};
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
    std::vector < Value > elements;
@@ -138,4 +154,13 @@ class Evaluator {
 
    // value equality helper (deep for arrays, tolerant for mixed number/string)
    bool is_equal(const Value& a, const Value& b);
+   
+   
+   Value get_object_property(ObjectPtr obj, const std::string &key, EnvPtr env);
+   void set_object_property(ObjectPtr obj, const std::string &key, const Value &val, EnvPtr env, const Token &assignToken);
+   std::string print_object(ObjectPtr obj, int indent = 0);
+   bool is_private_access_allowed(ObjectPtr obj, EnvPtr env);
+   
 };
+
+

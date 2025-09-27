@@ -36,6 +36,10 @@ class Parser {
    // NEW: helper to parse a template literal (backtick-style). Implementation in expressions.cpp
    std::unique_ptr<ExpressionNode> parse_template_literal();
 
+   std::unique_ptr<ExpressionNode> parse_object_expression();
+   std::unique_ptr<ExpressionNode> parse_tabia_method();
+
+   
    // statements
    std::unique_ptr < StatementNode > parse_statement();
    std::unique_ptr < StatementNode > parse_variable_declaration();

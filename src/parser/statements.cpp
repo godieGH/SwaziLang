@@ -70,18 +70,20 @@ std::unique_ptr < StatementNode > Parser::parse_print_statement(bool newline) {
 // we only support them when the target is a simple IdentifierNode (preserves previous semantics).
 // Parse an assignment or expression statement (updated to avoid moving the same unique_ptr twice
 // and to allow assignable L-values beyond plain identifiers: Identifier, Member, Index).
-std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement() {
-   if (peek().type == TokenType::IDENTIFIER) {
+std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_statement() {
+   if (peek().type == TokenType::IDENTIFIER || peek().type == TokenType::SELF) {
       Token idTok = consume();
-      std::string name = idTok.value;
 
-      // start with a simple IdentifierNode but keep it typed as ExpressionNode so
-      // we can later replace it with MemberExpressionNode / IndexExpressionNode etc.
-      std::unique_ptr<ExpressionNode> nodeExpr = std::make_unique<IdentifierNode>();
-      // initialize identifier specifics
-      static_cast<IdentifierNode*>(nodeExpr.get())->name = name;
-      static_cast<IdentifierNode*>(nodeExpr.get())->token = idTok;
-
+      std::unique_ptr < ExpressionNode > nodeExpr;
+      if (idTok.type == TokenType::SELF) {
+         nodeExpr = std::make_unique < ThisExpressionNode > ();
+         static_cast<ThisExpressionNode*>(nodeExpr.get())->token = idTok;
+      } else {
+         auto ident = std::make_unique < IdentifierNode > ();
+         ident->name = idTok.value;
+         ident->token = idTok;
+         nodeExpr = std::move(ident);
+      }
       // helper: decide if an expression can be used as an assignment target
       auto is_assignable = [](ExpressionNode* n) -> bool {
          if (!n) return false;
@@ -102,7 +104,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
             Token dotTok = consume(); // consume '.'
             expect(TokenType::IDENTIFIER, "Expected identifier after '.'");
             Token propTok = tokens[position - 1];
-            auto mem = std::make_unique<MemberExpressionNode>();
+            auto mem = std::make_unique < MemberExpressionNode > ();
             mem->object = std::move(nodeExpr);
             mem->property = propTok.value;
             mem->token = dotTok;
@@ -113,7 +115,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
             Token openIdx = consume(); // consume '['
             auto idxExpr = parse_expression();
             expect(TokenType::CLOSEBRACKET, "Expected ']' after index expression");
-            auto idxNode = std::make_unique<IndexExpressionNode>();
+            auto idxNode = std::make_unique < IndexExpressionNode > ();
             idxNode->object = std::move(nodeExpr);
             idxNode->index = std::move(idxExpr);
             idxNode->token = openIdx;
@@ -125,16 +127,22 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
 
       // At this point nodeExpr is the full left-side expression (Identifier, Member, Index, Call)
       // If next token is '=', create an AssignmentNode with target = nodeExpr
+      // If next token is '=', create an AssignmentNode with target = nodeExpr
       if (peek().type == TokenType::ASSIGN) {
+         if (!is_assignable(nodeExpr.get())) {
+            Token opTok = peek();
+            throw std::runtime_error("Invalid assignment target at " + opTok.loc.to_string());
+         }
          consume(); // '='
          auto value = parse_expression();
          if (peek().type == TokenType::SEMICOLON) consume();
-         auto assign = std::make_unique<AssignmentNode>();
+         auto assign = std::make_unique < AssignmentNode > ();
          assign->target = std::move(nodeExpr);
          assign->value = std::move(value);
          assign->token = idTok;
          return assign;
       }
+
 
       // Support += / -= for assignable L-values (Identifier, Member, Index)
       if (peek().type == TokenType::PLUS_ASSIGN || peek().type == TokenType::MINUS_ASSIGN) {
@@ -146,14 +154,14 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
          auto right = parse_expression();
 
          // build BinaryExpressionNode: left + right OR left - right
-         auto bin = std::make_unique<BinaryExpressionNode>();
+         auto bin = std::make_unique < BinaryExpressionNode > ();
          bin->op = (opTok.type == TokenType::PLUS_ASSIGN) ? "+": "-";
          // clone the left for the computed expression so we don't lose ownership of the original
          bin->left = nodeExpr->clone();
          bin->right = std::move(right);
          bin->token = opTok;
 
-         auto assign = std::make_unique<AssignmentNode>();
+         auto assign = std::make_unique < AssignmentNode > ();
          // move the original nodeExpr into the assignment target (single owner)
          assign->target = std::move(nodeExpr);
          assign->value = std::move(bin);
@@ -170,17 +178,17 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
          }
          Token opTok = consume();
          // build BinaryExpressionNode: left + 1 OR left - 1
-         auto bin = std::make_unique<BinaryExpressionNode>();
+         auto bin = std::make_unique < BinaryExpressionNode > ();
          bin->op = (opTok.type == TokenType::INCREMENT) ? "+": "-";
          // clone left for computation, keep original to move into the assignment target
          bin->left = nodeExpr->clone();
-         auto one = std::make_unique<NumericLiteralNode>();
+         auto one = std::make_unique < NumericLiteralNode > ();
          one->value = 1;
          one->token = opTok;
          bin->right = std::move(one);
          bin->token = opTok;
 
-         auto assign = std::make_unique<AssignmentNode>();
+         auto assign = std::make_unique < AssignmentNode > ();
          // assign target is the original nodeExpr (moved from here)
          assign->target = std::move(nodeExpr);
          assign->value = std::move(bin);
@@ -191,7 +199,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
 
       // Otherwise it's an expression statement: return the fully-expanded expression (call/member/index)
       if (peek().type == TokenType::SEMICOLON) consume();
-      auto stmt = std::make_unique<ExpressionStatementNode>();
+      auto stmt = std::make_unique < ExpressionStatementNode > ();
       stmt->expression = std::move(nodeExpr);
       return stmt;
    }

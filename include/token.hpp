@@ -11,6 +11,7 @@ enum class TokenType {
     ANDIKA,
     CONSTANT,
     KAZI,
+    TABIA,
     RUDISHA,
 
     // control-flow keywords (if / else)
@@ -19,6 +20,8 @@ enum class TokenType {
     FOR,
     WHILE,
     DOWHILE,
+    
+    LAMBDA,
 
     // literals & identifiers
     IDENTIFIER,
@@ -44,6 +47,12 @@ enum class TokenType {
     COLON,
     QUESTIONMARK,
     DOT,
+    AT_SIGN,
+    AMPERSAND,
+    QUESTION_DOT,
+    ELLIPSIS,
+    
+    SELF, // $ sign
 
     // assignment / file end
     ASSIGN,

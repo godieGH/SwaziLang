@@ -258,63 +258,264 @@ struct ArrayExpressionNode : public ExpressionNode {
 
 
 
+
+
+
+
+// ----- Object / Property AST nodes -----
+
+enum class PropertyKind {
+    KeyValue,
+    Method,
+    Shorthand,
+    Spread 
+};
+
+struct PropertyNode : public ExpressionNode {
+    PropertyKind kind = PropertyKind::KeyValue;
+
+    std::unique_ptr<ExpressionNode> key;
+    bool computed = false;
+
+    std::unique_ptr<ExpressionNode> value;
+
+    std::string key_name;
+
+    bool is_static = false;
+    bool is_readonly = false;
+    bool is_private = false;  
+
+    std::string to_string() const override {
+        std::string s;
+        if (kind == PropertyKind::Spread) {
+            // show privacy marker if present
+            if (is_private) s += "@";
+            s += "..." + (value ? value->to_string() : "<null>");
+            return s;
+        }
+        // represent key
+        if (computed) s += "[" + (key ? key->to_string() : "") + "]";
+        else if (!key_name.empty()) s += key_name;
+        else if (key) s += key->to_string();
+        else s += "<no-key>";
+
+        // prefix private marker
+        if (is_private) s = "@" + s;
+
+        if (kind == PropertyKind::Shorthand) return s;
+        if (kind == PropertyKind::Method) {
+            s += ": " + (value ? value->to_string() : "<fn>");
+            return s;
+        }
+        // KeyValue
+        s += ": " + (value ? value->to_string() : "null");
+        return s;
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<PropertyNode>();
+        n->token = token;
+        n->kind = kind;
+        n->computed = computed;
+        n->key_name = key_name;
+        n->is_static = is_static;
+        n->is_readonly = is_readonly;
+        n->is_private = is_private;   // <-- copy privacy flag
+        if (key) n->key = key->clone();
+        if (value) n->value = value->clone();
+        return n;
+    }
+};
+struct ObjectExpressionNode : public ExpressionNode {
+    std::vector<std::unique_ptr<PropertyNode>> properties;
+
+    std::string to_string() const override {
+        std::string s = "{ ";
+        for (size_t i = 0; i < properties.size(); ++i) {
+            if (i) s += ", ";
+            s += properties[i]->to_string();
+        }
+        s += " }";
+        return s;
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+    auto n = std::make_unique<ObjectExpressionNode>();
+    n->token = token;
+    n->properties.reserve(properties.size());
+    for (const auto &p : properties) {
+        if (!p) { 
+            n->properties.push_back(nullptr);
+            continue;
+        }
+        // p->clone() returns unique_ptr<ExpressionNode> that should
+        // actually point to a PropertyNode-derived object. Sanity-check.
+        auto cloned_expr = p->clone(); // unique_ptr<ExpressionNode>
+        auto prop_ptr = dynamic_cast<PropertyNode*>(cloned_expr.get());
+        if (!prop_ptr) {
+            throw std::runtime_error("ObjectExpressionNode::clone(): expected PropertyNode from clone()");
+        }
+        // transfer ownership into vector
+        n->properties.push_back(std::unique_ptr<PropertyNode>(static_cast<PropertyNode*>(cloned_expr.release())));
+    }
+    return n;
+}
+};
+
+struct SpreadElementNode : public ExpressionNode {
+    std::unique_ptr<ExpressionNode> argument;
+    std::string to_string() const override {
+        return "..." + (argument ? argument->to_string() : "<null>");
+    }
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<SpreadElementNode>();
+        n->token = token;
+        if (argument) n->argument = argument->clone();
+        return n;
+    }
+};
+
+struct SelfExpressionNode : public ExpressionNode {
+    std::string to_string() const override { return "$"; }
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<SelfExpressionNode>();
+        n->token = token;
+        return n;
+    }
+};
+
+
 // Statements
-struct StatementNode : public Node {};
+struct StatementNode : public Node {
+    // Non-pure virtual clone: default returns nullptr (safe, non-breaking).
+    // Concrete statements override to provide proper cloning.
+    virtual std::unique_ptr<StatementNode> clone() const {
+        return nullptr;
+    }
+};
 
 struct VariableDeclarationNode : public StatementNode {
     std::string identifier;
     std::unique_ptr<ExpressionNode> value;
     bool is_constant = false;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<VariableDeclarationNode>();
+        n->token = token;
+        n->identifier = identifier;
+        n->is_constant = is_constant;
+        n->value = value ? value->clone() : nullptr;
+        return n;
+    }
 };
 
-// Assignment: target can be an identifier or an index/member expression (e.g., a = 1; a[0] = x; obj.prop = y)
+// Assignment: target can be an identifier or an index/member expression
 struct AssignmentNode : public StatementNode {
     std::unique_ptr<ExpressionNode> target; // IdentifierNode or IndexExpressionNode or MemberExpressionNode
     std::unique_ptr<ExpressionNode> value;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<AssignmentNode>();
+        n->token = token;
+        n->target = target ? target->clone() : nullptr;
+        n->value = value ? value->clone() : nullptr;
+        return n;
+    }
 };
 
 struct PrintStatementNode : public StatementNode {
     // multiple args allowed for chapisha/andika
     std::vector<std::unique_ptr<ExpressionNode>> expressions;
     bool newline = true; // chapisha -> true, andika -> false
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<PrintStatementNode>();
+        n->token = token;
+        n->newline = newline;
+        n->expressions.reserve(expressions.size());
+        for (const auto &e : expressions) n->expressions.push_back(e ? e->clone() : nullptr);
+        return n;
+    }
 };
 
 struct ExpressionStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> expression;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ExpressionStatementNode>();
+        n->token = token;
+        n->expression = expression ? expression->clone() : nullptr;
+        return n;
+    }
 };
 
-// If statement: supports both colon+indent style and brace style
-// 'kama' <condition> : <INDENT> ... <DEDENT> [vinginevyo ...]
-// or 'kama' <condition> { ... } [vinginevyo { ... }]
+// If statement
 struct IfStatementNode : public StatementNode {
-    // token should point at the 'kama' keyword for diagnostics
-    // (parser must set node->token when creating this node)
     std::unique_ptr<ExpressionNode> condition;
     std::vector<std::unique_ptr<StatementNode>> then_body;
     std::vector<std::unique_ptr<StatementNode>> else_body;
     bool has_else = false;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<IfStatementNode>();
+        n->token = token;
+        n->condition = condition ? condition->clone() : nullptr;
+        n->has_else = has_else;
+        n->then_body.reserve(then_body.size());
+        for (const auto &s : then_body) n->then_body.push_back(s ? s->clone() : nullptr);
+        n->else_body.reserve(else_body.size());
+        for (const auto &s : else_body) n->else_body.push_back(s ? s->clone() : nullptr);
+        return n;
+    }
 };
 
-// For loop: kwa(<init>; <cond>; <post>) { ... }  OR kwa(<init>; <cond>; <post>): <INDENT> ... <DEDENT>
-// - init may be a variable declaration or an assignment/expression (we represent it as a StatementNode)
-// - cond and post are expressions and are optional (allow C-like empty slots)
+// For loop
 struct ForStatementNode : public StatementNode {
-    std::unique_ptr<StatementNode> init;           // optional (e.g., data i = 0) or assignment/expression
-    std::unique_ptr<ExpressionNode> condition;     // optional (e.g., i < 10)
-    std::unique_ptr<ExpressionNode> post;          // optional (e.g., i++, i += 2)
+    std::unique_ptr<StatementNode> init;           // optional
+    std::unique_ptr<ExpressionNode> condition;     // optional
+    std::unique_ptr<ExpressionNode> post;          // optional
     std::vector<std::unique_ptr<StatementNode>> body;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ForStatementNode>();
+        n->token = token;
+        n->init = init ? init->clone() : nullptr;
+        n->condition = condition ? condition->clone() : nullptr;
+        n->post = post ? post->clone() : nullptr;
+        n->body.reserve(body.size());
+        for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
+        return n;
+    }
 };
 
-// While loop: "wakati <condition> { ... }" or "wakati <condition>: <INDENT> ... <DEDENT>"
+// While loop
 struct WhileStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> condition;
     std::vector<std::unique_ptr<StatementNode>> body;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<WhileStatementNode>();
+        n->token = token;
+        n->condition = condition ? condition->clone() : nullptr;
+        n->body.reserve(body.size());
+        for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
+        return n;
+    }
 };
 
-// Do-while loop: "fanya: <INDENT> ... <DEDENT> wakati <condition>" or "fanya { ... } wakati <condition>"
+// Do-while loop
 struct DoWhileStatementNode : public StatementNode {
     std::vector<std::unique_ptr<StatementNode>> body;
-    std::unique_ptr<ExpressionNode> condition; // the trailing 'wakati' condition
+    std::unique_ptr<ExpressionNode> condition; // trailing condition
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<DoWhileStatementNode>();
+        n->token = token;
+        n->body.reserve(body.size());
+        for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
+        n->condition = condition ? condition->clone() : nullptr;
+        return n;
+    }
 };
 
 // Function declaration
@@ -322,13 +523,71 @@ struct FunctionDeclarationNode : public StatementNode {
     std::string name; // function name
     std::vector<std::string> parameters; // parameter names
     std::vector<std::unique_ptr<StatementNode>> body; // function body statements
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<FunctionDeclarationNode>();
+        n->token = token;
+        n->name = name;
+        n->parameters = parameters;
+        n->body.reserve(body.size());
+        for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
+        return n;
+    }
 };
 
-// Return statement
 struct ReturnStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> value; // expression to return
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ReturnStatementNode>();
+        n->token = token;
+        n->value = value ? value->clone() : nullptr;
+        return n;
+    }
 };
 
+struct ThisExpressionNode : public ExpressionNode {
+    Token token;
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<ThisExpressionNode>();
+        n->token = token;
+        return n;
+    }
+};
+
+
+struct FunctionExpressionNode : public ExpressionNode {
+    std::string name;
+    std::vector<std::string> parameters;
+    std::vector<std::unique_ptr<StatementNode>> body;
+    bool is_getter = false;
+    // use Node::token
+
+    std::string to_string() const override {
+        std::string s;
+        if (is_getter) s += "[getter] ";
+        s += name + "(";
+        for (size_t i = 0; i < parameters.size(); ++i) {
+            if (i) s += ", ";
+            s += parameters[i];
+        }
+        s += ") { ... }";
+        return s;
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<FunctionExpressionNode>();
+        n->token = token;                  // Node::token
+        n->name = name;
+        n->parameters = parameters;
+        n->is_getter = is_getter;
+        n->body.reserve(body.size());
+        for (const auto &s : body) {
+            n->body.push_back(s ? s->clone() : nullptr);
+        }
+        return n;
+    }
+};
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;

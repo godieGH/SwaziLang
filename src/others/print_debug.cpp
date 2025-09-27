@@ -22,6 +22,7 @@ static std::string token_name(TokenType t) {
         {TokenType::LESSTHAN,"LESSTHAN"}, {TokenType::LESSOREQUALTHAN,"LESSOREQUALTHAN"},
         {TokenType::EQUALITY,"EQUALITY"}, {TokenType::NOTEQUAL,"NOTEQUAL"},
         {TokenType::NEWLINE,"NEWLINE"}, {TokenType::INDENT,"INDENT"}, {TokenType::DEDENT,"DEDENT"},
+        {TokenType::LAMBDA,"LAMBDA"}, {TokenType::TABIA,"TABIA"}, {TokenType::SELF,"SELF"},
         {TokenType::COMMENT,"COMMENT"}, {TokenType::UNKNOWN,"UNKNOWN"}
     };
     auto it = names.find(t);

@@ -189,7 +189,7 @@ std::unique_ptr < ExpressionNode > Parser::parse_unary() {
          // expect identifier after dot
          expect(TokenType::IDENTIFIER, "Expected identifier after '.'");
          Token propTok = tokens[position - 1];
-         auto mem = std::make_unique<MemberExpressionNode>();
+         auto mem = std::make_unique < MemberExpressionNode > ();
          mem->object = std::move(node);
          mem->property = propTok.value;
          mem->token = dotTok;
@@ -200,7 +200,7 @@ std::unique_ptr < ExpressionNode > Parser::parse_unary() {
          Token openIdx = consume(); // consume '['
          auto idxExpr = parse_expression();
          expect(TokenType::CLOSEBRACKET, "Expected ']' after index expression");
-         auto idxNode = std::make_unique<IndexExpressionNode>();
+         auto idxNode = std::make_unique < IndexExpressionNode > ();
          idxNode->object = std::move(node);
          idxNode->index = std::move(idxExpr);
          idxNode->token = openIdx;
@@ -287,6 +287,299 @@ std::unique_ptr < ExpressionNode > Parser::parse_template_literal() {
    return node;
 }
 
+
+
+std::unique_ptr < ExpressionNode > Parser::parse_tabia_method() {
+   // Accept either a dedicated TABIA token or IDENTIFIER "tabia"
+   Token startTok;
+   if (peek().type == TokenType::TABIA) {
+      startTok = consume();
+   } else if (peek().type == TokenType::IDENTIFIER && peek().value == "tabia") {
+      startTok = consume();
+   } else {
+      throw std::runtime_error("parse_tabia_method called without 'tabia' at " + peek().loc.to_string());
+   }
+
+   // optional 'thabiti' keyword -> getter flag (allow either dedicated token or identifier)
+   bool is_getter = false;
+   if (peek().type == TokenType::CONSTANT ||
+      (peek().type == TokenType::IDENTIFIER && peek().value == "thabiti")) {
+      consume();
+      is_getter = true;
+   }
+
+   // method name: must be identifier
+   expect(TokenType::IDENTIFIER, "Expected method name after 'tabia'");
+   Token nameTok = tokens[position - 1];
+
+   // parse parameters: either parenthesized (a, b, ...) or inline identifiers
+   std::vector < std::string > params;
+   // allow optional formatting before parameters
+   auto skip_formatting_local = [&]() {
+      while (peek().type == TokenType::NEWLINE ||
+         peek().type == TokenType::INDENT ||
+         peek().type == TokenType::DEDENT) {
+         consume();
+      }
+   };
+   skip_formatting_local();
+   if (match(TokenType::OPENPARENTHESIS)) {
+      // parenthesized params
+      skip_formatting_local();
+      if (peek().type != TokenType::CLOSEPARENTHESIS) {
+         while (true) {
+            expect(TokenType::IDENTIFIER, "Expected identifier in parameter list");
+            params.push_back(tokens[position - 1].value);
+            if (match(TokenType::COMMA)) {
+               skip_formatting_local();
+               if (peek().type == TokenType::CLOSEPARENTHESIS) {
+                  // allow trailing comma
+                  break;
+               }
+               continue;
+            }
+            break;
+         }
+      }
+      expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after parameter list");
+   } else {
+      // legacy / compact form: zero or more identifiers separated by commas
+      while (peek().type == TokenType::IDENTIFIER) {
+         params.push_back(consume().value);
+         if (!match(TokenType::COMMA)) break;
+      }
+   }
+   // skip formatting before checking body
+   skip_formatting_local();
+
+   // parse body (either colon + indented block, or brace block)
+   std::vector < std::unique_ptr < StatementNode>> bodyStmts;
+
+   if (match(TokenType::COLON)) {
+      // indentation-based body
+      expect(TokenType::NEWLINE, "Expected newline after ':' in tabia method");
+      expect(TokenType::INDENT, "Expected INDENT for tabia method body");
+
+      while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
+         auto stmt = parse_statement();
+         if (!stmt) break;
+         bodyStmts.push_back(std::move(stmt));
+      }
+      expect(TokenType::DEDENT, "Expected DEDENT to close tabia method body");
+
+   } else if (match(TokenType::OPENBRACE)) {
+      // brace-based body
+      while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
+         // skip formatting tokens between statements
+         while (peek().type == TokenType::NEWLINE ||
+            peek().type == TokenType::INDENT ||
+            peek().type == TokenType::DEDENT) {
+            consume();
+         }
+         if (peek().type == TokenType::CLOSEBRACE || peek().type == TokenType::EOF_TOKEN) break;
+         auto stmt = parse_statement();
+         if (!stmt) break;
+         bodyStmts.push_back(std::move(stmt));
+      }
+      expect(TokenType::CLOSEBRACE, "Expected '}' to close tabia method body");
+   } else {
+      expect(TokenType::COLON, "Expected ':' or '{' to begin tabia method body");
+   }
+   
+   if (is_getter && !params.empty()) {
+      throw std::runtime_error("'thabiti' method cannot take parameters at " + nameTok.loc.to_string());
+   }
+
+   // Build the FunctionExpressionNode
+   auto func = std::make_unique < FunctionExpressionNode > ();
+   func->token = startTok;
+   func->name = nameTok.value;
+   func->parameters = std::move(params);
+   func->body = std::move(bodyStmts);
+   func->is_getter = is_getter;
+
+   return func;
+}
+std::unique_ptr < ExpressionNode > Parser::parse_object_expression() {
+   expect(TokenType::OPENBRACE, "Expected '{' to start object literal");
+   Token openTok = tokens[position - 1];
+
+   auto obj = std::make_unique < ObjectExpressionNode > ();
+   obj->token = openTok;
+
+   auto skip_formatting = [&]() {
+      while (peek().type == TokenType::NEWLINE ||
+         peek().type == TokenType::INDENT ||
+         peek().type == TokenType::DEDENT) {
+         consume();
+      }
+   };
+
+   skip_formatting();
+
+   // empty object {}
+   if (peek().type == TokenType::CLOSEBRACE) {
+      consume();
+      return obj;
+   }
+
+   while (peek().type != TokenType::CLOSEBRACE) {
+    skip_formatting();
+
+    // check optional privacy marker '@'
+    bool is_private_flag = false;
+    Token privateTok;
+    if (peek().type == TokenType::AT_SIGN) {           // <-- requires lexer to emit TokenType::AT_SIGN
+        privateTok = consume();
+        is_private_flag = true;
+        skip_formatting();
+    }
+
+    // --- special: tabia method inside object ---
+    if ((peek().type == TokenType::TABIA) ||
+        (peek().type == TokenType::IDENTIFIER && peek().value == "tabia")) {
+        // parse method expression (consumes the tabia token and body)
+        auto methodExpr = parse_tabia_method();
+
+        // move into PropertyNode
+        auto prop = std::make_unique<PropertyNode>();
+        prop->kind = PropertyKind::Method;
+        prop->value = std::move(methodExpr);
+
+        // extract name and getter flag if possible
+        if (auto func = dynamic_cast<FunctionExpressionNode*>(prop->value.get())) {
+            prop->key_name = func->name;
+            prop->is_readonly = func->is_getter;
+            prop->token = func->token;
+        }
+
+        // apply privacy marker if present
+        prop->is_private = is_private_flag;
+
+        obj->properties.push_back(std::move(prop));
+
+        skip_formatting();
+        if (peek().type == TokenType::COMMA) consume();
+        continue;
+    }
+
+    // --- non-tabia property path (existing logic) ---
+    if (peek().type == TokenType::ELLIPSIS) {
+        if (is_private_flag) {
+            throw std::runtime_error("Private modifier '@' cannot be applied to spread at " + privateTok.loc.to_string());
+        }
+        Token ell = consume();
+        auto spread = std::make_unique<SpreadElementNode>();
+        spread->token = ell;
+        spread->argument = parse_expression();
+        auto prop = std::make_unique<PropertyNode>();
+        prop->token = ell;
+        prop->kind = PropertyKind::Spread;
+        prop->value = std::move(spread);
+        obj->properties.push_back(std::move(prop));
+        skip_formatting();
+        if (peek().type == TokenType::COMMA) consume();
+        continue;
+    }
+
+    auto prop = std::make_unique<PropertyNode>();
+    prop->kind = PropertyKind::KeyValue;
+    prop->is_private = is_private_flag; // apply privacy to property node
+
+    // key: identifier, string, number, or computed [expr]
+    if (peek().type == TokenType::OPENBRACKET) {
+        Token openIdx = consume(); // '['
+        prop->computed = true;
+        prop->key = parse_expression();
+        expect(TokenType::CLOSEBRACKET, "Expected ']' after computed property key");
+        prop->token = openIdx;
+    } else {
+        Token t = peek();
+        if (t.type == TokenType::IDENTIFIER) {
+            Token idTok = consume();
+            prop->key_name = idTok.value;
+            prop->token = idTok;
+        } else if (t.type == TokenType::STRING || t.type == TokenType::SINGLE_QUOTED_STRING) {
+            Token s = consume();
+            auto keyNode = std::make_unique<StringLiteralNode>();
+            keyNode->value = s.value;
+            keyNode->token = s;
+            prop->key = std::move(keyNode);
+            prop->token = s;
+        } else if (t.type == TokenType::NUMBER) {
+            Token n = consume();
+            auto keyNode = std::make_unique<NumericLiteralNode>();
+            keyNode->value = std::stod(n.value);
+            keyNode->token = n;
+            prop->key = std::move(keyNode);
+            prop->token = n;
+        } else {
+            Token bad = peek();
+            throw std::runtime_error("Unexpected token in object property key: '" + bad.value +
+               "' at " + bad.loc.to_string());
+        }
+    }
+
+    skip_formatting();
+
+    // decide property kind & parse value
+    if (peek().type == TokenType::COLON) {
+        consume(); // ':'
+        skip_formatting();
+        prop->kind = PropertyKind::KeyValue;
+        prop->value = parse_expression();
+    } else if (peek().type == TokenType::OPENPARENTHESIS) {
+        // method shorthand not supported; treat as shorthand (per your rules)
+        prop->kind = PropertyKind::Shorthand;
+        if (!prop->key_name.empty()) {
+            Token fakeTok; fakeTok.type = TokenType::IDENTIFIER; fakeTok.value = prop->key_name;
+            auto ident = std::make_unique<IdentifierNode>();
+            ident->name = prop->key_name;
+            ident->token = fakeTok;
+            prop->value = std::move(ident);
+        } else if (prop->key) {
+            prop->value = prop->key->clone();
+        } else {
+            throw std::runtime_error("Invalid property shorthand without identifier at " + peek().loc.to_string());
+        }
+    } else {
+        // shorthand property
+        prop->kind = PropertyKind::Shorthand;
+        if (!prop->key_name.empty()) {
+            Token fakeTok; fakeTok.type = TokenType::IDENTIFIER; fakeTok.value = prop->key_name;
+            auto ident = std::make_unique<IdentifierNode>();
+            ident->name = prop->key_name;
+            ident->token = fakeTok;
+            prop->value = std::move(ident);
+        } else if (prop->key) {
+            prop->value = prop->key->clone();
+        } else {
+            throw std::runtime_error("Invalid property shorthand without identifier at " + peek().loc.to_string());
+        }
+    }
+
+    obj->properties.push_back(std::move(prop));
+
+    skip_formatting();
+    if (peek().type == TokenType::COMMA) {
+        consume();
+        skip_formatting();
+        if (peek().type == TokenType::CLOSEBRACE) break;
+        continue;
+    }
+
+    if (peek().type == TokenType::CLOSEBRACE) break;
+
+    Token bad = peek();
+    throw std::runtime_error("Expected ',' or '}' in object literal at " + bad.loc.to_string());
+}
+   expect(TokenType::CLOSEBRACE, "Expected '}' to close object literal");
+
+
+   return obj;
+}
+
+
 std::unique_ptr < ExpressionNode > Parser::parse_primary() {
    Token t = peek();
    if (t.type == TokenType::NUMBER) {
@@ -327,6 +620,13 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       // do NOT consume '(' here; postfix handling in parse_unary will handle calls, indexing, members
       return ident;
    }
+   if (t.type == TokenType::SELF) {
+    Token id = consume();
+    auto thisNode = std::make_unique<ThisExpressionNode>();
+    thisNode->token = id;
+    return thisNode;
+   }
+
    if (t.type == TokenType::OPENPARENTHESIS) {
       consume();
       auto inner = parse_expression();
@@ -347,6 +647,10 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
 
       expect(TokenType::CLOSEBRACKET, "Expected ']' after array elements");
       return arrayNode;
+   }
+
+   if (t.type == TokenType::OPENBRACE) {
+      return parse_object_expression();
    }
 
 

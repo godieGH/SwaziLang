@@ -199,6 +199,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"andika", TokenType::ANDIKA},
         {"thabiti", TokenType::CONSTANT},
         {"kazi", TokenType::KAZI},
+        {"tabia", TokenType::TABIA},
         {"rudisha", TokenType::RUDISHA},
         {"kweli", TokenType::BOOLEAN},
         {"sikweli", TokenType::BOOLEAN},
@@ -336,9 +337,16 @@ void Lexer::scan_token(std::vector<Token>& out) {
         return;
     }
 
+   if(c == '.' && peek_next() == '.' && peek(2) == '.') {
+      add_token(out, TokenType::ELLIPSIS, "...", line, col, 3);
+      advance(); advance(); advance();
+      return;
+   }
+
     // two-char operators
     if (c == '*' && peek_next() == '*') { add_token(out, TokenType::POWER, "**", line, col, 2); advance(); advance(); return; }
     if (c == '=' && peek_next() == '=') { add_token(out, TokenType::EQUALITY, "==", line, col, 2); advance(); advance(); return; }
+    if (c == '=' && peek_next() == '>') { add_token(out, TokenType::LAMBDA, "=>", line, col, 2); advance(); advance(); return; }
     if (c == '!' && peek_next() == '=') { add_token(out, TokenType::NOTEQUAL, "!=", line, col, 2); advance(); advance(); return; }
     if (c == '>' && peek_next() == '=') { add_token(out, TokenType::GREATEROREQUALTHAN, ">=", line, col, 2); advance(); advance(); return; }
     if (c == '<' && peek_next() == '=') { add_token(out, TokenType::LESSOREQUALTHAN, "<=", line, col, 2); advance(); advance(); return; }
@@ -359,9 +367,12 @@ void Lexer::scan_token(std::vector<Token>& out) {
         case '}': add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1); advance(); return;
         case '[': add_token(out, TokenType::OPENBRACKET, "[", line, col, 1); advance(); return;
         case ']': add_token(out, TokenType::CLOSEBRACKET, "]", line, col, 1); advance(); return;
+        case '$': add_token(out, TokenType::SELF, "$", line, col, 1); advance(); return;
         case '.': add_token(out, TokenType::DOT, ".", line, col, 1); advance(); return;
         case ':': add_token(out, TokenType::COLON, ":", line, col, 1); advance(); return;
         case '?': add_token(out, TokenType::QUESTIONMARK, "?", line, col, 1); advance(); return;
+        case '@': add_token(out, TokenType::AT_SIGN, "@", line, col, 1); advance(); return;
+        case '&': add_token(out, TokenType::AMPERSAND, "&", line, col, 1); advance(); return;
         case '=': add_token(out, TokenType::ASSIGN, "=", line, col, 1); advance(); return;
         case '+': add_token(out, TokenType::PLUS, "+", line, col, 1); advance(); return;
         case '-': add_token(out, TokenType::MINUS, "-", line, col, 1); advance(); return;
