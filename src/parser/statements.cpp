@@ -68,7 +68,9 @@ std::unique_ptr < StatementNode > Parser::parse_print_statement(bool newline) {
 // This version builds full postfix expressions (member, index, calls) from the initial identifier,
 // so forms like arr[0] = 1 and arr.ongeza(4) parse correctly. For compound ops (+=, ++/--)
 // we only support them when the target is a simple IdentifierNode (preserves previous semantics).
-std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_statement() {
+// Parse an assignment or expression statement (updated to avoid moving the same unique_ptr twice
+// and to allow assignable L-values beyond plain identifiers: Identifier, Member, Index).
+std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement() {
    if (peek().type == TokenType::IDENTIFIER) {
       Token idTok = consume();
       std::string name = idTok.value;
@@ -79,6 +81,15 @@ std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_stateme
       // initialize identifier specifics
       static_cast<IdentifierNode*>(nodeExpr.get())->name = name;
       static_cast<IdentifierNode*>(nodeExpr.get())->token = idTok;
+
+      // helper: decide if an expression can be used as an assignment target
+      auto is_assignable = [](ExpressionNode* n) -> bool {
+         if (!n) return false;
+         if (dynamic_cast<IdentifierNode*>(n)) return true;
+         if (dynamic_cast<IndexExpressionNode*>(n)) return true;
+         if (dynamic_cast<MemberExpressionNode*>(n)) return true;
+         return false;
+      };
 
       // Postfix expansion: accept calls, member access, indexing
       while (true) {
@@ -125,11 +136,11 @@ std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_stateme
          return assign;
       }
 
-      // Support += / -= only when target is a simple identifier (preserve previous behavior)
+      // Support += / -= for assignable L-values (Identifier, Member, Index)
       if (peek().type == TokenType::PLUS_ASSIGN || peek().type == TokenType::MINUS_ASSIGN) {
-         if (!dynamic_cast<IdentifierNode*>(nodeExpr.get())) {
+         if (!is_assignable(nodeExpr.get())) {
             Token opTok = peek();
-            throw std::runtime_error("Compound assignment is only supported for simple identifiers at " + opTok.loc.to_string());
+            throw std::runtime_error("Compound assignment is only supported for assignable targets at " + opTok.loc.to_string());
          }
          Token opTok = consume(); // += or -=
          auto right = parse_expression();
@@ -137,30 +148,32 @@ std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_stateme
          // build BinaryExpressionNode: left + right OR left - right
          auto bin = std::make_unique<BinaryExpressionNode>();
          bin->op = (opTok.type == TokenType::PLUS_ASSIGN) ? "+": "-";
-         bin->left = std::move(nodeExpr); // left is the identifier
+         // clone the left for the computed expression so we don't lose ownership of the original
+         bin->left = nodeExpr->clone();
          bin->right = std::move(right);
          bin->token = opTok;
 
          auto assign = std::make_unique<AssignmentNode>();
-         // bin->left is the identifier, move it into target (it is typed as ExpressionNode)
-         assign->target = std::move(bin->left);
+         // move the original nodeExpr into the assignment target (single owner)
+         assign->target = std::move(nodeExpr);
          assign->value = std::move(bin);
          assign->token = idTok;
          if (peek().type == TokenType::SEMICOLON) consume();
          return assign;
       }
 
-      // Support ++ / -- only for simple identifiers (statement like x++ or x--)
+      // Support ++ / -- for assignable L-values like x++ or arr[i]++
       if (peek().type == TokenType::INCREMENT || peek().type == TokenType::DECREMENT) {
-         if (!dynamic_cast<IdentifierNode*>(nodeExpr.get())) {
+         if (!is_assignable(nodeExpr.get())) {
             Token opTok = peek();
-            throw std::runtime_error("Increment/decrement is only supported for simple identifiers at " + opTok.loc.to_string());
+            throw std::runtime_error("Increment/decrement is only supported for assignable targets at " + opTok.loc.to_string());
          }
          Token opTok = consume();
-         // build BinaryExpressionNode: x + 1 OR x - 1
+         // build BinaryExpressionNode: left + 1 OR left - 1
          auto bin = std::make_unique<BinaryExpressionNode>();
          bin->op = (opTok.type == TokenType::INCREMENT) ? "+": "-";
-         bin->left = std::move(nodeExpr);
+         // clone left for computation, keep original to move into the assignment target
+         bin->left = nodeExpr->clone();
          auto one = std::make_unique<NumericLiteralNode>();
          one->value = 1;
          one->token = opTok;
@@ -168,8 +181,8 @@ std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_stateme
          bin->token = opTok;
 
          auto assign = std::make_unique<AssignmentNode>();
-         // assign target is the identifier (moved from bin->left)
-         assign->target = std::move(bin->left);
+         // assign target is the original nodeExpr (moved from here)
+         assign->target = std::move(nodeExpr);
          assign->value = std::move(bin);
          assign->token = idTok;
          if (peek().type == TokenType::SEMICOLON) consume();
@@ -190,7 +203,6 @@ std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_stateme
    stmt->expression = std::move(expr);
    return stmt;
 }
-
 std::unique_ptr < StatementNode > Parser::parse_function_declaration() {
    // The 'kazi' token was already consumed by parse_statement
 

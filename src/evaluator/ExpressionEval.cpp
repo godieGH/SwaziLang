@@ -68,6 +68,36 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    if (auto mem = dynamic_cast<MemberExpressionNode*>(expr)) {
       Value objVal = evaluate_expression(mem->object.get(), env);
 
+      // --- Universal properties ---
+      const std::string &prop = mem->property;
+
+      // ainaya -> type name
+      if (prop == "aina") {
+         std::string t = "unknown"; // default
+         if (std::holds_alternative < double > (objVal)) t = "namba";
+         else if (std::holds_alternative < std::string > (objVal)) t = "neno";
+         else if (std::holds_alternative < bool > (objVal)) t = "bool";
+         else if (std::holds_alternative < ArrayPtr > (objVal)) t = "orodha";
+         else if (std::holds_alternative < FunctionPtr > (objVal)) t = "kazi";
+         return Value {
+            t
+         };
+      }
+
+      // type-checking booleans
+      if (prop == "ninamba") return Value {
+         std::holds_alternative < double > (objVal)};
+      if (prop == "nineno") return Value {
+         std::holds_alternative < std::string > (objVal)};
+      if (prop == "nibool") return Value {
+         std::holds_alternative < bool > (objVal)};
+      if (prop == "niorodha") return Value {
+         std::holds_alternative < ArrayPtr > (objVal)};
+      if (prop == "nikazi") return Value {
+         std::holds_alternative < FunctionPtr > (objVal)};
+
+
+
       // String property 'herufi' (length)
       if (std::holds_alternative < std::string > (objVal) && mem->property == "herufi") {
          const std::string &s = std::get < std::string > (objVal);
@@ -130,7 +160,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          }
 
          // anzaNa(prefix) -> startsWith
-         if (prop == "anzaNa") {
+         if (prop == "huanzaNa") {
             return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                if (args.empty()) throw std::runtime_error("str.anzaNa inahitaji hoja 1 at " + token.loc.to_string());
                std::string pref = to_string_value(args[0]);
@@ -144,7 +174,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          }
 
          // ishaNa(suffix) -> endsWith
-         if (prop == "ishaNa") {
+         if (prop == "huishaNa") {
             return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                if (args.empty()) throw std::runtime_error("str.ishaNa inahitaji hoja 1 at " + token.loc.to_string());
                std::string suf = to_string_value(args[0]);
@@ -1016,163 +1046,142 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
    if (auto b = dynamic_cast<BinaryExpressionNode*>(expr)) {
 
-      // --- handle ++ / -- and += / -= as side-effecting ops when left is identifier ---
-      if (b->token.type == TokenType::INCREMENT ||
-         b->token.type == TokenType::DECREMENT ||
-         b->token.type == TokenType::PLUS_ASSIGN ||
-         b->token.type == TokenType::MINUS_ASSIGN) {
+        // --- handle ++ / -- and += / -= as side-effecting ops ---
+        if (b->token.type == TokenType::INCREMENT ||
+            b->token.type == TokenType::DECREMENT ||
+            b->token.type == TokenType::PLUS_ASSIGN ||
+            b->token.type == TokenType::MINUS_ASSIGN) {
 
-         // left must be an identifier for these side-effect ops
-         if (auto leftIdent = dynamic_cast<IdentifierNode*>(b->left.get())) {
-            // Resolve current value (but do NOT shadow lookup semantics: update the variable in its defining env)
-            EnvPtr walk = env;
-            while (walk) {
-               auto it = walk->values.find(leftIdent->name);
-               if (it != walk->values.end()) {
-                  if (it->second.is_constant) {
-                     throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string());
-                  }
+            // Case A: left is an identifier (x++, x += ...)
+            if (auto leftIdent = dynamic_cast<IdentifierNode*>(b->left.get())) {
+                // Search up the environment chain to update the defining environment
+                EnvPtr walk = env;
+                while (walk) {
+                    auto it = walk->values.find(leftIdent->name);
+                    if (it != walk->values.end()) {
+                        if (it->second.is_constant) {
+                            throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string());
+                        }
 
-                  double oldv = to_number(it->second.value);
-                  double delta = 0.0;
+                        double oldv = to_number(it->second.value);
+                        double delta = 0.0;
 
-                  if (b->token.type == TokenType::INCREMENT) {
-                     delta = 1.0;
-                  } else if (b->token.type == TokenType::DECREMENT) {
-                     delta = -1.0;
-                  } else {
-                     // For += / -= evaluate right side
-                     Value rightVal = evaluate_expression(b->right.get(), env);
-                     double rv = to_number(rightVal);
-                     delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
-                  }
+                        if (b->token.type == TokenType::INCREMENT) {
+                            delta = 1.0;
+                        } else if (b->token.type == TokenType::DECREMENT) {
+                            delta = -1.0;
+                        } else {
+                            // For += / -= evaluate right side
+                            Value rightVal = evaluate_expression(b->right.get(), env);
+                            double rv = to_number(rightVal);
+                            delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
+                        }
 
-                  double newv = oldv + delta;
-                  it->second.value = newv;
-                  return Value {
-                     newv
-                  };
-               }
-               walk = walk->parent;
+                        double newv = oldv + delta;
+                        it->second.value = newv;
+                        return Value { newv };
+                    }
+                    walk = walk->parent;
+                }
+
+                // Not found in any parent -> create in current env (same behavior as assignment)
+                double start = 0.0;
+                if (b->token.type == TokenType::INCREMENT) start = 1.0;
+                else if (b->token.type == TokenType::DECREMENT) start = -1.0;
+                else {
+                    Value rightVal = evaluate_expression(b->right.get(), env);
+                    double rv = to_number(rightVal);
+                    start = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
+                }
+                Environment::Variable var;
+                var.value = start;
+                var.is_constant = false;
+                env->set(leftIdent->name, var);
+                return Value { start };
             }
 
-            // If not found in any parent, create in current env (same behavior as assignment elsewhere)
-            double start = 0.0;
-            if (b->token.type == TokenType::INCREMENT) start = 1.0;
-            else if (b->token.type == TokenType::DECREMENT) start = -1.0;
-            else {
-               Value rightVal = evaluate_expression(b->right.get(), env);
-               double rv = to_number(rightVal);
-               start = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
-            }
-            Environment::Variable var;
-            var.value = start;
-            var.is_constant = false;
-            env->set(leftIdent->name, var);
-            return Value {
-               start
-            };
-         }
-         // if left isn't identifier fallthrough to normal binary handling (or throw)
-      }
+            // Case B: left is an index expression (arr[idx]++ or arr[idx] += ...)
+            if (auto idx = dynamic_cast<IndexExpressionNode*>(b->left.get())) {
+                // Evaluate the object expression (this will return an ArrayPtr for arrays)
+                Value objVal = evaluate_expression(idx->object.get(), env);
+                if (!std::holds_alternative<ArrayPtr>(objVal)) {
+                    throw std::runtime_error("Indexed target is not an array at " + b->token.loc.to_string());
+                }
+                ArrayPtr arr = std::get<ArrayPtr>(objVal);
+                if (!arr) {
+                    throw std::runtime_error("Cannot assign into null array at " + b->token.loc.to_string());
+                }
 
-      Value left = evaluate_expression(b->left.get(), env);
-      Value right = evaluate_expression(b->right.get(), env);
-      const std::string &op = b->op;
+                // Evaluate the index
+                Value indexVal = evaluate_expression(idx->index.get(), env);
+                long long rawIndex = static_cast<long long>(to_number(indexVal));
+                if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
+                size_t uidx = static_cast<size_t>(rawIndex);
 
-      if (op == "+") {
-         if (std::holds_alternative < std::string > (left) || std::holds_alternative < std::string > (right)) {
-            return Value {
-               to_string_value(left) + to_string_value(right)
-            };
-         }
-         return Value {
-            to_number(left) + to_number(right)
-         };
-      }
-      if (op == "-") return Value {
-         to_number(left) - to_number(right)
-      };
-      if (op == "*") return Value {
-         to_number(left) * to_number(right)
-      };
-      if (op == "/") {
-         double r = to_number(right);
-         if (r == 0.0) throw std::runtime_error("Division by zero at " + b->token.loc.to_string());
-         return Value {
-            to_number(left) / r
-         };
-      }
-      if (op == "%") {
-         double r = to_number(right);
-         if (r == 0.0) throw std::runtime_error("Modulo by zero at " + b->token.loc.to_string());
-         return Value {
-            std::fmod(to_number(left), r)
-         };
-      }
-      if (op == "**") return Value {
-         std::pow(to_number(left), to_number(right))
-      };
-      if (op == "==" || op == "sawa") {
-         if (std::holds_alternative < double > (left) && std::holds_alternative < double > (right))
-         return Value {
-            std::get < double > (left) == std::get < double > (right)
-         };
-         // mixed number and string: try numeric compare
-         if (std::holds_alternative < double > (left) && std::holds_alternative < std::string > (right)) {
-            try {
-               double rr = std::stod(std::get < std::string > (right));
-               return Value {
-                  std::get < double > (left) == rr
-               };
-            } catch (...) {
-               /* fallthrough to string compare */
-            }
-         }
-         if (std::holds_alternative < std::string > (left) && std::holds_alternative < double > (right)) {
-            try {
-               double ll = std::stod(std::get < std::string > (left));
-               return Value {
-                  ll == std::get < double > (right)
-               };
-            } catch (...) {
-               /* fallthrough */
-            }
-         }
-         return Value {
-            to_string_value(left) == to_string_value(right)
-         };
-      }
-      if (op == "!=" || op == "sisawa") {
-         if (std::holds_alternative < double > (left) && std::holds_alternative < double > (right))
-         return Value {
-            std::get < double > (left) != std::get < double > (right)
-         };
-         return Value {
-            to_string_value(left) != to_string_value(right)
-         };
-      }
-      if (op == ">") return Value {
-         to_number(left) > to_number(right)
-      };
-      if (op == "<") return Value {
-         to_number(left) < to_number(right)
-      };
-      if (op == ">=") return Value {
-         to_number(left) >= to_number(right)
-      };
-      if (op == "<=") return Value {
-         to_number(left) <= to_number(right)
-      };
-      if (op == "&&" || op == "na") return Value {
-         to_bool(left) && to_bool(right)
-      };
-      if (op == "||" || op == "au") return Value {
-         to_bool(left) || to_bool(right)
-      };
+                // Ensure the array is large enough (same behavior as assignment)
+                if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
 
-      throw std::runtime_error("Unknown binary operator '" + op + "' at " + b->token.loc.to_string());
-   }
+                double oldv = to_number(arr->elements[uidx]);
+                double delta = 0.0;
+                if (b->token.type == TokenType::INCREMENT) delta = 1.0;
+                else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
+                else {
+                    Value rightVal = evaluate_expression(b->right.get(), env);
+                    double rv = to_number(rightVal);
+                    delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
+                }
+                double newv = oldv + delta;
+
+                arr->elements[uidx] = Value { newv };
+                return Value { newv };
+            }
+
+            // Member assignment/mutation isn't supported by your Statement evaluator
+            // (your StatementEval throws for member assignment). If you want obj.prop++,
+            // we'll need to add object property storage (map/unordered_map) into Value
+            // and implement a proper lvalue resolver. For now fall through to normal behavior.
+        }
+
+        // --- Normal binary evaluation path ---
+        Value left = evaluate_expression(b->left.get(), env);
+        Value right = evaluate_expression(b->right.get(), env);
+        const std::string &op = b->op;
+
+        if (op == "+") {
+            if (std::holds_alternative<std::string>(left) || std::holds_alternative<std::string>(right)) {
+                return Value { to_string_value(left) + to_string_value(right) };
+            }
+            return Value { to_number(left) + to_number(right) };
+        }
+        if (op == "-") return Value { to_number(left) - to_number(right) };
+        if (op == "*") return Value { to_number(left) * to_number(right) };
+        if (op == "/") {
+            double r = to_number(right);
+            if (r == 0.0) throw std::runtime_error("Division by zero at " + b->token.loc.to_string());
+            return Value { to_number(left) / r };
+        }
+        if (op == "%") {
+            double r = to_number(right);
+            if (r == 0.0) throw std::runtime_error("Modulo by zero at " + b->token.loc.to_string());
+            return Value { std::fmod(to_number(left), r) };
+        }
+        if (op == "**") return Value { std::pow(to_number(left), to_number(right)) };
+
+        if (op == "==" || op == "sawa") {
+            return Value { is_equal(left, right) };
+        }
+        if (op == "!=" || op == "sisawa") {
+            return Value { !is_equal(left, right) };
+        }
+        if (op == ">") return Value { to_number(left) > to_number(right) };
+        if (op == "<") return Value { to_number(left) < to_number(right) };
+        if (op == ">=") return Value { to_number(left) >= to_number(right) };
+        if (op == "<=") return Value { to_number(left) <= to_number(right) };
+        if (op == "&&" || op == "na") return Value { to_bool(left) && to_bool(right) };
+        if (op == "||" || op == "au") return Value { to_bool(left) || to_bool(right) };
+
+        throw std::runtime_error("Unknown binary operator '" + op + "' at " + b->token.loc.to_string());
+    }
 
    if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
       Value calleeVal = evaluate_expression(call->callee.get(), env);
@@ -1199,4 +1208,3 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
    throw std::runtime_error("Unhandled expression node in evaluator");
 }
-
