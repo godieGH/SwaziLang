@@ -38,12 +38,40 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       };
    }
 
-   // ---- Array literal evaluation: [elem, elem, ...] ----
    if (auto arrNode = dynamic_cast<ArrayExpressionNode*>(expr)) {
       auto arrVal = std::make_shared < ArrayValue > ();
       arrVal->elements.reserve(arrNode->elements.size());
+
       for (auto &elemPtr: arrNode->elements) {
-         // elements can be any expression (including nested arrays)
+         if (!elemPtr) {
+            // preserve undefined / empty slot behavior
+            arrVal->elements.push_back(std::monostate {});
+            continue;
+         }
+
+         // Support spread element nodes (parser should produce a SpreadElementNode)
+         if (auto spread = dynamic_cast<SpreadElementNode*>(elemPtr.get())) {
+            if (!spread->argument) {
+               throw std::runtime_error("Spread element missing argument at " + spread->token.loc.to_string());
+            }
+            Value v = evaluate_expression(spread->argument.get(), env);
+
+            // Common behavior: only arrays are spread into array literal
+            if (std::holds_alternative < ArrayPtr > (v)) {
+               ArrayPtr src = std::get < ArrayPtr > (v);
+               if (src) {
+                  for (auto &e: src->elements) {
+                     arrVal->elements.push_back(e);
+                  }
+               }
+            } else {
+               // you can change this to allow strings -> char elements, objects -> ???, etc.
+               throw std::runtime_error("Spread in array expects array value at " + spread->token.loc.to_string());
+            }
+            continue;
+         }
+
+         // normal (non-spread) element
          Value ev = evaluate_expression(elemPtr.get(), env);
          arrVal->elements.push_back(std::move(ev));
       }
@@ -55,7 +83,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    if (auto objNode = dynamic_cast<ObjectExpressionNode*>(expr)) {
       ObjectPtr obj = std::make_shared < ObjectValue > ();
 
-      // helper: convert FunctionExpressionNode -> FunctionDeclarationNode (shared_ptr)
+      // helper: convert FunctionExpressionNode -> FunctionDeclarationNode
       auto fnExprToDecl = [](FunctionExpressionNode* fe) -> std::shared_ptr < FunctionDeclarationNode > {
          auto declptr = std::make_shared < FunctionDeclarationNode > ();
          declptr->token = fe->token;
@@ -69,27 +97,33 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       for (const auto &p: objNode->properties) {
          if (!p) continue;
 
-         // Spread: ...expr
+         Value val;
+
+         // Handle Spread
          if (p->kind == PropertyKind::Spread) {
             if (!p->value) continue;
-            Value v = evaluate_expression(p->value.get(), env);
-            if (!std::holds_alternative < ObjectPtr > (v)) {
-               throw std::runtime_error("Spread in object expects object value at " + p->token.loc.to_string());
+
+            // Unwrap SpreadElementNode if needed
+            if (auto spreadNode = dynamic_cast<SpreadElementNode*>(p->value.get())) {
+               val = evaluate_expression(spreadNode->argument.get(), env);
+            } else {
+               val = evaluate_expression(p->value.get(), env);
             }
-            ObjectPtr src = std::get < ObjectPtr > (v);
+
+            if (!std::holds_alternative < ObjectPtr > (val)) {
+               throw std::runtime_error("Spread expects an object at " + p->token.loc.to_string());
+            }
+
+            ObjectPtr src = std::get < ObjectPtr > (val);
             if (!src) continue;
+
             for (const auto &kv: src->properties) {
-               PropertyDescriptor desc;
-               desc.value = kv.second.value;
-               desc.is_private = kv.second.is_private;
-               desc.is_readonly = kv.second.is_readonly;
-               desc.token = kv.second.token;
-               obj->properties[kv.first] = desc;
+               obj->properties[kv.first] = kv.second; // copy descriptor
             }
             continue;
          }
 
-         // determine key string
+         // Determine property key
          std::string keyStr;
          if (p->computed) {
             if (!p->key) throw std::runtime_error("Computed property missing expression at " + p->token.loc.to_string());
@@ -102,13 +136,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             throw std::runtime_error("Property with no key at " + p->token.loc.to_string());
          }
 
-         // build the value
-         Value val = std::monostate {};
+         // Build property value
          if (p->kind == PropertyKind::Method) {
-            // p->value should hold a FunctionExpressionNode
             if (auto fe = dynamic_cast<FunctionExpressionNode*>(p->value.get())) {
                auto declptr = fnExprToDecl(fe);
-               // closure: new env with parent env and $this bound to the object instance
                EnvPtr methodClosure = std::make_shared < Environment > (env);
                Environment::Variable thisVar; thisVar.value = obj; thisVar.is_constant = true;
                methodClosure->set("$", thisVar);
@@ -117,9 +148,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                FunctionPtr fnptr = std::make_shared < FunctionValue > (declptr->name, declptr->parameters, declptr, methodClosure, declptr->token);
                fnptr->name = keyStr;
                val = fnptr;
-
             } else {
-               // fallback: evaluate value
                val = evaluate_expression(p->value.get(), env);
             }
          } else if (p->kind == PropertyKind::KeyValue) {
@@ -136,8 +165,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
          PropertyDescriptor desc;
          desc.value = val;
-         desc.is_private = p->is_private; // use parser-provided flag
-         desc.is_readonly = p->is_readonly; // e.g., getter-marked or readonly marker
+         desc.is_private = p->is_private;
+         desc.is_readonly = p->is_readonly;
          desc.token = p->token;
 
          obj->properties[keyStr] = std::move(desc);
@@ -1236,123 +1265,135 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          }
 
          // Case B: left is an index expression (arr[idx]++ or arr[idx] += ...)
-if (auto idx = dynamic_cast<IndexExpressionNode*>(b->left.get())) {
-    // Evaluate the object expression (this will return ArrayPtr or ObjectPtr)
-    Value objVal = evaluate_expression(idx->object.get(), env);
-    Value indexVal = evaluate_expression(idx->index.get(), env);
+         if (auto idx = dynamic_cast<IndexExpressionNode*>(b->left.get())) {
+            // Evaluate the object expression (this will return ArrayPtr or ObjectPtr)
+            Value objVal = evaluate_expression(idx->object.get(), env);
+            Value indexVal = evaluate_expression(idx->index.get(), env);
 
-    // --- ARRAY PATH (unchanged behavior) ---
-    if (std::holds_alternative<ArrayPtr>(objVal)) {
-        ArrayPtr arr = std::get<ArrayPtr>(objVal);
-        if (!arr) {
-            throw std::runtime_error("Cannot assign into null array at " + b->token.loc.to_string());
-        }
+            // --- ARRAY PATH (unchanged behavior) ---
+            if (std::holds_alternative < ArrayPtr > (objVal)) {
+               ArrayPtr arr = std::get < ArrayPtr > (objVal);
+               if (!arr) {
+                  throw std::runtime_error("Cannot assign into null array at " + b->token.loc.to_string());
+               }
 
-        long long rawIndex = static_cast<long long>(to_number(indexVal));
-        if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
-        size_t uidx = static_cast<size_t>(rawIndex);
-        if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
+               long long rawIndex = static_cast<long long > (to_number(indexVal));
+               if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
+               size_t uidx = static_cast<size_t > (rawIndex);
+               if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
 
-        double oldv = to_number(arr->elements[uidx]);
+               double oldv = to_number(arr->elements[uidx]);
 
-        double delta = 0.0;
-        if (b->token.type == TokenType::INCREMENT) delta = 1.0;
-        else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
-        else {
-            // evaluate right side once
-            Value rightVal = evaluate_expression(b->right.get(), env);
-            double rv = to_number(rightVal);
-            delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
-        }
+               double delta = 0.0;
+               if (b->token.type == TokenType::INCREMENT) delta = 1.0;
+               else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
+               else {
+                  // evaluate right side once
+                  Value rightVal = evaluate_expression(b->right.get(), env);
+                  double rv = to_number(rightVal);
+                  delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+               }
 
-        double newv = oldv + delta;
-        arr->elements[uidx] = Value{ newv };
-        return Value{ newv };
-    }
-
-    // --- OBJECT PATH (support obj[key]++ / obj[key] += v) ---
-    if (std::holds_alternative<ObjectPtr>(objVal)) {
-        ObjectPtr op = std::get<ObjectPtr>(objVal);
-        if (!op) {
-            throw std::runtime_error("Cannot operate on null object at " + b->token.loc.to_string());
-        }
-
-        // convert indexVal -> property key string (same as your index-getter)
-        std::string prop = to_string_value(indexVal);
-
-        auto it = op->properties.find(prop);
-
-        // If property exists, enforce privacy/read-only rules
-        if (it != op->properties.end()) {
-            // private properties: only owner (this/$ bound to same object) can mutate
-            if (it->second.is_private) {
-                bool allowed = false;
-                if (env) {
-                    if (env->has("$")) {
-                        Value thisVal = env->get("$").value;
-                        if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) allowed = true;
-                    }
-                    if (!allowed && env->has("$this")) {
-                        Value thisVal = env->get("$this").value;
-                        if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) allowed = true;
-                    }
-                }
-                if (!allowed) {
-                    throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string());
-                }
+               double newv = oldv + delta;
+               arr->elements[uidx] = Value {
+                  newv
+               };
+               return Value {
+                  newv
+               };
             }
 
-            if (it->second.is_readonly) {
-                throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
+            // --- OBJECT PATH (support obj[key]++ / obj[key] += v) ---
+            if (std::holds_alternative < ObjectPtr > (objVal)) {
+               ObjectPtr op = std::get < ObjectPtr > (objVal);
+               if (!op) {
+                  throw std::runtime_error("Cannot operate on null object at " + b->token.loc.to_string());
+               }
+
+               // convert indexVal -> property key string (same as your index-getter)
+               std::string prop = to_string_value(indexVal);
+
+               auto it = op->properties.find(prop);
+
+               // If property exists, enforce privacy/read-only rules
+               if (it != op->properties.end()) {
+                  // private properties: only owner (this/$ bound to same object) can mutate
+                  if (it->second.is_private) {
+                     bool allowed = false;
+                     if (env) {
+                        if (env->has("$")) {
+                           Value thisVal = env->get("$").value;
+                           if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
+                        }
+                        if (!allowed && env->has("$this")) {
+                           Value thisVal = env->get("$this").value;
+                           if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
+                        }
+                     }
+                     if (!allowed) {
+                        throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string());
+                     }
+                  }
+
+                  if (it->second.is_readonly) {
+                     throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
+                  }
+
+                  // compute numeric old value (coerce as your to_number does)
+                  double oldv = to_number(it->second.value);
+
+                  double delta = 0.0;
+                  if (b->token.type == TokenType::INCREMENT) delta = 1.0;
+                  else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
+                  else {
+                     // evaluate right side once
+                     Value rightVal = evaluate_expression(b->right.get(), env);
+                     double rv = to_number(rightVal);
+                     delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+                  }
+
+                  double newv = oldv + delta;
+
+                  // update in-place preserving flags
+                  it->second.value = Value {
+                     newv
+                  };
+                  it->second.token = idx->token;
+                  return Value {
+                     newv
+                  };
+               }
+
+               // Property does not exist -> create public numeric property defaulting to 0,
+               // then apply ++ / += semantics (match array behavior of defaulting).
+               double oldv = 0.0;
+               double delta = 0.0;
+               if (b->token.type == TokenType::INCREMENT) delta = 1.0;
+               else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
+               else {
+                  Value rightVal = evaluate_expression(b->right.get(), env);
+                  double rv = to_number(rightVal);
+                  delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+               }
+               double newv = oldv + delta;
+
+               PropertyDescriptor desc;
+               desc.value = Value {
+                  newv
+               };
+               desc.is_private = false;
+               desc.is_readonly = false;
+               desc.token = idx->token;
+               op->properties[prop] = std::move(desc);
+
+               return Value {
+                  newv
+               };
             }
 
-            // compute numeric old value (coerce as your to_number does)
-            double oldv = to_number(it->second.value);
-
-            double delta = 0.0;
-            if (b->token.type == TokenType::INCREMENT) delta = 1.0;
-            else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
-            else {
-                // evaluate right side once
-                Value rightVal = evaluate_expression(b->right.get(), env);
-                double rv = to_number(rightVal);
-                delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
-            }
-
-            double newv = oldv + delta;
-
-            // update in-place preserving flags
-            it->second.value = Value{ newv };
-            it->second.token = idx->token;
-            return Value{ newv };
-        }
-
-        // Property does not exist -> create public numeric property defaulting to 0,
-        // then apply ++ / += semantics (match array behavior of defaulting).
-        double oldv = 0.0;
-        double delta = 0.0;
-        if (b->token.type == TokenType::INCREMENT) delta = 1.0;
-        else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
-        else {
-            Value rightVal = evaluate_expression(b->right.get(), env);
-            double rv = to_number(rightVal);
-            delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv : -rv;
-        }
-        double newv = oldv + delta;
-
-        PropertyDescriptor desc;
-        desc.value = Value{ newv };
-        desc.is_private = false;
-        desc.is_readonly = false;
-        desc.token = idx->token;
-        op->properties[prop] = std::move(desc);
-
-        return Value{ newv };
-    }
-
-    // Fallback: not array nor object
-    throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string());
-}
+            // Fallback: not array nor object
+            throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string());
+         }
 
          // Member assignment/mutation isn't supported by your Statement evaluator
          // (your StatementEval throws for member assignment). If you want obj.prop++,
@@ -1434,7 +1475,45 @@ if (auto idx = dynamic_cast<IndexExpressionNode*>(b->left.get())) {
    if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
       Value calleeVal = evaluate_expression(call->callee.get(), env);
       std::vector < Value > args;
-      for (auto &arg: call->arguments) args.push_back(evaluate_expression(arg.get(), env));
+      for (auto &argPtr: call->arguments) {
+         if (!argPtr) {
+            args.push_back(std::monostate {});
+            continue;
+         }
+
+         if (auto spread = dynamic_cast<SpreadElementNode*>(argPtr.get())) {
+            if (!spread->argument) {
+               throw std::runtime_error("Spread argument missing expression at " + spread->token.loc.to_string());
+            }
+            Value v = evaluate_expression(spread->argument.get(), env);
+
+            // Expand arrays into positional args
+            if (std::holds_alternative < ArrayPtr > (v)) {
+               ArrayPtr src = std::get < ArrayPtr > (v);
+               if (src) {
+                  for (auto &e: src->elements) {
+                     args.push_back(e);
+                  }
+               }
+               continue;
+            }
+
+            // optionally allow strings -> each char push as string of length 1
+            if (std::holds_alternative < std::string > (v)) {
+               std::string s = std::get < std::string > (v);
+               for (char c: s) args.push_back(Value {
+                  std::string(1, c)
+               });
+               continue;
+            }
+
+            throw std::runtime_error("Spread in call expects array or string at " + spread->token.loc.to_string());
+         }
+
+         // normal argument
+         args.push_back(evaluate_expression(argPtr.get(), env));
+      }
+
       if (std::holds_alternative < FunctionPtr > (calleeVal)) {
          return call_function(std::get < FunctionPtr > (calleeVal), args, call->token);
       }

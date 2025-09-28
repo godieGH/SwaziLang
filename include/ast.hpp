@@ -363,15 +363,16 @@ struct ObjectExpressionNode : public ExpressionNode {
 };
 
 struct SpreadElementNode : public ExpressionNode {
+    Token token;
     std::unique_ptr<ExpressionNode> argument;
-    std::string to_string() const override {
-        return "..." + (argument ? argument->to_string() : "<null>");
-    }
+    SpreadElementNode() = default;
+    SpreadElementNode(const Token& t, std::unique_ptr<ExpressionNode> arg)
+        : token(t), argument(std::move(arg)) {}
     std::unique_ptr<ExpressionNode> clone() const override {
-        auto n = std::make_unique<SpreadElementNode>();
-        n->token = token;
-        if (argument) n->argument = argument->clone();
-        return n;
+        auto node = std::make_unique<SpreadElementNode>();
+        node->token = token;
+        if (argument) node->argument = argument->clone();
+        return node;
     }
 };
 

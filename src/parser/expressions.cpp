@@ -385,7 +385,7 @@ std::unique_ptr < ExpressionNode > Parser::parse_tabia_method() {
    } else {
       expect(TokenType::COLON, "Expected ':' or '{' to begin tabia method body");
    }
-   
+
    if (is_getter && !params.empty()) {
       throw std::runtime_error("'thabiti' method cannot take parameters at " + nameTok.loc.to_string());
    }
@@ -424,155 +424,156 @@ std::unique_ptr < ExpressionNode > Parser::parse_object_expression() {
    }
 
    while (peek().type != TokenType::CLOSEBRACE) {
-    skip_formatting();
+      skip_formatting();
 
-    // check optional privacy marker '@'
-    bool is_private_flag = false;
-    Token privateTok;
-    if (peek().type == TokenType::AT_SIGN) {           // <-- requires lexer to emit TokenType::AT_SIGN
-        privateTok = consume();
-        is_private_flag = true;
-        skip_formatting();
-    }
+      // check optional privacy marker '@'
+      bool is_private_flag = false;
+      Token privateTok;
+      if (peek().type == TokenType::AT_SIGN) {
+         // <-- requires lexer to emit TokenType::AT_SIGN
+         privateTok = consume();
+         is_private_flag = true;
+         skip_formatting();
+      }
 
-    // --- special: tabia method inside object ---
-    if ((peek().type == TokenType::TABIA) ||
-        (peek().type == TokenType::IDENTIFIER && peek().value == "tabia")) {
-        // parse method expression (consumes the tabia token and body)
-        auto methodExpr = parse_tabia_method();
+      // --- special: tabia method inside object ---
+      if ((peek().type == TokenType::TABIA) ||
+         (peek().type == TokenType::IDENTIFIER && peek().value == "tabia")) {
+         // parse method expression (consumes the tabia token and body)
+         auto methodExpr = parse_tabia_method();
 
-        // move into PropertyNode
-        auto prop = std::make_unique<PropertyNode>();
-        prop->kind = PropertyKind::Method;
-        prop->value = std::move(methodExpr);
+         // move into PropertyNode
+         auto prop = std::make_unique < PropertyNode > ();
+         prop->kind = PropertyKind::Method;
+         prop->value = std::move(methodExpr);
 
-        // extract name and getter flag if possible
-        if (auto func = dynamic_cast<FunctionExpressionNode*>(prop->value.get())) {
+         // extract name and getter flag if possible
+         if (auto func = dynamic_cast<FunctionExpressionNode*>(prop->value.get())) {
             prop->key_name = func->name;
             prop->is_readonly = func->is_getter;
             prop->token = func->token;
-        }
+         }
 
-        // apply privacy marker if present
-        prop->is_private = is_private_flag;
+         // apply privacy marker if present
+         prop->is_private = is_private_flag;
 
-        obj->properties.push_back(std::move(prop));
+         obj->properties.push_back(std::move(prop));
 
-        skip_formatting();
-        if (peek().type == TokenType::COMMA) consume();
-        continue;
-    }
+         skip_formatting();
+         if (peek().type == TokenType::COMMA) consume();
+         continue;
+      }
 
-    // --- non-tabia property path (existing logic) ---
-    if (peek().type == TokenType::ELLIPSIS) {
-        if (is_private_flag) {
+      // --- non-tabia property path (existing logic) ---
+      if (peek().type == TokenType::ELLIPSIS) {
+         if (is_private_flag) {
             throw std::runtime_error("Private modifier '@' cannot be applied to spread at " + privateTok.loc.to_string());
-        }
-        Token ell = consume();
-        auto spread = std::make_unique<SpreadElementNode>();
-        spread->token = ell;
-        spread->argument = parse_expression();
-        auto prop = std::make_unique<PropertyNode>();
-        prop->token = ell;
-        prop->kind = PropertyKind::Spread;
-        prop->value = std::move(spread);
-        obj->properties.push_back(std::move(prop));
-        skip_formatting();
-        if (peek().type == TokenType::COMMA) consume();
-        continue;
-    }
+         }
+         Token ell = consume();
+         auto spread = std::make_unique < SpreadElementNode > ();
+         spread->token = ell;
+         spread->argument = parse_expression();
+         auto prop = std::make_unique < PropertyNode > ();
+         prop->token = ell;
+         prop->kind = PropertyKind::Spread;
+         prop->value = std::move(spread);
+         obj->properties.push_back(std::move(prop));
+         skip_formatting();
+         if (peek().type == TokenType::COMMA) consume();
+         continue;
+      }
 
-    auto prop = std::make_unique<PropertyNode>();
-    prop->kind = PropertyKind::KeyValue;
-    prop->is_private = is_private_flag; // apply privacy to property node
+      auto prop = std::make_unique < PropertyNode > ();
+      prop->kind = PropertyKind::KeyValue;
+      prop->is_private = is_private_flag; // apply privacy to property node
 
-    // key: identifier, string, number, or computed [expr]
-    if (peek().type == TokenType::OPENBRACKET) {
-        Token openIdx = consume(); // '['
-        prop->computed = true;
-        prop->key = parse_expression();
-        expect(TokenType::CLOSEBRACKET, "Expected ']' after computed property key");
-        prop->token = openIdx;
-    } else {
-        Token t = peek();
-        if (t.type == TokenType::IDENTIFIER) {
+      // key: identifier, string, number, or computed [expr]
+      if (peek().type == TokenType::OPENBRACKET) {
+         Token openIdx = consume(); // '['
+         prop->computed = true;
+         prop->key = parse_expression();
+         expect(TokenType::CLOSEBRACKET, "Expected ']' after computed property key");
+         prop->token = openIdx;
+      } else {
+         Token t = peek();
+         if (t.type == TokenType::IDENTIFIER) {
             Token idTok = consume();
             prop->key_name = idTok.value;
             prop->token = idTok;
-        } else if (t.type == TokenType::STRING || t.type == TokenType::SINGLE_QUOTED_STRING) {
+         } else if (t.type == TokenType::STRING || t.type == TokenType::SINGLE_QUOTED_STRING) {
             Token s = consume();
-            auto keyNode = std::make_unique<StringLiteralNode>();
+            auto keyNode = std::make_unique < StringLiteralNode > ();
             keyNode->value = s.value;
             keyNode->token = s;
             prop->key = std::move(keyNode);
             prop->token = s;
-        } else if (t.type == TokenType::NUMBER) {
+         } else if (t.type == TokenType::NUMBER) {
             Token n = consume();
-            auto keyNode = std::make_unique<NumericLiteralNode>();
+            auto keyNode = std::make_unique < NumericLiteralNode > ();
             keyNode->value = std::stod(n.value);
             keyNode->token = n;
             prop->key = std::move(keyNode);
             prop->token = n;
-        } else {
+         } else {
             Token bad = peek();
             throw std::runtime_error("Unexpected token in object property key: '" + bad.value +
                "' at " + bad.loc.to_string());
-        }
-    }
+         }
+      }
 
-    skip_formatting();
+      skip_formatting();
 
-    // decide property kind & parse value
-    if (peek().type == TokenType::COLON) {
-        consume(); // ':'
-        skip_formatting();
-        prop->kind = PropertyKind::KeyValue;
-        prop->value = parse_expression();
-    } else if (peek().type == TokenType::OPENPARENTHESIS) {
-        // method shorthand not supported; treat as shorthand (per your rules)
-        prop->kind = PropertyKind::Shorthand;
-        if (!prop->key_name.empty()) {
+      // decide property kind & parse value
+      if (peek().type == TokenType::COLON) {
+         consume(); // ':'
+         skip_formatting();
+         prop->kind = PropertyKind::KeyValue;
+         prop->value = parse_expression();
+      } else if (peek().type == TokenType::OPENPARENTHESIS) {
+         // method shorthand not supported; treat as shorthand (per your rules)
+         prop->kind = PropertyKind::Shorthand;
+         if (!prop->key_name.empty()) {
             Token fakeTok; fakeTok.type = TokenType::IDENTIFIER; fakeTok.value = prop->key_name;
-            auto ident = std::make_unique<IdentifierNode>();
+            auto ident = std::make_unique < IdentifierNode > ();
             ident->name = prop->key_name;
             ident->token = fakeTok;
             prop->value = std::move(ident);
-        } else if (prop->key) {
+         } else if (prop->key) {
             prop->value = prop->key->clone();
-        } else {
+         } else {
             throw std::runtime_error("Invalid property shorthand without identifier at " + peek().loc.to_string());
-        }
-    } else {
-        // shorthand property
-        prop->kind = PropertyKind::Shorthand;
-        if (!prop->key_name.empty()) {
+         }
+      } else {
+         // shorthand property
+         prop->kind = PropertyKind::Shorthand;
+         if (!prop->key_name.empty()) {
             Token fakeTok; fakeTok.type = TokenType::IDENTIFIER; fakeTok.value = prop->key_name;
-            auto ident = std::make_unique<IdentifierNode>();
+            auto ident = std::make_unique < IdentifierNode > ();
             ident->name = prop->key_name;
             ident->token = fakeTok;
             prop->value = std::move(ident);
-        } else if (prop->key) {
+         } else if (prop->key) {
             prop->value = prop->key->clone();
-        } else {
+         } else {
             throw std::runtime_error("Invalid property shorthand without identifier at " + peek().loc.to_string());
-        }
-    }
+         }
+      }
 
-    obj->properties.push_back(std::move(prop));
+      obj->properties.push_back(std::move(prop));
 
-    skip_formatting();
-    if (peek().type == TokenType::COMMA) {
-        consume();
-        skip_formatting();
-        if (peek().type == TokenType::CLOSEBRACE) break;
-        continue;
-    }
+      skip_formatting();
+      if (peek().type == TokenType::COMMA) {
+         consume();
+         skip_formatting();
+         if (peek().type == TokenType::CLOSEBRACE) break;
+         continue;
+      }
 
-    if (peek().type == TokenType::CLOSEBRACE) break;
+      if (peek().type == TokenType::CLOSEBRACE) break;
 
-    Token bad = peek();
-    throw std::runtime_error("Expected ',' or '}' in object literal at " + bad.loc.to_string());
-}
+      Token bad = peek();
+      throw std::runtime_error("Expected ',' or '}' in object literal at " + bad.loc.to_string());
+   }
    expect(TokenType::CLOSEBRACE, "Expected '}' to close object literal");
 
 
@@ -621,10 +622,10 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       return ident;
    }
    if (t.type == TokenType::SELF) {
-    Token id = consume();
-    auto thisNode = std::make_unique<ThisExpressionNode>();
-    thisNode->token = id;
-    return thisNode;
+      Token id = consume();
+      auto thisNode = std::make_unique < ThisExpressionNode > ();
+      thisNode->token = id;
+      return thisNode;
    }
 
    if (t.type == TokenType::OPENPARENTHESIS) {
@@ -641,7 +642,16 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
 
       if (peek().type != TokenType::CLOSEBRACKET) {
          do {
-            arrayNode->elements.push_back(parse_expression());
+            if (peek().type == TokenType::ELLIPSIS) {
+               Token ell = consume();
+               auto spread = std::make_unique < SpreadElementNode > ();
+               spread->token = ell;
+               spread->argument = parse_expression(); // after ...
+               arrayNode->elements.push_back(std::move(spread));
+            } else {
+               arrayNode->elements.push_back(parse_expression());
+            }
+
          } while (match(TokenType::COMMA));
       }
 
@@ -667,9 +677,18 @@ std::unique_ptr < ExpressionNode > Parser::parse_call(std::unique_ptr < Expressi
    call->token = openTok;
    if (peek().type != TokenType::CLOSEPARENTHESIS) {
       do {
-         call->arguments.push_back(parse_expression());
+         if (peek().type == TokenType::ELLIPSIS) {
+            Token ell = consume();
+            auto spread = std::make_unique < SpreadElementNode > ();
+            spread->token = ell;
+            spread->argument = parse_expression();
+            call->arguments.push_back(std::move(spread));
+         } else {
+            call->arguments.push_back(parse_expression());
+         }
       } while (match(TokenType::COMMA));
    }
+
    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after call arguments");
    return call;
 }
