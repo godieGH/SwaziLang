@@ -2,6 +2,12 @@
 #include "evaluator.hpp"
 #include <iostream>
 #include <cmath>
+#include <cstdlib>
+#include <chrono>
+#include <algorithm>
+#include <numeric>
+#include <cstdint>
+
 
 static Value builtin_ainaya(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
    if (args.empty()) {
@@ -99,6 +105,175 @@ static Value builtin_object_entry(const std::vector < Value>& args, EnvPtr env, 
 
 
 
+static Value builtin_kadiria(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double x = args.empty() ? 0.0: value_to_number(args[0]);
+   return std::round(x);
+}
+static Value builtin_kadiriajuu(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double x = args.empty() ? 0.0: value_to_number(args[0]);
+   return std::ceil(x);
+}
+static Value builtin_kadiriachini(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double x = args.empty() ? 0.0: value_to_number(args[0]);
+   return std::floor(x);
+}
+
+static Value builtin_kubwa(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   double m = value_to_number(args[0]);
+   for (size_t i = 1; i < args.size(); ++i) m = std::fmax(m, value_to_number(args[i]));
+   return m;
+}
+static Value builtin_ndogo(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   double m = value_to_number(args[0]);
+   for (size_t i = 1; i < args.size(); ++i) m = std::fmin(m, value_to_number(args[i]));
+   return m;
+}
+
+static Value builtin_log(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   double n = value_to_number(args[0]);
+   if (args.size() == 1) return std::log10(n);
+   double base = value_to_number(args[1]);
+   // safe: if base <= 0 or base == 1 will produce nan/inf as per std::log behaviour
+   return std::log(n) / std::log(base);
+}
+static Value builtin_ln(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   double n = value_to_number(args[0]);
+   return std::log(n);
+}
+
+static Value builtin_sin(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double x = args.empty() ? 0.0: value_to_number(args[0]);
+   return std::sin(x);
+}
+static Value builtin_cos(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double x = args.empty() ? 0.0: value_to_number(args[0]);
+   return std::cos(x);
+}
+static Value builtin_tan(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double x = args.empty() ? 0.0: value_to_number(args[0]);
+   return std::tan(x);
+}
+static Value builtin_hypot(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   // fold into hypot: hypot(x1, x2, x3...) -> use pairwise hypot
+   double h = value_to_number(args[0]);
+   for (size_t i = 1; i < args.size(); ++i) h = std::hypot(h, value_to_number(args[i]));
+   return h;
+}
+static Value builtin_isnan(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return false;
+   double x = value_to_number(args[0]);
+   return std::isnan(x);
+}
+static Value builtin_rand(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double r = static_cast<double > (std::rand()) / (static_cast<double > (RAND_MAX) + 1.0);
+   if (args.empty()) return r;
+   if (args.size() == 1) {
+      double a = value_to_number(args[0]);
+      return r * a; // 0..a
+   }
+   double a = value_to_number(args[0]);
+   double b = value_to_number(args[1]);
+   if (a > b) std::swap(a, b);
+   return a + r * (b - a);
+}
+static Value builtin_sign(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   double x = value_to_number(args[0]);
+   if (x > 0) return 1.0;
+   if (x < 0) return -1.0;
+   return 0.0;
+}
+static Value builtin_deg2rad(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double d = args.empty() ? 0.0: value_to_number(args[0]);
+   return d * (M_PI / 180.0);
+}
+static Value builtin_rad2deg(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   double r = args.empty() ? 0.0: value_to_number(args[0]);
+   return r * (180.0 / M_PI);
+}
+static void collect_numbers_from_args_or_array(const std::vector<Value>& args, std::vector<double>& out) {
+    if (args.size() == 1 && std::holds_alternative<ArrayPtr>(args[0])) {
+        ArrayPtr arr = std::get<ArrayPtr>(args[0]);
+        for (auto &v : arr->elements) out.push_back(value_to_number(v));
+    } else {
+        for (auto &v : args) out.push_back(value_to_number(v));
+    }
+}
+
+static Value builtin_mean(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   std::vector < double > vals;
+   collect_numbers_from_args_or_array(args, vals);
+   if (vals.empty()) return 0.0;
+   double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
+   return sum / static_cast<double > (vals.size());
+}
+
+static Value builtin_median(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   std::vector < double > vals;
+   collect_numbers_from_args_or_array(args, vals);
+   if (vals.empty()) return 0.0;
+   std::sort(vals.begin(), vals.end());
+   size_t n = vals.size();
+   if (n % 2 == 1) return vals[n/2];
+   return (vals[n/2 - 1] + vals[n/2]) / 2.0;
+}
+
+static Value builtin_stddev(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   std::vector < double > vals;
+   collect_numbers_from_args_or_array(args, vals);
+   if (vals.empty()) return 0.0;
+   double mean = std::accumulate(vals.begin(), vals.end(), 0.0) / vals.size();
+   double acc = 0.0;
+   for (double x: vals) acc += (x - mean) * (x - mean);
+   // population stddev
+   return std::sqrt(acc / vals.size());
+}
+
+static Value builtin_roundTo(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   double x = value_to_number(args[0]);
+   int digits = args.size() > 1 ? static_cast<int > (value_to_number(args[1])): 0;
+   double scale = std::pow(10.0, digits);
+   return std::round(x * scale) / scale;
+}
+
+static long long ll_gcd(long long a, long long b) {
+   if (a == 0) return std::llabs(b);
+   if (b == 0) return std::llabs(a);
+   a = std::llabs(a); b = std::llabs(b);
+   while (b != 0) {
+      long long t = a % b;
+      a = b;
+      b = t;
+   }
+   return std::llabs(a);
+}
+static Value builtin_gcd(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.empty()) return 0.0;
+   long long a = static_cast<long long > (std::llround(value_to_number(args[0])));
+   if (args.size() == 1) return static_cast<double > (std::llabs(a));
+   long long b = static_cast<long long > (std::llround(value_to_number(args[1])));
+   long long g = ll_gcd(a, b);
+   return static_cast<double > (g);
+}
+static Value builtin_lcm(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
+   if (args.size() < 2) return 0.0;
+   long long a = static_cast<long long > (std::llround(value_to_number(args[0])));
+   long long b = static_cast<long long > (std::llround(value_to_number(args[1])));
+   if (a == 0 || b == 0) return 0.0;
+   long long g = ll_gcd(a, b);
+   // lcm = abs(a / g * b) — avoid overflow if possible (still risky for huge numbers)
+   long long l = std::llabs((a / g) * b);
+   return static_cast<double > (l);
+}
+
+
+
 
 void init_globals(EnvPtr env) {
    if (!env) return;
@@ -158,4 +333,50 @@ void init_globals(EnvPtr env) {
    objectVar.value = objectVal;
    objectVar.is_constant = true;
    env->set("Object", objectVar);
+
+
+   {
+      auto hesabuVal = std::make_shared < ObjectValue > ();
+
+      auto add = [&](const std::string& name,
+         std::function < Value(const std::vector < Value>&, EnvPtr, const Token&) > impl) {
+         auto fn = std::make_shared < FunctionValue > (name, impl, env, Token {});
+         hesabuVal->properties[name] = {
+            fn,
+            false,
+            false,
+            true,
+            Token {}
+         };
+      };
+
+      add("kadiria", builtin_kadiria);
+      add("kadiriajuu", builtin_kadiriajuu);
+      add("kadiriachini", builtin_kadiriachini);
+      add("kubwa", builtin_kubwa);
+      add("ndogo", builtin_ndogo);
+      add("log", builtin_log);
+      add("ln", builtin_ln);
+      add("sin", builtin_sin);
+      add("cos", builtin_cos);
+      add("tan", builtin_tan);
+      add("hypot", builtin_hypot);
+      add("rand", builtin_rand);
+      add("siNambaSahihi", builtin_isnan);
+      add("deg2rad", builtin_deg2rad);
+      add("rad2deg", builtin_rad2deg);
+      add("alama", builtin_sign);
+      add("gcd", builtin_gcd);
+      add("lcm", builtin_lcm);
+      add("mean", builtin_mean);
+      add("median", builtin_median);
+      add("stddev", builtin_stddev);
+      add("kadiriaKtkDes", builtin_roundTo);
+
+      Environment::Variable hesabuVar;
+      hesabuVar.value = hesabuVal;
+      hesabuVar.is_constant = true;
+      env->set("Hesabu", hesabuVar);
+   }
+
 }

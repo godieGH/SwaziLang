@@ -143,7 +143,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                EnvPtr methodClosure = std::make_shared < Environment > (env);
                Environment::Variable thisVar; thisVar.value = obj; thisVar.is_constant = true;
                methodClosure->set("$", thisVar);
-               methodClosure->set("$this", thisVar);
 
                FunctionPtr fnptr = std::make_shared < FunctionValue > (declptr->name, declptr->parameters, declptr, methodClosure, declptr->token);
                fnptr->name = keyStr;
@@ -507,12 +506,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          const std::string &prop = mem->property;
 
          // ---------- Properties ----------
-         if (prop == "isiyoSahihi") {
+         if (prop == "siyoSahihi") {
             return Value {
                std::isnan(num)
             };
          }
-         if (prop == "isiyoNaMwisho") {
+         if (prop == "hainaMwyisho") {
             return Value {
                !std::isfinite(num)
             };
