@@ -167,6 +167,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          desc.value = val;
          desc.is_private = p->is_private;
          desc.is_readonly = p->is_readonly;
+         desc.is_locked = p->is_locked; 
          desc.token = p->token;
 
          obj->properties[keyStr] = std::move(desc);
@@ -194,10 +195,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // defensive checks similar to IdentifierNode handling
       if (!env) throw std::runtime_error("No environment when resolving '$' at " + self->token.loc.to_string());
 
-      // prefer explicit "$this" if you set both; fall back to "$"
-      if (env->has("$this")) {
-         return env->get("$this").value;
-      }
+      
       if (env->has("$")) {
          return env->get("$").value;
       }

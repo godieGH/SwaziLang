@@ -426,14 +426,23 @@ std::unique_ptr < ExpressionNode > Parser::parse_object_expression() {
    while (peek().type != TokenType::CLOSEBRACE) {
       skip_formatting();
 
-      // check optional privacy marker '@'
       bool is_private_flag = false;
-      Token privateTok;
-      if (peek().type == TokenType::AT_SIGN) {
-         // <-- requires lexer to emit TokenType::AT_SIGN
-         privateTok = consume();
-         is_private_flag = true;
-         skip_formatting();
+      bool is_locked_flag = false;
+      Token privateTok,
+      lockedTok;
+
+      while (true) {
+         if (peek().type == TokenType::AT_SIGN) {
+            privateTok = consume();
+            is_private_flag = true;
+            skip_formatting();
+         } else if (peek().type == TokenType::AMPERSAND) {
+            lockedTok = consume();
+            is_locked_flag = true;
+            skip_formatting();
+         } else {
+            break; // no more modifiers
+         }
       }
 
       // --- special: tabia method inside object ---
@@ -456,6 +465,7 @@ std::unique_ptr < ExpressionNode > Parser::parse_object_expression() {
 
          // apply privacy marker if present
          prop->is_private = is_private_flag;
+         prop->is_locked = is_locked_flag;
 
          obj->properties.push_back(std::move(prop));
 
@@ -486,6 +496,7 @@ std::unique_ptr < ExpressionNode > Parser::parse_object_expression() {
       auto prop = std::make_unique < PropertyNode > ();
       prop->kind = PropertyKind::KeyValue;
       prop->is_private = is_private_flag; // apply privacy to property node
+      prop->is_locked = is_locked_flag; // apply lock to property node
 
       // key: identifier, string, number, or computed [expr]
       if (peek().type == TokenType::OPENBRACKET) {

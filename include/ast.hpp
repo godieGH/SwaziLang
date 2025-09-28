@@ -284,6 +284,7 @@ struct PropertyNode : public ExpressionNode {
     bool is_static = false;
     bool is_readonly = false;
     bool is_private = false;  
+    bool is_locked = false;  
 
     std::string to_string() const override {
         std::string s;

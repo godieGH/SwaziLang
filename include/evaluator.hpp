@@ -40,6 +40,7 @@ struct PropertyDescriptor {
     Value value;
     bool is_private = false;
     bool is_readonly = false;
+    bool is_locked = false;
     Token token;
 };
 

@@ -1,11 +1,15 @@
 // src/evaluator/Evaluator.cpp
 #include "evaluator.hpp"
+#include "globals.hpp"
 #include <iostream>
 #include <cmath>
 #include <stdexcept>
 #include <sstream>
 
-Evaluator::Evaluator(): global_env(std::make_shared < Environment > (nullptr)) {}
+Evaluator::Evaluator(): global_env(std::make_shared < Environment > (nullptr)) {
+   global_env = std::make_shared<Environment>();
+   init_globals(global_env);
+}
 
 
 // ----------------- Program evaluation -----------------

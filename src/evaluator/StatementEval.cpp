@@ -87,6 +87,8 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
          Value objVal = evaluate_expression(idx->object.get(), env);
          Value indexVal = evaluate_expression(idx->index.get(), env);
 
+
+
          // array path (unchanged)
          if (std::holds_alternative < ArrayPtr > (objVal)) {
             long long rawIndex = static_cast<long long > (to_number(indexVal));
@@ -116,10 +118,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         Value thisVal = env->get("$").value;
                         if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
                      }
-                     if (!allowed && env->has("$this")) {
-                        Value thisVal = env->get("$this").value;
-                        if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
-                     }
                   }
                   if (!allowed) {
                      throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string());
@@ -129,7 +127,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                   throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
                }
 
-               // update existing descriptor
+
+               if (it->second.is_locked) {
+                  bool isInternal = false;
+                  if (env && env->has("$")) {
+                     Value thisVal = env->get("$").value;
+                     if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) {
+                        isInternal = true;
+                     }
+                  }
+
+                  if (!isInternal) {
+                     throw std::runtime_error(
+                        "Cannot overwrite locked property '" + prop + "' from outside at " + idx->token.loc.to_string()
+                     );
+                  }
+               }
+
                it->second.value = rhs;
                it->second.token = idx->token;
             } else {
@@ -166,10 +180,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                      Value thisVal = env->get("$").value;
                      if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
                   }
-                  if (!allowed && env->has("$this")) {
-                     Value thisVal = env->get("$this").value;
-                     if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) allowed = true;
-                  }
                }
                if (!allowed) {
                   throw std::runtime_error("Cannot assign to private property '" + mem->property + "' from outside at " + mem->token.loc.to_string());
@@ -180,7 +190,22 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                throw std::runtime_error("Cannot assign to read-only property '" + mem->property + "' at " + mem->token.loc.to_string());
             }
 
-            // allowed: update in-place (preserve flags)
+            if (it->second.is_locked) {
+               bool isInternal = false;
+               if (env && env->has("$")) {
+                  Value thisVal = env->get("$").value;
+                  if (std::holds_alternative < ObjectPtr > (thisVal) && std::get < ObjectPtr > (thisVal) == op) {
+                     isInternal = true;
+                  }
+               }
+
+               if (!isInternal) {
+                  throw std::runtime_error(
+                     "Cannot overwrite locked property '" + mem->property + "' from outside at " + mem->token.loc.to_string()
+                  );
+               }
+            }
+
             it->second.value = rhs;
             it->second.token = mem->token;
             return;
