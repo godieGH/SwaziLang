@@ -13,6 +13,8 @@ enum class TokenType {
     KAZI,
     TABIA,
     RUDISHA,
+    SIMAMA,
+    ENDELEA,
 
     // control-flow keywords (if / else)
     KAMA,         // 'kama' (if)

@@ -59,6 +59,10 @@ class Parser {
    std::unique_ptr<StatementNode> parse_for_in_statement(Token kwaTok);
    std::unique_ptr < StatementNode > parse_while_statement(); // parses 'wakati <cond> { ... }' or 'wakati <cond> : <INDENT> ... <DEDENT>'
    std::unique_ptr < StatementNode > parse_do_while_statement(); // parses 'fanya { ... } wakati <cond>' or 'fanya : <INDENT> ... wakati <cond>'
+   
+   // continue and breake controls for loops
+   std::unique_ptr<StatementNode> parse_continue_statement();
+   std::unique_ptr<StatementNode> parse_break_statement();
 
    // helper to parse a block of statements either from an INDENT/DEDENT
    // or from brace-style { ... }. accept_brace_style==true allows '{ ... }',

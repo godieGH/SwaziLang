@@ -40,7 +40,7 @@ static std::string to_property_key(const Value &v) {
 
 
 // ----------------- Statement evaluation -----------------
-void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return) {
+void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return, LoopControl* lc) {
    if (!stmt) return;
 
    if (auto vd = dynamic_cast<VariableDeclarationNode*>(stmt)) {
@@ -269,54 +269,77 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
       if (to_bool(condVal)) {
          auto blockEnv = std::make_shared < Environment > (env);
          for (auto &s: ifn->then_body) {
-            evaluate_statement(s.get(), blockEnv, return_value, did_return);
+            evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
             if (did_return && *did_return) return;
          }
       } else if (ifn->has_else) {
          auto blockEnv = std::make_shared < Environment > (env);
          for (auto &s: ifn->else_body) {
-            evaluate_statement(s.get(), blockEnv, return_value, did_return);
+            evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
             if (did_return && *did_return) return;
          }
       }
       return;
    }
 
-   // --- NEW: ForStatementNode (kwa) ---
+   // --- ForStatementNode (kwa) ---
    if (auto fn = dynamic_cast<ForStatementNode*>(stmt)) {
       auto forEnv = std::make_shared < Environment > (env);
 
+      // ensure a loop-control exists for this loop (use caller's lc if present)
+      LoopControl local_lc;
+      LoopControl* loopCtrl = lc ? lc: &local_lc;
+
       if (fn->init) {
-         evaluate_statement(fn->init.get(), forEnv, nullptr, nullptr);
+         evaluate_statement(fn->init.get(), forEnv, nullptr, nullptr, loopCtrl);
+         // if init triggered a return it would have returned earlier
       }
 
       while (true) {
-         bool condition_met = true;
+         // condition check
          if (fn->condition) {
             Value condVal = evaluate_expression(fn->condition.get(), forEnv);
-            condition_met = to_bool(condVal);
+            if (!to_bool(condVal)) break;
          }
-         if (!condition_met) break;
 
          auto bodyEnv = std::make_shared < Environment > (forEnv);
+
+         // run body
          for (auto &s: fn->body) {
-            evaluate_statement(s.get(), bodyEnv, return_value, did_return);
+            evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
             if (did_return && *did_return) return;
+            if (loopCtrl->did_break || loopCtrl->did_continue) break;
          }
 
-         if (fn->post) {
-            evaluate_expression(fn->post.get(), forEnv);
+         // handle break
+         if (loopCtrl->did_break) {
+            loopCtrl->did_break = false; // reset for outer loops
+            break;
          }
+
+         // handle continue: run post (if any) then next iteration
+         if (loopCtrl->did_continue) {
+            loopCtrl->did_continue = false;
+            if (fn->post) evaluate_expression(fn->post.get(), forEnv);
+            continue;
+         }
+
+         // normal end-of-iteration: run post then loop
+         if (fn->post) evaluate_expression(fn->post.get(), forEnv);
       }
+
       return;
    }
 
-
-   // --- NEW: ForInStatementNode (kwa kila) ---
+   // --- ForInStatementNode (kwa kila) ---
    if (auto fin = dynamic_cast<ForInStatementNode*>(stmt)) {
       Value iterableVal = evaluate_expression(fin->iterable.get(), env);
 
-      // Only support arrays and objects for now
+      // loop control owner
+      LoopControl local_lc;
+      LoopControl* loopCtrl = lc ? lc: &local_lc;
+
+      // Array case
       if (std::holds_alternative < ArrayPtr > (iterableVal)) {
          ArrayPtr arr = std::get < ArrayPtr > (iterableVal);
          if (!arr) return;
@@ -324,7 +347,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
          for (size_t i = 0; i < arr->elements.size(); ++i) {
             auto loopEnv = std::make_shared < Environment > (env);
 
-            // Assign valueVar
             if (fin->valueVar) {
                Environment::Variable var {
                   arr->elements[i],
@@ -332,8 +354,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                };
                loopEnv->set(fin->valueVar->name, var);
             }
-
-            // Assign indexVar if exists
             if (fin->indexVar) {
                Environment::Variable var {
                   static_cast<double > (i),
@@ -342,12 +362,30 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                loopEnv->set(fin->indexVar->name, var);
             }
 
+            // execute body
             for (auto &s: fin->body) {
-               evaluate_statement(s.get(), loopEnv, return_value, did_return);
+               evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
                if (did_return && *did_return) return;
+               if (loopCtrl->did_break || loopCtrl->did_continue) break;
+            }
+
+            // if break -> stop iterating the array
+            if (loopCtrl->did_break) {
+               loopCtrl->did_break = false;
+               break;
+            }
+
+            // if continue -> reset and proceed to next element
+            if (loopCtrl->did_continue) {
+               loopCtrl->did_continue = false;
+               continue;
             }
          }
+
+         return;
       }
+
+      // Object case
       else if (std::holds_alternative < ObjectPtr > (iterableVal)) {
          ObjectPtr obj = std::get < ObjectPtr > (iterableVal);
          if (!obj) return;
@@ -355,16 +393,14 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
          for (auto &p: obj->properties) {
             auto loopEnv = std::make_shared < Environment > (env);
 
-            // Assign valueVar -> key
+            // per your design: valueVar = key, indexVar = value
             if (fin->valueVar) {
                Environment::Variable var {
                   p.first,
                   false
-               }; // key
+               }; // key (string)
                loopEnv->set(fin->valueVar->name, var);
             }
-
-            // Assign indexVar -> value (optional)
             if (fin->indexVar) {
                Environment::Variable var {
                   p.second.value,
@@ -374,47 +410,104 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             }
 
             for (auto &s: fin->body) {
-               evaluate_statement(s.get(), loopEnv, return_value, did_return);
+               evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
                if (did_return && *did_return) return;
+               if (loopCtrl->did_break || loopCtrl->did_continue) break;
+            }
+
+            if (loopCtrl->did_break) {
+               loopCtrl->did_break = false;
+               break;
+            }
+            if (loopCtrl->did_continue) {
+               loopCtrl->did_continue = false;
+               continue;
             }
          }
+
+         return;
       }
 
       else {
          throw std::runtime_error("Cannot iterate over non-array/non-object in 'kwa kila' loop at " + fin->token.loc.to_string());
       }
-
-      return;
    }
 
-
-
-
-   // --- NEW: WhileStatementNode (wakati) ---
+   // --- WhileStatementNode (wakati) ---
    if (auto wn = dynamic_cast<WhileStatementNode*>(stmt)) {
-      while (to_bool(evaluate_expression(wn->condition.get(), env))) {
+      LoopControl local_lc;
+      LoopControl* loopCtrl = lc ? lc: &local_lc;
+
+      while (true) {
+         Value condVal = evaluate_expression(wn->condition.get(), env);
+         if (!to_bool(condVal)) break;
+
          auto bodyEnv = std::make_shared < Environment > (env);
+
          for (auto &s: wn->body) {
-            evaluate_statement(s.get(), bodyEnv, return_value, did_return);
+            evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
             if (did_return && *did_return) return;
+            if (loopCtrl->did_break || loopCtrl->did_continue) break;
+         }
+
+         if (loopCtrl->did_break) {
+            loopCtrl->did_break = false;
+            break;
+         }
+         if (loopCtrl->did_continue) {
+            loopCtrl->did_continue = false;
+            continue;
          }
       }
+
       return;
    }
 
-   // --- NEW: DoWhileStatementNode (fanya-wakati) ---
+   // --- DoWhileStatementNode (fanya-wakati) ---
    if (auto dwn = dynamic_cast<DoWhileStatementNode*>(stmt)) {
-      Value condVal;
+      LoopControl local_lc;
+      LoopControl* loopCtrl = lc ? lc: &local_lc;
+
       do {
          auto bodyEnv = std::make_shared < Environment > (env);
+
          for (auto &s: dwn->body) {
-            evaluate_statement(s.get(), bodyEnv, return_value, did_return);
+            evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
             if (did_return && *did_return) return;
+            if (loopCtrl->did_break || loopCtrl->did_continue) break;
          }
-         condVal = evaluate_expression(dwn->condition.get(), bodyEnv);
-      } while (to_bool(condVal));
+
+         if (loopCtrl->did_break) {
+            loopCtrl->did_break = false;
+            break;
+         }
+         if (loopCtrl->did_continue) {
+            loopCtrl->did_continue = false;
+            // continue -> evaluate condition then maybe loop again (like normal continue)
+            Value condVal = evaluate_expression(dwn->condition.get(), bodyEnv);
+            if (!to_bool(condVal)) break;
+            else continue;
+         }
+
+         // normal case: test condition for next iteration
+         Value condVal = evaluate_expression(dwn->condition.get(), bodyEnv);
+         if (!to_bool(condVal)) break;
+
+      } while (true);
+
       return;
    }
+
+   if (auto bs = dynamic_cast<BreakStatementNode*>(stmt)) {
+      if (lc) lc->did_break = true;
+      return;
+   }
+
+   if (auto cs = dynamic_cast<ContinueStatementNode*>(stmt)) {
+      if (lc) lc->did_continue = true;
+      return;
+   }
+
 
    throw std::runtime_error("Unhandled statement node in evaluator at " + stmt->token.loc.to_string());
 }

@@ -127,6 +127,12 @@ class Environment: public std::enable_shared_from_this < Environment > {
    void set(const std::string& name, const Variable& var);
 };
 
+
+struct LoopControl {
+    bool did_break = false;
+    bool did_continue = false;
+};
+
 // Evaluator
 class Evaluator {
    public:
@@ -146,7 +152,7 @@ class Evaluator {
    // Expression & statement evaluators. Pass the environment explicitly for lexical scoping.
    Value evaluate_expression(ExpressionNode* expr, EnvPtr env);
    Value call_function(FunctionPtr fn, const std::vector < Value>& args, const Token& callToken);
-   void evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value = nullptr, bool* did_return = nullptr);
+   void evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value = nullptr, bool* did_return = nullptr, LoopControl* lc = nullptr);
 
    // helpers: conversions and formatting
    double to_number(const Value& v);
@@ -163,5 +169,4 @@ class Evaluator {
    bool is_private_access_allowed(ObjectPtr obj, EnvPtr env);
    
 };
-
 

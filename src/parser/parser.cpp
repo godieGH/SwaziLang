@@ -89,6 +89,14 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
       consume(); // consume 'rudisha'
       return parse_return_statement();
    }
+   if (p.type == TokenType::ENDELEA) {
+      consume();
+      return parse_continue_statement();
+   }
+   if (p.type == TokenType::SIMAMA) {
+      consume();
+      return parse_break_statement();
+   }
    if (p.type == TokenType::KAMA) {
       return parse_if_statement();
    }
@@ -102,6 +110,7 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
    if (p.type == TokenType::DOWHILE) {
       return parse_do_while_statement();
    }
+   
    if (p.type == TokenType::DATA) {
       consume();
       return parse_variable_declaration();

@@ -290,3 +290,30 @@ std::unique_ptr < StatementNode > Parser::parse_return_statement() {
 
    return retNode;
 }
+
+
+std::unique_ptr<StatementNode> Parser::parse_break_statement() {
+    // The 'SIMAMA' token was already consumed by parse_statement
+    Token kwTok = tokens[position - 1];
+
+    auto node = std::make_unique<BreakStatementNode>();
+    node->token = kwTok;
+
+    // optionally consume a semicolon
+    if (peek().type == TokenType::SEMICOLON) consume();
+
+    return node;
+}
+
+std::unique_ptr<StatementNode> Parser::parse_continue_statement() {
+    // The 'ENDELEA' token was already consumed by parse_statement
+    Token kwTok = tokens[position - 1];
+
+    auto node = std::make_unique<ContinueStatementNode>();
+    node->token = kwTok;
+
+    // optionally consume a semicolon
+    if (peek().type == TokenType::SEMICOLON) consume();
+
+    return node;
+}

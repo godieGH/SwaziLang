@@ -218,7 +218,9 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"kila", TokenType::KILA},              // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...
         {"katika", TokenType::KATIKA},              // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...
         {"wakati", TokenType::WHILE},          // while style: wakati a < 6: ...  or wakati a < 8 { ... }
-        {"fanya", TokenType::DOWHILE}          // do-while: fanya: <INDENT> ... wakati cond
+        {"fanya", TokenType::DOWHILE},         // do-while: fanya: <INDENT> ... wakati cond
+        {"simama", TokenType::SIMAMA},         // do-while: fanya: <INDENT> ... wakati cond
+        {"endelea", TokenType::ENDELEA},         // do-while: fanya: <INDENT> ... wakati cond
     };
 
     auto it = keywords.find(id);

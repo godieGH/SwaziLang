@@ -558,6 +558,38 @@ struct DoWhileStatementNode : public StatementNode {
     }
 };
 
+
+// Break statement
+struct BreakStatementNode : public StatementNode {
+    // No child expressions needed
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<BreakStatementNode>();
+        n->token = token;
+        return n;
+    }
+
+    std::string to_string() const override {
+        return "break";
+    }
+};
+
+// Continue statement
+struct ContinueStatementNode : public StatementNode {
+    // No child expressions needed
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ContinueStatementNode>();
+        n->token = token;
+        return n;
+    }
+
+    std::string to_string() const override {
+        return "continue";
+    }
+};
+
+
 // Function declaration
 struct FunctionDeclarationNode : public StatementNode {
     std::string name; // function name
