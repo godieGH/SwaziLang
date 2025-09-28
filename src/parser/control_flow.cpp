@@ -340,35 +340,48 @@ std::unique_ptr < StatementNode > Parser::parse_while_statement() {
    return node;
 }
 
+
 std::unique_ptr < StatementNode > Parser::parse_do_while_statement() {
-   // consume 'fanya' and capture token
-   consume();
-   Token doTok = tokens[position - 1];
+    // consume 'fanya' and capture token
+    consume();
+    Token doTok = tokens[position - 1];
 
-   auto node = std::make_unique < DoWhileStatementNode > ();
-   node->token = doTok;
+    // parse block first (either indent style or brace style)
+    std::vector<std::unique_ptr<StatementNode>> body;
+    if (match(TokenType::COLON)) {
+        expect(TokenType::NEWLINE, "Expected newline after ':' in 'fanya' (do) statement");
+        body = parse_block(false);
+    } else if (match(TokenType::OPENBRACE)) {
+        position--;
+        body = parse_block(true);
+    } else {
+        expect(TokenType::COLON, "Expected ':' or '{' to begin 'fanya' body");
+    }
 
-   // parse block first (either indent style or brace style)
-   if (match(TokenType::COLON)) {
-      expect(TokenType::NEWLINE, "Expected newline after ':' in 'fanya' (do) statement");
-      node->body = parse_block(false);
-   } else if (match(TokenType::OPENBRACE)) {
-      position--;
-      node->body = parse_block(true);
-   } else {
-      expect(TokenType::COLON, "Expected ':' or '{' to begin 'fanya' body");
-   }
+    // If there is a 'wakati' (WHILE) after the body -> do-while, otherwise plain do statement.
+    if (peek().type == TokenType::WHILE) {
+        // consume 'wakati'
+        consume();
 
-   // now expect 'wakati' and the condition
-   if (!match(TokenType::WHILE)) {
-      // 'wakati' token is required after the body
-      expect(TokenType::WHILE, "Expected 'wakati' after 'fanya' block for do-while");
-   }
-   // parse condition expression
-   node->condition = parse_expression();
+        auto node = std::make_unique<DoWhileStatementNode>();
+        node->token = doTok;
+        node->body = std::move(body);
 
-   // optionally consume trailing semicolon
-   if (peek().type == TokenType::SEMICOLON) consume();
+        // parse condition expression
+        node->condition = parse_expression();
 
-   return node;
+        // optionally consume trailing semicolon
+        if (peek().type == TokenType::SEMICOLON) consume();
+
+        return node;
+    } else {
+        auto node = std::make_unique<DoStatementNode>();
+        node->token = doTok;
+        node->body = std::move(body);
+
+        // optionally consume trailing semicolon
+        if (peek().type == TokenType::SEMICOLON) consume();
+
+        return node;
+    }
 }

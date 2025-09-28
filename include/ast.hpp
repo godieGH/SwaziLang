@@ -558,7 +558,19 @@ struct DoWhileStatementNode : public StatementNode {
     }
 };
 
+struct DoStatementNode : public StatementNode {
+    std::vector<std::unique_ptr<StatementNode>> body;
 
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<DoStatementNode>();
+        n->token = token;
+        n->body.reserve(body.size());
+        for (const auto &s : body) {
+            n->body.push_back(s ? s->clone() : nullptr);
+        }
+        return n;
+    }
+};
 // Break statement
 struct BreakStatementNode : public StatementNode {
     // No child expressions needed

@@ -507,7 +507,20 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
       if (lc) lc->did_continue = true;
       return;
    }
+   
+   
+   // --- DoStatementNode (fanya) ---
+   if (auto dn = dynamic_cast<DoStatementNode*>(stmt)) {
+      auto bodyEnv = std::make_shared<Environment>(env);
 
+      for (auto &s : dn->body) {
+         evaluate_statement(s.get(), bodyEnv, return_value, did_return, lc);
+         if (did_return && *did_return) return;
+         if (lc && (lc->did_break || lc->did_continue)) return;
+      }
+
+      return;
+   }
 
    throw std::runtime_error("Unhandled statement node in evaluator at " + stmt->token.loc.to_string());
 }
