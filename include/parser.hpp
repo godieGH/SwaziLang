@@ -55,6 +55,8 @@ class Parser {
 
    // loops
    std::unique_ptr < StatementNode > parse_for_statement(); // parses 'kwa (...) { ... }' or 'kwa (...) : <INDENT> ... <DEDENT>'
+   std::unique_ptr<StatementNode> parse_for_classic_statement(Token forTok);
+   std::unique_ptr<StatementNode> parse_for_in_statement(Token kwaTok);
    std::unique_ptr < StatementNode > parse_while_statement(); // parses 'wakati <cond> { ... }' or 'wakati <cond> : <INDENT> ... <DEDENT>'
    std::unique_ptr < StatementNode > parse_do_while_statement(); // parses 'fanya { ... } wakati <cond>' or 'fanya : <INDENT> ... wakati <cond>'
 

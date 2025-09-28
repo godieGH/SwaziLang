@@ -18,6 +18,8 @@ enum class TokenType {
     KAMA,         // 'kama' (if)
     VINGINEVYO,   // 'vinginevyo' (else)
     FOR,
+    KILA,
+    KATIKA,
     WHILE,
     DOWHILE,
     

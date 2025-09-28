@@ -490,6 +490,44 @@ struct ForStatementNode : public StatementNode {
     }
 };
 
+// For-in / for-each loop: `kwa kila t, i katika arr: ...`
+struct ForInStatementNode : public StatementNode {
+    std::unique_ptr<IdentifierNode> valueVar;
+    std::unique_ptr<IdentifierNode> indexVar;   // optional
+    std::unique_ptr<ExpressionNode> iterable;
+    std::vector<std::unique_ptr<StatementNode>> body;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ForInStatementNode>();
+        n->token = token;
+        if (valueVar) {
+            n->valueVar = std::unique_ptr<IdentifierNode>(
+                static_cast<IdentifierNode*>(valueVar->clone().release())
+            );
+        }
+        if (indexVar) {
+            n->indexVar = std::unique_ptr<IdentifierNode>(
+                static_cast<IdentifierNode*>(indexVar->clone().release())
+            );
+        }
+        n->iterable = iterable ? iterable->clone() : nullptr;
+        n->body.reserve(body.size());
+        for (const auto &s : body) {
+            n->body.push_back(s ? s->clone() : nullptr);
+        }
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::string s = "kwa kila " + (valueVar ? valueVar->to_string() : "<val>");
+        if (indexVar) {
+            s += ", " + indexVar->to_string();
+        }
+        s += " katika " + (iterable ? iterable->to_string() : "<iterable>") + " { ... }";
+        return s;
+    }
+};
+
 // While loop
 struct WhileStatementNode : public StatementNode {
     std::unique_ptr<ExpressionNode> condition;

@@ -311,6 +311,85 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
       return;
    }
 
+
+   // --- NEW: ForInStatementNode (kwa kila) ---
+   if (auto fin = dynamic_cast<ForInStatementNode*>(stmt)) {
+      Value iterableVal = evaluate_expression(fin->iterable.get(), env);
+
+      // Only support arrays and objects for now
+      if (std::holds_alternative < ArrayPtr > (iterableVal)) {
+         ArrayPtr arr = std::get < ArrayPtr > (iterableVal);
+         if (!arr) return;
+
+         for (size_t i = 0; i < arr->elements.size(); ++i) {
+            auto loopEnv = std::make_shared < Environment > (env);
+
+            // Assign valueVar
+            if (fin->valueVar) {
+               Environment::Variable var {
+                  arr->elements[i],
+                  false
+               };
+               loopEnv->set(fin->valueVar->name, var);
+            }
+
+            // Assign indexVar if exists
+            if (fin->indexVar) {
+               Environment::Variable var {
+                  static_cast<double > (i),
+                  false
+               };
+               loopEnv->set(fin->indexVar->name, var);
+            }
+
+            for (auto &s: fin->body) {
+               evaluate_statement(s.get(), loopEnv, return_value, did_return);
+               if (did_return && *did_return) return;
+            }
+         }
+      }
+      else if (std::holds_alternative < ObjectPtr > (iterableVal)) {
+         ObjectPtr obj = std::get < ObjectPtr > (iterableVal);
+         if (!obj) return;
+
+         for (auto &p: obj->properties) {
+            auto loopEnv = std::make_shared < Environment > (env);
+
+            // Assign valueVar -> key
+            if (fin->valueVar) {
+               Environment::Variable var {
+                  p.first,
+                  false
+               }; // key
+               loopEnv->set(fin->valueVar->name, var);
+            }
+
+            // Assign indexVar -> value (optional)
+            if (fin->indexVar) {
+               Environment::Variable var {
+                  p.second.value,
+                  false
+               }; // value
+               loopEnv->set(fin->indexVar->name, var);
+            }
+
+            for (auto &s: fin->body) {
+               evaluate_statement(s.get(), loopEnv, return_value, did_return);
+               if (did_return && *did_return) return;
+            }
+         }
+      }
+
+      else {
+         throw std::runtime_error("Cannot iterate over non-array/non-object in 'kwa kila' loop at " + fin->token.loc.to_string());
+      }
+
+      return;
+   }
+
+
+
+
    // --- NEW: WhileStatementNode (wakati) ---
    if (auto wn = dynamic_cast<WhileStatementNode*>(stmt)) {
       while (to_bool(evaluate_expression(wn->condition.get(), env))) {

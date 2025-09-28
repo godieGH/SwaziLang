@@ -66,10 +66,82 @@ std::unique_ptr < StatementNode > Parser::parse_if_statement() {
 // ---------- loops: for / while / do-while ----------
 
 std::unique_ptr < StatementNode > Parser::parse_for_statement() {
-   // consume 'kwa' and capture token for diagnostics
-   consume();
+   consume(); // consume 'kwa'
    Token forTok = tokens[position - 1];
 
+   if (match(TokenType::KILA)) {
+      return parse_for_in_statement(forTok);
+   } else {
+      return parse_for_classic_statement(forTok);
+   }
+}
+
+std::unique_ptr<StatementNode> Parser::parse_for_in_statement(Token kwaTok) {
+    // value variable
+    expect(TokenType::IDENTIFIER, "Expected identifier after 'kila'");
+    Token valTok = tokens[position - 1];
+
+    auto valNode = std::make_unique<IdentifierNode>();
+    valNode->name = valTok.value;
+    valNode->token = valTok;
+
+    std::unique_ptr<IdentifierNode> idxNode = nullptr;
+
+    // allow (item, index) syntax but ignore parens
+    if (match(TokenType::OPENPARENTHESIS)) {
+        expect(TokenType::IDENTIFIER, "Expected identifier inside 'kila (...)'");
+        Token innerValTok = tokens[position - 1];
+
+        valNode->name = innerValTok.value;
+        valNode->token = innerValTok;
+
+        if (match(TokenType::COMMA)) {
+            expect(TokenType::IDENTIFIER, "Expected index identifier after ','");
+            Token idxTok = tokens[position - 1];
+
+            idxNode = std::make_unique<IdentifierNode>();
+            idxNode->name = idxTok.value;
+            idxNode->token = idxTok;
+        }
+
+        expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after 'kila (...)'");
+    } 
+    else if (match(TokenType::COMMA)) {
+        // support plain comma without parentheses
+        expect(TokenType::IDENTIFIER, "Expected index identifier after ','");
+        Token idxTok = tokens[position - 1];
+
+        idxNode = std::make_unique<IdentifierNode>();
+        idxNode->name = idxTok.value;
+        idxNode->token = idxTok;
+    }
+
+    expect(TokenType::KATIKA, "Expected 'katika' in 'kwa kila' loop");
+
+    auto iterableExpr = parse_expression();
+
+    auto node = std::make_unique<ForInStatementNode>();
+    node->token = kwaTok;
+    node->valueVar = std::move(valNode);
+    node->indexVar = std::move(idxNode);
+    node->iterable = std::move(iterableExpr);
+
+    // body: colon+indent or braces
+    if (match(TokenType::COLON)) {
+        expect(TokenType::NEWLINE, "Expected newline after ':' in 'kwa kila' statement");
+        node->body = parse_block(false);
+    } else if (match(TokenType::OPENBRACE)) {
+        position--; // rewind so parse_block sees '{'
+        node->body = parse_block(true);
+    } else {
+        expect(TokenType::COLON, "Expected ':' or '{' to begin 'kwa kila' body");
+    }
+
+    return node;
+}
+
+
+std::unique_ptr < StatementNode > Parser::parse_for_classic_statement(Token forTok) {
    // expect '('
    expect(TokenType::OPENPARENTHESIS, "Expected '(' after 'kwa'");
 
@@ -94,7 +166,7 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
                auto node = std::make_unique < AssignmentNode > ();
 
                // assignment target is an IdentifierNode now
-               auto targetIdent = std::make_unique<IdentifierNode>();
+               auto targetIdent = std::make_unique < IdentifierNode > ();
                targetIdent->name = name;
                targetIdent->token = idTok;
                node->target = std::move(targetIdent);
@@ -116,7 +188,7 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
                auto assign = std::make_unique < AssignmentNode > ();
 
                // target identifier for assignment
-               auto targetIdent = std::make_unique<IdentifierNode>();
+               auto targetIdent = std::make_unique < IdentifierNode > ();
                targetIdent->name = name;
                targetIdent->token = idTok;
                assign->target = std::move(targetIdent);
@@ -140,7 +212,7 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
                auto assign = std::make_unique < AssignmentNode > ();
 
                // target identifier for assignment
-               auto targetIdent = std::make_unique<IdentifierNode>();
+               auto targetIdent = std::make_unique < IdentifierNode > ();
                targetIdent->name = name;
                targetIdent->token = idTok;
                assign->target = std::move(targetIdent);
@@ -238,6 +310,9 @@ std::unique_ptr < StatementNode > Parser::parse_for_statement() {
 
    return node;
 }
+
+
+
 
 std::unique_ptr < StatementNode > Parser::parse_while_statement() {
    // consume 'wakati' and capture token for diagnostics
