@@ -204,6 +204,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"kweli", TokenType::BOOLEAN},
         {"sikweli", TokenType::BOOLEAN},
         {"na", TokenType::AND},
+        {"ni", TokenType::NI},
         {"au", TokenType::OR},
         {"si", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},

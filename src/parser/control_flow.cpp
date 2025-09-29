@@ -3,6 +3,18 @@
 #include <cctype>
 #include <sstream>
 
+std::unique_ptr<ExpressionNode> Parser::parse_condition() {
+    if (peek().type == TokenType::IDENTIFIER && peek_next().type == TokenType::NI) {
+        // consume identifier and 'ni' token
+        consume(); // identifier
+        consume(); // 'ni'
+        // parse the expression after 'ni' as the real condition
+        return parse_expression();
+    }
+    return parse_expression();
+}
+
+
 // ---------- control-flow: if / else ----------
 std::unique_ptr < StatementNode > Parser::parse_if_statement() {
    // caller has not consumed 'kama' yet in some flows, but in our parse_statement
@@ -11,7 +23,7 @@ std::unique_ptr < StatementNode > Parser::parse_if_statement() {
    Token ifTok = tokens[position - 1];
 
    // parse condition expression
-   auto cond = parse_expression();
+   auto cond = parse_condition();
 
    auto ifNode = std::make_unique < IfStatementNode > ();
    ifNode->token = ifTok;
@@ -61,6 +73,8 @@ std::unique_ptr < StatementNode > Parser::parse_if_statement() {
    }
    return ifNode;
 }
+
+
 
 
 // ---------- loops: for / while / do-while ----------
@@ -320,7 +334,7 @@ std::unique_ptr < StatementNode > Parser::parse_while_statement() {
    Token whileTok = tokens[position - 1];
 
    // parse condition expression
-   auto cond = parse_expression();
+   auto cond = parse_condition();
 
    auto node = std::make_unique < WhileStatementNode > ();
    node->token = whileTok;
@@ -368,7 +382,7 @@ std::unique_ptr < StatementNode > Parser::parse_do_while_statement() {
         node->body = std::move(body);
 
         // parse condition expression
-        node->condition = parse_expression();
+        node->condition = parse_condition();
 
         // optionally consume trailing semicolon
         if (peek().type == TokenType::SEMICOLON) consume();

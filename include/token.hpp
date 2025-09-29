@@ -24,6 +24,7 @@ enum class TokenType {
     KATIKA,
     WHILE,
     DOWHILE,
+    NI,
     
     LAMBDA,
 

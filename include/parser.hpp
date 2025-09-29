@@ -22,6 +22,8 @@ class Parser {
    void expect(TokenType t, const std::string& errMsg);
    
    bool is_lambda_ahead();
+   
+   std::unique_ptr<ExpressionNode> parse_condition();
 
    // expression parsing (precedence chain)
    std::unique_ptr < ExpressionNode > parse_expression();
