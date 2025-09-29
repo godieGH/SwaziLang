@@ -166,7 +166,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          desc.value = val;
          desc.is_private = p->is_private;
          desc.is_readonly = p->is_readonly;
-         desc.is_locked = p->is_locked; 
+         desc.is_locked = p->is_locked;
          desc.token = p->token;
 
          obj->properties[keyStr] = std::move(desc);
@@ -194,7 +194,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // defensive checks similar to IdentifierNode handling
       if (!env) throw std::runtime_error("No environment when resolving '$' at " + self->token.loc.to_string());
 
-      
+
       if (env->has("$")) {
          return env->get("$").value;
       }
@@ -1529,6 +1529,33 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          return evaluate_expression(t->elseExpr.get(), env);
       }
    }
+
+   if (auto ln = dynamic_cast<LambdaNode*>(expr)) {
+      // Convert LambdaNode to a callable FunctionValue
+      auto fnDecl = std::make_shared < FunctionDeclarationNode > ();
+      fnDecl->parameters = ln->params;
+
+      if (ln->isBlock) {
+         fnDecl->body = std::move(ln->blockBody); // block-lambda
+      } else {
+         // expression-lambda: wrap exprBody into a ReturnStatementNode for consistent execution
+         auto retStmt = std::make_unique < ReturnStatementNode > ();
+         retStmt->value = std::move(ln->exprBody);
+         fnDecl->body.push_back(std::move(retStmt));
+      }
+
+      auto fn = std::make_shared < FunctionValue > (
+         "<anon>",
+         ln->params,
+         fnDecl,
+         env,
+         ln->token
+      );
+
+      return fn;
+   }
+
+
 
    throw std::runtime_error("Unhandled expression node in evaluator");
 }

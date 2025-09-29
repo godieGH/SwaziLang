@@ -16,6 +16,18 @@ Token Parser::peek() const {
    };
 }
 
+Token Parser::peek_next(size_t offset) const {
+   if (position + offset < tokens.size()) {
+      return tokens[position + offset];
+   }
+   return Token {
+      TokenType::EOF_TOKEN,
+      "",
+      TokenLocation("<eof>", 0, 0, 0)
+   };
+}
+
+
 // Consume and return the next token or EOF token
 Token Parser::consume() {
    if (position < tokens.size()) return tokens[position++];
@@ -43,6 +55,40 @@ void Parser::expect(TokenType t, const std::string& errMsg) {
    }
    consume();
 }
+
+bool Parser::is_lambda_ahead() {
+   size_t saved = position; // remember position
+
+   consume(); // consume '('
+   bool found = false;
+
+   // check for zero or more identifiers separated by commas
+   while (peek().type != TokenType::CLOSEPARENTHESIS &&
+      peek().type != TokenType::EOF_TOKEN) {
+      if (peek().type != TokenType::IDENTIFIER) {
+         position = saved;
+         return false;
+      }
+      consume();
+      if (peek().type == TokenType::COMMA) consume();
+   }
+
+   if (peek().type != TokenType::CLOSEPARENTHESIS) {
+      position = saved;
+      return false;
+   }
+
+   consume(); // consume ')'
+
+   // check if next token is LAMBDA
+   if (peek().type == TokenType::LAMBDA) {
+      found = true;
+   }
+
+   position = saved; // restore
+   return found;
+}
+
 
 // ---------- parse entry ----------
 std::unique_ptr < ProgramNode > Parser::parse() {
@@ -110,7 +156,7 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
    if (p.type == TokenType::DOWHILE) {
       return parse_do_while_statement();
    }
-   
+
    if (p.type == TokenType::DATA) {
       consume();
       return parse_variable_declaration();

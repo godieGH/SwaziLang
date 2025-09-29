@@ -28,7 +28,7 @@ static std::string to_property_key(const Value &v) {
 
    // boolean
    if (auto pb = std::get_if < bool > (&v)) {
-      return *pb ? "true": "false";
+      return *pb ? "kweli": "sikweli";
    }
 
    // null/undefined handling: depending on your Value types implement accordingly.

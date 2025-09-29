@@ -5,6 +5,7 @@
 #include <string>
 #include <variant>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <functional>
@@ -165,7 +166,19 @@ class Evaluator {
    
    Value get_object_property(ObjectPtr obj, const std::string &key, EnvPtr env);
    void set_object_property(ObjectPtr obj, const std::string &key, const Value &val, EnvPtr env, const Token &assignToken);
-   std::string print_object(ObjectPtr obj, int indent = 0);
+   
+   std::string print_value(
+    const Value &v,
+    int depth = 0,
+    std::unordered_set<const ObjectValue*> visited = {}
+);
+
+   std::string print_object(
+    ObjectPtr obj,
+    int indent = 0,
+    std::unordered_set<const ObjectValue*> visited = {}
+);
+
    bool is_private_access_allowed(ObjectPtr obj, EnvPtr env);
    
 };

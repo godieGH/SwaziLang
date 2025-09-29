@@ -638,8 +638,6 @@ struct ThisExpressionNode : public ExpressionNode {
         return n;
     }
 };
-
-
 struct FunctionExpressionNode : public ExpressionNode {
     std::string name;
     std::vector<std::string> parameters;
@@ -672,6 +670,40 @@ struct FunctionExpressionNode : public ExpressionNode {
         return n;
     }
 };
+struct LambdaNode : public ExpressionNode {
+    std::vector<std::string> params;
+    std::unique_ptr<ExpressionNode> exprBody;                     // for expr-lambdas
+    std::vector<std::unique_ptr<StatementNode>> blockBody;        // for block-lambdas
+    bool isBlock;
+
+    LambdaNode(std::vector<std::string> p, std::unique_ptr<ExpressionNode> expr)
+        : params(std::move(p)), exprBody(std::move(expr)), isBlock(false) {}
+
+    LambdaNode(std::vector<std::string> p, std::vector<std::unique_ptr<StatementNode>> blk)
+        : params(std::move(p)), blockBody(std::move(blk)), isBlock(true) {}
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        if (isBlock) {
+            std::vector<std::unique_ptr<StatementNode>> clonedBlock;
+            clonedBlock.reserve(blockBody.size());
+            for (const auto &s : blockBody) {
+                clonedBlock.push_back(s ? s->clone() : nullptr);
+            }
+            return std::make_unique<LambdaNode>(params, std::move(clonedBlock));
+        } else {
+            auto clonedExpr = exprBody ? exprBody->clone() : nullptr;
+            return std::make_unique<LambdaNode>(params, std::move(clonedExpr));
+        }
+    }
+
+    std::string to_string() const override {
+        if (isBlock) return "lambda { ... }";
+        else return "lambda " + (exprBody ? exprBody->to_string() : "<null>");
+    }
+};
+
+
+
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;

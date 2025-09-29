@@ -15,9 +15,13 @@ class Parser {
    size_t position = 0;
 
    Token peek() const;
+   Token peek_next(size_t offset = 1) const;
+
    Token consume();
    bool match(TokenType t);
    void expect(TokenType t, const std::string& errMsg);
+   
+   bool is_lambda_ahead();
 
    // expression parsing (precedence chain)
    std::unique_ptr < ExpressionNode > parse_expression();
@@ -38,6 +42,7 @@ class Parser {
 
    std::unique_ptr<ExpressionNode> parse_object_expression();
    std::unique_ptr<ExpressionNode> parse_tabia_method();
+   std::unique_ptr<ExpressionNode> parse_lambda();
 
    
    // statements
@@ -59,6 +64,7 @@ class Parser {
    std::unique_ptr<StatementNode> parse_for_in_statement(Token kwaTok);
    std::unique_ptr < StatementNode > parse_while_statement(); // parses 'wakati <cond> { ... }' or 'wakati <cond> : <INDENT> ... <DEDENT>'
    std::unique_ptr < StatementNode > parse_do_while_statement(); // parses 'fanya { ... } wakati <cond>' or 'fanya : <INDENT> ... wakati <cond>'
+   
    
    // continue and breake controls for loops
    std::unique_ptr<StatementNode> parse_continue_statement();

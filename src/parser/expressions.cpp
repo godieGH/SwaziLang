@@ -592,6 +592,52 @@ std::unique_ptr < ExpressionNode > Parser::parse_object_expression() {
 }
 
 
+std::unique_ptr < ExpressionNode > Parser::parse_lambda() {
+   std::vector < std::string > params;
+
+   if (peek().type == TokenType::OPENPARENTHESIS) {
+      consume(); // consume '('
+      // collect parameters (allow empty)
+      while (peek().type != TokenType::CLOSEPARENTHESIS) {
+         Token id = consume();
+         if (id.type != TokenType::IDENTIFIER) {
+            throw std::runtime_error("Expected parameter name at " + id.loc.to_string());
+         }
+         params.push_back(id.value);
+
+         if (!match(TokenType::COMMA)) break;
+      }
+
+      Token close = consume();
+      if (close.type != TokenType::CLOSEPARENTHESIS) {
+         throw std::runtime_error("Expected ')' after parameters at " + close.loc.to_string());
+      }
+   } else {
+      // single identifier without parentheses
+      Token id = consume();
+      if (id.type != TokenType::IDENTIFIER) {
+         throw std::runtime_error("Expected parameter name at " + id.loc.to_string());
+      }
+      params.push_back(id.value);
+   }
+
+   // next token must be '=>'
+   Token arrow = consume();
+   if (arrow.type != TokenType::LAMBDA) {
+      throw std::runtime_error("Expected '=>' after parameter list at " + arrow.loc.to_string());
+   }
+
+   if (peek().type == TokenType::OPENBRACE) {
+      auto block = parse_block(true); // returns vector<StatementNode>
+      return std::make_unique < LambdaNode > (params, std::move(block));
+   } else {
+      auto expr = parse_expression();
+      return std::make_unique < LambdaNode > (params, std::move(expr));
+   }
+
+}
+
+
 std::unique_ptr < ExpressionNode > Parser::parse_primary() {
    Token t = peek();
    if (t.type == TokenType::NUMBER) {
@@ -625,13 +671,18 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       return node;
    }
    if (t.type == TokenType::IDENTIFIER) {
+      if (peek_next().type == TokenType::LAMBDA) {
+         return parse_lambda(); // single-param without parentheses
+      }
+
+      // normal identifier
       Token id = consume();
       auto ident = std::make_unique < IdentifierNode > ();
       ident->name = id.value;
       ident->token = id;
-      // do NOT consume '(' here; postfix handling in parse_unary will handle calls, indexing, members
       return ident;
    }
+
    if (t.type == TokenType::SELF) {
       Token id = consume();
       auto thisNode = std::make_unique < ThisExpressionNode > ();
@@ -640,11 +691,16 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
    }
 
    if (t.type == TokenType::OPENPARENTHESIS) {
-      consume();
-      auto inner = parse_expression();
-      expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after expression");
-      return inner;
+      if (is_lambda_ahead()) {
+         return parse_lambda();
+      } else {
+         consume();
+         auto inner = parse_expression();
+         expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after expression");
+         return inner;
+      }
    }
+
 
    if (t.type == TokenType::OPENBRACKET) {
       Token openTok = consume();
