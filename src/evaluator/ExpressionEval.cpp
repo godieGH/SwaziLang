@@ -16,6 +16,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    if (auto s = dynamic_cast<StringLiteralNode*>(expr)) return Value {
       s->value
    };
+   
+   if (auto nn = dynamic_cast<NullNode*>(expr)) {
+        return Value(std::monostate{}); 
+    }
 
    // Template literal evaluation: concatenate quasis and evaluated expressions.
    if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {

@@ -221,6 +221,8 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"fanya", TokenType::DOWHILE},         // do-while: fanya: <INDENT> ... wakati cond
         {"simama", TokenType::SIMAMA},         // do-while: fanya: <INDENT> ... wakati cond
         {"endelea", TokenType::ENDELEA},         // do-while: fanya: <INDENT> ... wakati cond
+        
+        {"null", TokenType::NULL_LITERAL}       // null token
     };
 
     auto it = keywords.find(id);

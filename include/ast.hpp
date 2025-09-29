@@ -702,6 +702,17 @@ struct LambdaNode : public ExpressionNode {
     }
 };
 
+struct NullNode : public ExpressionNode {
+    explicit NullNode(const Token& t) { token = t; }
+
+    std::string to_string() const override {
+        return "null";
+    }
+    
+    std::unique_ptr<ExpressionNode> clone() const override {
+        return std::make_unique<NullNode>(*this);
+    }
+};
 
 
 // Program root

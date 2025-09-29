@@ -38,6 +38,7 @@ enum class TokenType {
     TEMPLATE_EXPR_END,     // "}" that closes interpolation
     TEMPLATE_END,          // closing backtick (optional: some lexers emit it)
     BOOLEAN,
+    NULL_LITERAL,
 
     // punctuation
     SEMICOLON,
