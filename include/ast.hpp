@@ -715,6 +715,16 @@ struct NullNode : public ExpressionNode {
 };
 
 
+struct CaseNode : StatementNode {
+    std::unique_ptr<ExpressionNode> test;  // null → kaida (default)
+    std::vector<std::unique_ptr<StatementNode>> body;
+};
+struct SwitchNode : StatementNode {
+    std::unique_ptr<ExpressionNode> discriminant;  
+    std::vector<std::unique_ptr<CaseNode>> cases;  
+};
+
+
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;

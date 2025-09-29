@@ -72,6 +72,9 @@ class Parser {
    std::unique_ptr<StatementNode> parse_continue_statement();
    std::unique_ptr<StatementNode> parse_break_statement();
 
+   std::unique_ptr<CaseNode> parse_switch_case();
+   std::unique_ptr<StatementNode> parse_switch_statement();
+
    // helper to parse a block of statements either from an INDENT/DEDENT
    // or from brace-style { ... }. accept_brace_style==true allows '{ ... }',
    // otherwise will expect INDENT-style (called after COLON/NEWLINE).

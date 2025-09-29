@@ -521,6 +521,66 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
       return;
    }
+   
+   if (auto sn = dynamic_cast<SwitchNode*>(stmt)) {
+    // Evaluate the discriminant (the switch condition expression)
+    Value switchVal = evaluate_expression(sn->discriminant.get(), env);
 
+    CaseNode* defaultCase = nullptr;
+    bool matched = false;
+
+    LoopControl local_lc;
+    LoopControl* loopCtrl = lc ? lc : &local_lc;
+
+    for (auto &casePtr : sn->cases) {
+        CaseNode* cn = casePtr.get();
+
+        // If this is the default case (kaida), remember it for later
+        if (!cn->test) {
+            defaultCase = cn;
+            continue;
+        }
+
+        // Evaluate case test expression
+        Value caseVal = evaluate_expression(cn->test.get(), env);
+
+        // Check equality (reuse your equals() or same helper you use elsewhere)
+        if (!matched && is_equal(switchVal, caseVal)) {
+            matched = true;
+        }
+
+        // If already matched, execute this case body (fall-through unless simama)
+        if (matched) {
+            auto bodyEnv = std::make_shared<Environment>(env);
+
+            for (auto &s : cn->body) {
+                evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+                if (did_return && *did_return) return;
+                if (loopCtrl->did_break) {
+                    loopCtrl->did_break = false; // reset for outer flow
+                    return; // exit entire switch
+                }
+            }
+        }
+    }
+
+    // No case matched, execute default if present
+    if (!matched && defaultCase) {
+        auto bodyEnv = std::make_shared<Environment>(env);
+
+        for (auto &s : defaultCase->body) {
+            evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+            if (did_return && *did_return) return;
+            if (loopCtrl->did_break) {
+                loopCtrl->did_break = false;
+                return; // exit switch
+            }
+        }
+    }
+
+    return;
+}
+
+   
    throw std::runtime_error("Unhandled statement node in evaluator at " + stmt->token.loc.to_string());
 }

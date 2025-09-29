@@ -317,3 +317,98 @@ std::unique_ptr<StatementNode> Parser::parse_continue_statement() {
 
     return node;
 }
+
+
+
+std::unique_ptr<CaseNode> Parser::parse_switch_case() {
+    auto caseNode = std::make_unique<CaseNode>();
+
+    if (match(TokenType::IKIWA)) {
+        caseNode->test = parse_expression();
+    } else if (match(TokenType::KAIDA)) {
+        caseNode->test = nullptr; // default
+    } else {
+        Token tok = peek();
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() +
+                                 ": Expected 'ikiwa' or 'kaida' in switch");
+    }
+
+    // Now parse the body, which can be ':' (indented block) or '{' (brace block)
+    if (match(TokenType::COLON)) {
+        // For indented blocks we must require NEWLINE + INDENT
+        expect(TokenType::NEWLINE, "Expected newline after ':' in case");
+        expect(TokenType::INDENT, "Expected indented block after case ':'");
+
+        while (peek().type != TokenType::DEDENT &&
+               peek().type != TokenType::EOF_TOKEN) {
+            auto stmt = parse_statement();
+            if (!stmt) break;
+            caseNode->body.push_back(std::move(stmt));
+        }
+        expect(TokenType::DEDENT, "Expected dedent to close case body");
+
+    } else if (match(TokenType::OPENBRACE)) {
+        // Brace-based block
+        while (peek().type != TokenType::CLOSEBRACE &&
+               peek().type != TokenType::EOF_TOKEN) {
+            while (peek().type == TokenType::NEWLINE ||
+                   peek().type == TokenType::INDENT ||
+                   peek().type == TokenType::DEDENT) {
+                consume();
+            }
+            if (peek().type == TokenType::CLOSEBRACE ||
+                peek().type == TokenType::EOF_TOKEN) break;
+            auto stmt = parse_statement();
+            if (!stmt) break;
+            caseNode->body.push_back(std::move(stmt));
+        }
+        expect(TokenType::CLOSEBRACE, "Expected '}' to close case body");
+
+    } else {
+        Token tok = peek();
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() +
+                                 ": Expected ':' or '{' after case header");
+    }
+
+    return caseNode;
+}
+
+std::unique_ptr<StatementNode> Parser::parse_switch_statement() {
+    // 'chagua' token was already consumed by parse_statement
+    auto node = std::make_unique<SwitchNode>();
+    node->discriminant = parse_expression();
+
+    if (match(TokenType::COLON)) {
+        // Pythonic style
+        expect(TokenType::NEWLINE, "Expected newline after ':' in switch");
+        expect(TokenType::INDENT, "Expected indented block for switch body");
+
+        while (peek().type != TokenType::DEDENT &&
+               peek().type != TokenType::EOF_TOKEN) {
+            node->cases.push_back(parse_switch_case());
+        }
+        expect(TokenType::DEDENT, "Expected dedent to close switch body");
+
+    } else if (match(TokenType::OPENBRACE)) {
+        // C-style braces
+        while (peek().type != TokenType::CLOSEBRACE &&
+               peek().type != TokenType::EOF_TOKEN) {
+            while (peek().type == TokenType::NEWLINE ||
+                   peek().type == TokenType::INDENT ||
+                   peek().type == TokenType::DEDENT) {
+                consume();
+            }
+            if (peek().type == TokenType::CLOSEBRACE ||
+                peek().type == TokenType::EOF_TOKEN) break;
+            node->cases.push_back(parse_switch_case());
+        }
+        expect(TokenType::CLOSEBRACE, "Expected '}' to close switch body");
+
+    } else {
+        Token tok = peek();
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() +
+                                 ": Expected ':' or '{' after 'chagua' expression");
+    }
+
+    return node;
+}

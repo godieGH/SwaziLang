@@ -131,6 +131,12 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
       consume(); // consume 'kazi'
       return parse_function_declaration();
    }
+   
+   if (p.type == TokenType::CHAGUA) {
+      consume(); // consume 'chagua'
+      return parse_switch_statement();
+   }
+   
    if (p.type == TokenType::RUDISHA) {
       consume(); // consume 'rudisha'
       return parse_return_statement();

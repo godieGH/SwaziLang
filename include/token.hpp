@@ -25,6 +25,9 @@ enum class TokenType {
     WHILE,
     DOWHILE,
     NI,
+    CHAGUA,
+    IKIWA,
+    KAIDA,
     
     LAMBDA,
 
