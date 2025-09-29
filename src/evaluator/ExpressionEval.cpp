@@ -506,7 +506,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          const std::string &prop = mem->property;
 
          // ---------- Properties ----------
-         if (prop == "siyoSahihi") {
+         if (prop == "siSahihi") {
             return Value {
                std::isnan(num)
             };
