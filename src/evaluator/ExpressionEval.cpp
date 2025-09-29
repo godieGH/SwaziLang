@@ -417,8 +417,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             });
          }
 
-         // gawanya(separator?) -> split into ArrayPtr
-         if (prop == "gawanya") {
+         // orodhesha(separator?) -> split into ArrayPtr
+         if (prop == "orodhesha") {
             return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                std::string sep;
                bool useSep = false;
@@ -461,7 +461,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          // unganisha(other) -> concat and return new string
          if (prop == "unganisha") {
             return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-               if (args.empty()) throw std::runtime_error("str.unganisha inahitaji hoja 1 at " + token.loc.to_string());
+               if (args.empty()) throw std::runtime_error("str.unganisha inahitaji arg atleast 1 at " + token.loc.to_string());
                return Value {
                   s_val + to_string_value(args[0])
                };
@@ -787,7 +787,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          if (prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
             prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
             prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
-            prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chagua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
+            prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
 
             auto native_impl = [this,
                arr,
@@ -1077,10 +1077,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                }
 
 
-               // filter: chagua(fn) -> returns new array with elements where fn(elem, index, arr) is truthy
-               if (prop == "chagua") {
+               // filter: chambua(fn) -> returns new array with elements where fn(elem, index, arr) is truthy
+               if (prop == "chambua") {
                   if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
-                  throw std::runtime_error("arr.chagua needs a filter function as an argument at " + token.loc.to_string());
+                  throw std::runtime_error("arr.chambua needs a filter function as an argument at " + token.loc.to_string());
                   FunctionPtr predicate = std::get < FunctionPtr > (args[0]);
 
                   auto out = std::make_shared < ArrayValue > ();
