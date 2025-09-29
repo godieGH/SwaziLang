@@ -59,6 +59,14 @@ static Value builtin_bool(const std::vector < Value>& args, EnvPtr env, const To
    return args.empty() ? false: value_to_bool(args[0]);
 }
 
+static Value builtin_ingiza(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    std::string prompt = args.empty() ? "" : value_to_string(args[0]);
+    if (!prompt.empty()) std::cout << prompt;
+    std::string input;
+    std::getline(std::cin, input);
+    return input; // return as string
+}
+
 static Value builtin_namba(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
    return args.empty() ? 0.0: value_to_number(args[0]);
 }
@@ -294,6 +302,8 @@ void init_globals(EnvPtr env) {
    add_fn("Bool", builtin_bool);
    add_fn("Namba", builtin_namba);
    add_fn("Neno", builtin_neno);
+   add_fn("soma", builtin_ingiza);
+
 
    auto objectVal = std::make_shared < ObjectValue > ();
 
