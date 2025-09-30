@@ -707,29 +707,49 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
    }
 
 
-   if (t.type == TokenType::OPENBRACKET) {
-      Token openTok = consume();
-      auto arrayNode = std::make_unique < ArrayExpressionNode > ();
-      arrayNode->token = openTok;
+   auto skip_layout_tokens = [&]() {
+    while (peek().type == TokenType::NEWLINE
+        || peek().type == TokenType::INDENT
+        || peek().type == TokenType::DEDENT) {
+        consume();
+    }
+};
 
-      if (peek().type != TokenType::CLOSEBRACKET) {
-         do {
+   if (t.type == TokenType::OPENBRACKET) {
+    Token openTok = consume();
+    auto arrayNode = std::make_unique<ArrayExpressionNode>();
+    arrayNode->token = openTok;
+
+    skip_layout_tokens(); // ignore layout tokens immediately after '['
+
+    if (peek().type != TokenType::CLOSEBRACKET) {
+        while (true) {
+            skip_layout_tokens(); // ignore before element
+
             if (peek().type == TokenType::ELLIPSIS) {
-               Token ell = consume();
-               auto spread = std::make_unique < SpreadElementNode > ();
-               spread->token = ell;
-               spread->argument = parse_expression(); // after ...
-               arrayNode->elements.push_back(std::move(spread));
+                Token ell = consume();
+                auto spread = std::make_unique<SpreadElementNode>();
+                spread->token = ell;
+                spread->argument = parse_expression();
+                arrayNode->elements.push_back(std::move(spread));
             } else {
-               arrayNode->elements.push_back(parse_expression());
+                arrayNode->elements.push_back(parse_expression());
             }
 
-         } while (match(TokenType::COMMA));
-      }
+            skip_layout_tokens(); // ignore after element
 
-      expect(TokenType::CLOSEBRACKET, "Expected ']' after array elements");
-      return arrayNode;
-   }
+            if (!match(TokenType::COMMA)) break;
+
+            skip_layout_tokens(); // allow comma then layout before next element
+            if (peek().type == TokenType::CLOSEBRACKET) break; // trailing comma allowed
+        }
+    }
+
+    skip_layout_tokens(); // before ']'
+    expect(TokenType::CLOSEBRACKET, "Expected ']' after array elements");
+    return arrayNode;
+}
+
 
    if (t.type == TokenType::OPENBRACE) {
       return parse_object_expression();
