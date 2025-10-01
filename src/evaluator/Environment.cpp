@@ -1,5 +1,6 @@
 //src/evaluator/Environment.cpp
 #include "evaluator.hpp"
+#include "ClassRuntime.hpp"
 #include <iostream>
 #include <cmath>
 #include <stdexcept>

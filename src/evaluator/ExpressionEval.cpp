@@ -1,4 +1,5 @@
 #include "evaluator.hpp"
+#include "ClassRuntime.hpp"
 #include <iostream>
 #include <cmath>
 #include <stdexcept>
@@ -16,10 +17,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
    if (auto s = dynamic_cast<StringLiteralNode*>(expr)) return Value {
       s->value
    };
-   
+
    if (auto nn = dynamic_cast<NullNode*>(expr)) {
-        return Value(std::monostate{}); 
-    }
+      return Value(std::monostate {});
+   }
 
    // Template literal evaluation: concatenate quasis and evaluated expressions.
    if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {
@@ -211,7 +212,25 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
    // Member access: object.property (e.g., arr.idadi, arr.ongeza, str.herufi)
    if (auto mem = dynamic_cast<MemberExpressionNode*>(expr)) {
+
       Value objVal = evaluate_expression(mem->object.get(), env);
+      if (std::holds_alternative < ClassPtr > (objVal)) {
+         ClassPtr cls = std::get < ClassPtr > (objVal);
+         if (!cls || !cls->static_table) return std::monostate {};
+         auto it = cls->static_table->properties.find(mem->property);
+         if (it == cls->static_table->properties.end()) return std::monostate {};
+         const PropertyDescriptor &desc = it->second;
+         if (desc.is_private && !is_private_access_allowed(nullptr, env)) {
+            // private static access rule: you may want to permit only from within class methods.
+            throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string());
+         }
+         // getters on static_table use is_readonly same way as objects
+         if (desc.is_readonly && std::holds_alternative < FunctionPtr > (desc.value)) {
+            FunctionPtr getter = std::get < FunctionPtr > (desc.value);
+            return call_function(getter, {}, desc.token);
+         }
+         return desc.value;
+      }
 
       // --- Universal properties ---
       const std::string &prop = mem->property;
@@ -225,6 +244,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          else if (std::holds_alternative < ArrayPtr > (objVal)) t = "orodha";
          else if (std::holds_alternative < FunctionPtr > (objVal)) t = "kazi";
          else if (std::holds_alternative < ObjectPtr > (objVal)) t = "object";
+         else if (std::holds_alternative < ClassPtr > (objVal)) t = "muundo";
          return Value {
             t
          };
@@ -241,7 +261,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          std::holds_alternative < ArrayPtr > (objVal)};
       if (prop == "nikazi") return Value {
          std::holds_alternative < FunctionPtr > (objVal)};
-
 
 
       // String property 'herufi' (length)
@@ -1557,6 +1576,216 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       );
 
       return fn;
+   }
+
+
+
+   if (auto ne = dynamic_cast<NewExpressionNode*>(expr)) {
+      // Evaluate callee to find class (callee is usually an IdentifierNode)
+      Value calleeVal = evaluate_expression(ne->callee.get(), env);
+      if (!std::holds_alternative < ClassPtr > (calleeVal)) {
+         throw std::runtime_error("Attempt to instantiate non-class at " + ne->token.loc.to_string());
+      }
+      ClassPtr cls = std::get < ClassPtr > (calleeVal);
+
+      // create an object instance
+      auto instance = std::make_shared < ObjectValue > ();
+
+      // attach a link to its class so futa / reflection can find it
+      PropertyDescriptor classLink;
+      classLink.value = cls;
+      classLink.is_private = true;
+      classLink.token = ne->token;
+      instance->properties["__class__"] = std::move(classLink);
+
+      // Evaluate and populate instance properties (non-static) in top-down class chain
+      // We want super class initializers to run before derived.
+      std::vector < ClassPtr > chain;
+      for (ClassPtr walk = cls; walk; walk = walk->super) chain.push_back(walk);
+      std::reverse(chain.begin(), chain.end()); // parent first
+
+      for (auto &c: chain) {
+         if (!c || !c->body) continue;
+         // properties
+         for (auto &p: c->body->properties) {
+            if (!p) continue;
+            if (p->is_static) continue;
+            // evaluate initializer in a child env where '$' is bound to instance so initializers can reference $
+            auto initEnv = std::make_shared < Environment > (env);
+            Environment::Variable thisVar; thisVar.value = instance; thisVar.is_constant = false;
+            initEnv->set("$", thisVar);
+            Value initVal = std::monostate {};
+            if (p->value) initVal = evaluate_expression(p->value.get(), initEnv);
+
+            PropertyDescriptor pd;
+            pd.value = initVal;
+            pd.is_private = p->is_private;
+            pd.is_locked = p->is_locked;
+            pd.is_readonly = false;
+            pd.token = p->token;
+            instance->properties[p->name] = std::move(pd);
+         }
+
+         // methods (non-static)
+         for (auto &m: c->body->methods) {
+            if (!m) continue;
+            if (m->is_static) continue;
+
+            // persist a FunctionDeclarationNode like other functions do
+            auto persisted = std::make_shared < FunctionDeclarationNode > ();
+            persisted->name = m->name;
+            persisted->parameters = m->params;
+            persisted->token = m->token;
+            persisted->body.reserve(m->body.size());
+            for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+
+            // IMPORTANT: each instance method must have a closure where '$' is bound
+            // to the instance. Otherwise calling the method via CallExpression (which
+            // uses call_function) will not provide '$' and is_private checks will fail.
+            EnvPtr methodClosure = std::make_shared < Environment > (env); // parent = class-decl env
+            Environment::Variable thisVar;
+            thisVar.value = instance;
+            thisVar.is_constant = true; // treat $ as constant inside methods
+            methodClosure->set("$", thisVar);
+
+            // create the FunctionValue using the methodClosure (so call_function finds '$')
+            auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, methodClosure, persisted->token);
+
+            PropertyDescriptor pd;
+            pd.value = fn;
+            pd.is_private = m->is_private;
+            pd.is_locked = m->is_locked;
+            pd.is_readonly = m->is_getter;
+            pd.token = m->token;
+            instance->properties[m->name] = std::move(pd);
+         }
+      }
+
+      // Call constructor if any on the class itself (derived class constructor should be found on cls->body->methods with is_constructor)
+      if (cls->body) {
+         // Find constructor method in the class (only in this class, not searching super automatically)
+         ClassMethodNode* ctorNode = nullptr;
+         for (auto &m: cls->body->methods) {
+            if (m && m->is_constructor) {
+               ctorNode = m.get();
+               break;
+            }
+         }
+
+         if (ctorNode) {
+            // clone constructor AST into a FunctionDeclarationNode (do NOT move)
+            auto persisted = std::make_shared < FunctionDeclarationNode > ();
+            persisted->name = ctorNode->name;
+            persisted->parameters = ctorNode->params;
+            persisted->token = ctorNode->token;
+            persisted->body.reserve(ctorNode->body.size());
+            for (const auto &stmt: ctorNode->body) {
+               persisted->body.push_back(stmt ? stmt->clone(): nullptr);
+            }
+
+            // Create FunctionValue for constructor with closure = env (the class-decl environment)
+            auto constructorFn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+
+            // Evaluate call arguments
+            std::vector < Value > ctorArgs;
+            ctorArgs.reserve(ne->arguments.size());
+            for (auto &a: ne->arguments) ctorArgs.push_back(evaluate_expression(a.get(), env));
+
+            // Call constructor with the instance as receiver so $ is available in the call frame,
+            // and set current_class_context so 'super(...)' works inside constructor.
+            ClassPtr saved_ctx = current_class_context;
+            current_class_context = cls;
+            call_function_with_receiver(constructorFn, instance, ctorArgs, persisted->token);
+            current_class_context = saved_ctx;
+         }
+      }
+
+      // return the created instance as a Value
+      return instance;
+   }
+
+   if (auto se = dynamic_cast<SuperExpressionNode*>(expr)) {
+      if (!current_class_context) {
+         throw std::runtime_error("super(...) may only be called inside a constructor at " + se->token.loc.to_string());
+      }
+      // find the instance from env via $
+      EnvPtr walk = env;
+      ObjectPtr receiver = nullptr;
+      while (walk) {
+         auto it = walk->values.find("$");
+         if (it != walk->values.end()) {
+            if (std::holds_alternative < ObjectPtr > (it->second.value)) {
+               receiver = std::get < ObjectPtr > (it->second.value);
+               break;
+            }
+         }
+         walk = walk->parent;
+      }
+      if (!receiver) throw std::runtime_error("No '$' found for super(...) call at " + se->token.loc.to_string());
+
+      ClassPtr parent = current_class_context->super;
+      if (!parent) return std::monostate {}; // no-op if no super
+
+      // find parent constructor
+      if (!parent->body) return std::monostate {};
+      for (auto &m: parent->body->methods) {
+         if (m && m->is_constructor) {
+            // create FunctionValue from parent constructor and call with receiver
+            auto persisted = std::make_shared < FunctionDeclarationNode > ();
+            persisted->name = m->name;
+            persisted->parameters = m->params;
+            persisted->token = m->token;
+            persisted->body.reserve(m->body.size());
+            for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+            auto parentCtor = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+
+            std::vector < Value > args;
+            args.reserve(se->arguments.size());
+            for (auto &a: se->arguments) args.push_back(evaluate_expression(a.get(), env));
+
+            // call parent constructor with receiver bound (do NOT change current_class_context here)
+            return call_function_with_receiver(parentCtor, receiver, args, m->token);
+         }
+      }
+      return std::monostate {};
+   }
+
+   if (auto de = dynamic_cast<DeleteExpressionNode*>(expr)) {
+      Value v = evaluate_expression(de->target.get(), env);
+      if (!std::holds_alternative < ObjectPtr > (v)) return std::monostate {};
+      ObjectPtr obj = std::get < ObjectPtr > (v);
+
+      // call destructor if class link exists
+      auto it = obj->properties.find("__class__");
+      if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
+         ClassPtr cls = std::get < ClassPtr > (it->second.value);
+         if (cls->body) {
+            for (auto &m: cls->body->methods) {
+               if (m && m->is_destructor) {
+                  auto persisted = std::make_shared < FunctionDeclarationNode > ();
+                  persisted->name = m->name;
+                  persisted->parameters = m->params;
+                  persisted->token = m->token;
+                  persisted->body.reserve(m->body.size());
+                  for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+                  auto dtorFn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+
+                  // evaluate args if any (DeleteExpressionNode can be invoked with args as per your spec)
+                  std::vector < Value > args;
+                  // (if your DeleteExpressionNode supports passing args, evaluate them here)
+
+                  Value res = call_function_with_receiver(dtorFn, obj, args, m->token);
+                  // cleanup
+                  obj->properties.clear();
+                  return res;
+               }
+            }
+         }
+      }
+
+      // no destructor -> just clean up
+      obj->properties.clear();
+      return std::monostate {};
    }
 
 
