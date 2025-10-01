@@ -3,6 +3,7 @@
 #include <vector>
 #include <memory>
 #include <sstream>
+#include <stdexcept> // used by clone checks
 #include "token.hpp"  
 
 // Base class for all AST nodes
@@ -84,7 +85,8 @@ struct UnaryExpressionNode : public ExpressionNode {
     std::string op; // e.g. "!" or "-"
     std::unique_ptr<ExpressionNode> operand;
     std::string to_string() const override {
-        return "(" + op + operand->to_string() + ")";
+        std::string opnd = operand ? operand->to_string() : "<null>";
+        return "(" + op + opnd + ")";
     }
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<UnaryExpressionNode>();
@@ -100,7 +102,9 @@ struct BinaryExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> left;
     std::unique_ptr<ExpressionNode> right;
     std::string to_string() const override {
-        return "(" + left->to_string() + " " + op + " " + right->to_string() + ")";
+        std::string l = left ? left->to_string() : "<null>";
+        std::string r = right ? right->to_string() : "<null>";
+        return "(" + l + " " + op + " " + r + ")";
     }
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<BinaryExpressionNode>();
@@ -116,10 +120,11 @@ struct CallExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> callee;
     std::vector<std::unique_ptr<ExpressionNode>> arguments;
     std::string to_string() const override {
-        std::string s = callee->to_string() + "(";
+        std::string c = callee ? callee->to_string() : "<null>";
+        std::string s = c + "(";
         for (size_t i = 0; i < arguments.size(); ++i) {
             if (i) s += ", ";
-            s += arguments[i]->to_string();
+            s += arguments[i] ? arguments[i]->to_string() : "<null>";
         }
         s += ")";
         return s;
@@ -141,7 +146,8 @@ struct MemberExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> object;
     std::string property; // property name (identifier part)
     std::string to_string() const override {
-        return object->to_string() + "." + property;
+        std::string o = object ? object->to_string() : "<null>";
+        return o + "." + property;
     }
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<MemberExpressionNode>();
@@ -157,7 +163,9 @@ struct IndexExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> object;
     std::unique_ptr<ExpressionNode> index;
     std::string to_string() const override {
-        return object->to_string() + "[" + (index ? index->to_string() : "") + "]";
+        std::string o = object ? object->to_string() : "<null>";
+        std::string idx = index ? index->to_string() : "";
+        return o + "[" + idx + "]";
     }
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<IndexExpressionNode>();
@@ -176,9 +184,10 @@ struct TernaryExpressionNode : public ExpressionNode {
     // removed duplicate Token token; use Node::token instead
 
     std::string to_string() const override {
-        return "(" + condition->to_string() + " ? " +
-               thenExpr->to_string() + " : " +
-               elseExpr->to_string() + ")";
+        std::string cond = condition ? condition->to_string() : "<null>";
+        std::string t = thenExpr ? thenExpr->to_string() : "<null>";
+        std::string e = elseExpr ? elseExpr->to_string() : "<null>";
+        return "(" + cond + " ? " + t + " : " + e + ")";
     }
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<TernaryExpressionNode>();
@@ -213,7 +222,7 @@ struct TemplateLiteralNode : public ExpressionNode {
         for (size_t i = 0; i < quasis.size(); ++i) {
             ss << quasis[i];
             if (i < exprCount) {
-                ss << "${" << expressions[i]->to_string() << "}";
+                ss << "${" << (expressions[i] ? expressions[i]->to_string() : "<null>") << "}";
             }
         }
         ss << "`";
@@ -240,7 +249,7 @@ struct ArrayExpressionNode : public ExpressionNode {
         std::string s = "[";
         for (size_t i = 0; i < elements.size(); ++i) {
             if (i) s += ", ";
-            s += elements[i]->to_string();
+            s += elements[i] ? elements[i]->to_string() : "<null>";
         }
         s += "]";
         return s;
@@ -334,7 +343,7 @@ struct ObjectExpressionNode : public ExpressionNode {
         std::string s = "{ ";
         for (size_t i = 0; i < properties.size(); ++i) {
             if (i) s += ", ";
-            s += properties[i]->to_string();
+            s += properties[i] ? properties[i]->to_string() : "<null>";
         }
         s += " }";
         return s;
@@ -364,11 +373,13 @@ struct ObjectExpressionNode : public ExpressionNode {
 };
 
 struct SpreadElementNode : public ExpressionNode {
-    Token token;
     std::unique_ptr<ExpressionNode> argument;
     SpreadElementNode() = default;
     SpreadElementNode(const Token& t, std::unique_ptr<ExpressionNode> arg)
-        : token(t), argument(std::move(arg)) {}
+        : argument(std::move(arg)) {
+        // use Node::token
+        this->token = t;
+    }
     std::unique_ptr<ExpressionNode> clone() const override {
         auto node = std::make_unique<SpreadElementNode>();
         node->token = token;
@@ -631,7 +642,6 @@ struct ReturnStatementNode : public StatementNode {
 };
 
 struct ThisExpressionNode : public ExpressionNode {
-    Token token;
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<ThisExpressionNode>();
         n->token = token;
@@ -963,9 +973,18 @@ struct DeleteStatementNode : public StatementNode {
     std::unique_ptr<StatementNode> clone() const override {
         auto n = std::make_unique<DeleteStatementNode>();
         n->token = token;
-        n->expr = expr ? std::unique_ptr<DeleteExpressionNode>(
-                               static_cast<DeleteExpressionNode*>(expr->clone().release()))
-                       : nullptr;
+        if (expr) {
+            // clone() on expr returns unique_ptr<ExpressionNode>, but it should point
+            // to a DeleteExpressionNode-derived object. Perform a checked downcast.
+            auto cloned = expr->clone(); // unique_ptr<ExpressionNode>
+            auto del_ptr = dynamic_cast<DeleteExpressionNode*>(cloned.get());
+            if (!del_ptr) {
+                throw std::runtime_error("DeleteStatementNode::clone(): expected DeleteExpressionNode from clone()");
+            }
+            n->expr = std::unique_ptr<DeleteExpressionNode>(static_cast<DeleteExpressionNode*>(cloned.release()));
+        } else {
+            n->expr = nullptr;
+        }
         return n;
     }
 

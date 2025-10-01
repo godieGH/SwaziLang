@@ -20,6 +20,7 @@ static Value builtin_ainaya(const std::vector < Value>& args, EnvPtr env, const 
    if (std::holds_alternative < bool > (v)) return std::string("bool");
    if (std::holds_alternative < std::string > (v)) return std::string("neno");
    if (std::holds_alternative < ObjectPtr > (v)) return std::string("object");
+   if (std::holds_alternative < ClassPtr > (v)) return std::string("muundo");
    if (std::holds_alternative < ArrayPtr > (v)) return std::string("orodha");
    if (std::holds_alternative < FunctionPtr > (v)) return std::string("kazi");
 

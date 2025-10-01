@@ -1,4 +1,5 @@
 #include "evaluator.hpp"
+#include "ClassRuntime.hpp"
 #include <iostream>
 #include <cmath>
 #include <stdexcept>
@@ -256,6 +257,137 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
       return;
    }
 
+
+   if (auto cd = dynamic_cast<ClassDeclarationNode*>(stmt)) {
+      // create runtime class descriptor
+      auto classDesc = std::make_shared < ClassValue > ();
+      classDesc->token = cd->token;
+      classDesc->name = cd->name ? cd->name->name: "<anon>";
+      if (cd->body) {
+         classDesc->body = cd->body->clone();
+      }
+
+      // resolve super if present
+      if (cd->superClass) {
+         // try to get super class from environment
+         EnvPtr walk = env;
+         bool found = false;
+         while (walk) {
+            auto it = walk->values.find(cd->superClass->name);
+            if (it != walk->values.end()) {
+               if (std::holds_alternative < ClassPtr > (it->second.value)) {
+                  classDesc->super = std::get < ClassPtr > (it->second.value);
+                  found = true;
+               } else {
+                  throw std::runtime_error("Super identifier '" + cd->superClass->name + "' is not a class at " + cd->superClass->token.loc.to_string());
+               }
+               break;
+            }
+            walk = walk->parent;
+         }
+         if (!found) throw std::runtime_error("Unknown super class '" + cd->superClass->name + "' at " + cd->superClass->token.loc.to_string());
+      }
+
+      // materialize static table: iterate properties and methods in the ClassBodyNode clone
+      if (classDesc->body) {
+         // properties
+         for (auto &p_uptr: classDesc->body->properties) {
+            if (!p_uptr) continue;
+            if (p_uptr->is_static) {
+               // evaluate initializer if present
+               Value initVal = std::monostate {};
+               if (p_uptr->value) initVal = evaluate_expression(p_uptr->value.get(), env);
+               PropertyDescriptor pd;
+               pd.value = initVal;
+               pd.is_private = p_uptr->is_private;
+               pd.is_locked = p_uptr->is_locked;
+               pd.is_readonly = false;
+               pd.token = p_uptr->token;
+               classDesc->static_table->properties[p_uptr->name] = std::move(pd);
+            }
+         }
+
+         // methods
+         for (auto &m_uptr: classDesc->body->methods) {
+            if (!m_uptr) continue;
+            if (m_uptr->is_static) {
+               // create a FunctionValue persisted from the ClassMethodNode
+               auto persisted = std::make_shared < FunctionDeclarationNode > ();
+               persisted->name = m_uptr->name;
+               persisted->parameters = m_uptr->params;
+               persisted->token = m_uptr->token;
+
+               // clone body statements properly (do NOT use vector in boolean context)
+               persisted->body.reserve(m_uptr->body.size());
+               for (const auto &s: m_uptr->body) {
+                  persisted->body.push_back(s ? s->clone(): nullptr);
+               }
+
+               auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+               PropertyDescriptor pd;
+               pd.value = fn;
+               pd.is_private = m_uptr->is_private;
+               pd.is_locked = m_uptr->is_locked;
+               pd.is_readonly = m_uptr->is_getter; // getter on static method makes it readonly
+               pd.token = m_uptr->token;
+               classDesc->static_table->properties[m_uptr->name] = std::move(pd);
+            }
+         }
+
+      }
+
+      // store class descriptor into current env as a constant
+      Environment::Variable var;
+      var.value = classDesc;
+      var.is_constant = true;
+      env->set(classDesc->name, var);
+      return;
+   }
+
+   if (auto ds = dynamic_cast<DeleteStatementNode*>(stmt)) {
+      // evaluate the delete expression to call destructor and cleanup
+      // Evaluate inner expression which should be a DeleteExpressionNode
+      if (!ds->expr) return;
+      // Evaluate target object value
+      Value v = evaluate_expression(ds->expr->target.get(), env);
+      if (!std::holds_alternative < ObjectPtr > (v)) {
+         // nothing to delete or error depending on language semantics
+         return;
+      }
+      ObjectPtr obj = std::get < ObjectPtr > (v);
+      // try to find class meta on object: __class__ property
+      auto it = obj->properties.find("__class__");
+      if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
+         ClassPtr cls = std::get < ClassPtr > (it->second.value);
+         // find destructor in cls->body
+         if (cls->body) {
+            for (auto &m: cls->body->methods) {
+               if (m && m->is_destructor) {
+                  // create FunctionPtr and call it with receiver and no args
+                  auto persisted = std::make_shared < FunctionDeclarationNode > ();
+                  persisted->name = m->name;
+                  persisted->parameters = m->params;
+                  persisted->token = m->token;
+                  persisted->body.reserve(m->body.size());
+                  for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+
+                  auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+
+                  // call with receiver bound
+                  call_function_with_receiver(fn, obj, {}, m->token);
+                  break;
+               }
+            }
+         }
+      }
+      // Cleanup: remove properties so object is effectively destroyed
+      obj->properties.clear();
+      return;
+   }
+
+
+
+
    if (auto rs = dynamic_cast<ReturnStatementNode*>(stmt)) {
       if (did_return) *did_return = true;
       if (return_value) {
@@ -507,13 +639,13 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
       if (lc) lc->did_continue = true;
       return;
    }
-   
-   
+
+
    // --- DoStatementNode (fanya) ---
    if (auto dn = dynamic_cast<DoStatementNode*>(stmt)) {
-      auto bodyEnv = std::make_shared<Environment>(env);
+      auto bodyEnv = std::make_shared < Environment > (env);
 
-      for (auto &s : dn->body) {
+      for (auto &s: dn->body) {
          evaluate_statement(s.get(), bodyEnv, return_value, did_return, lc);
          if (did_return && *did_return) return;
          if (lc && (lc->did_break || lc->did_continue)) return;
@@ -521,66 +653,66 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
       return;
    }
-   
+
    if (auto sn = dynamic_cast<SwitchNode*>(stmt)) {
-    // Evaluate the discriminant (the switch condition expression)
-    Value switchVal = evaluate_expression(sn->discriminant.get(), env);
+      // Evaluate the discriminant (the switch condition expression)
+      Value switchVal = evaluate_expression(sn->discriminant.get(), env);
 
-    CaseNode* defaultCase = nullptr;
-    bool matched = false;
+      CaseNode* defaultCase = nullptr;
+      bool matched = false;
 
-    LoopControl local_lc;
-    LoopControl* loopCtrl = lc ? lc : &local_lc;
+      LoopControl local_lc;
+      LoopControl* loopCtrl = lc ? lc: &local_lc;
 
-    for (auto &casePtr : sn->cases) {
-        CaseNode* cn = casePtr.get();
+      for (auto &casePtr: sn->cases) {
+         CaseNode* cn = casePtr.get();
 
-        // If this is the default case (kaida), remember it for later
-        if (!cn->test) {
+         // If this is the default case (kaida), remember it for later
+         if (!cn->test) {
             defaultCase = cn;
             continue;
-        }
+         }
 
-        // Evaluate case test expression
-        Value caseVal = evaluate_expression(cn->test.get(), env);
+         // Evaluate case test expression
+         Value caseVal = evaluate_expression(cn->test.get(), env);
 
-        // Check equality (reuse your equals() or same helper you use elsewhere)
-        if (!matched && is_equal(switchVal, caseVal)) {
+         // Check equality (reuse your equals() or same helper you use elsewhere)
+         if (!matched && is_equal(switchVal, caseVal)) {
             matched = true;
-        }
+         }
 
-        // If already matched, execute this case body (fall-through unless simama)
-        if (matched) {
-            auto bodyEnv = std::make_shared<Environment>(env);
+         // If already matched, execute this case body (fall-through unless simama)
+         if (matched) {
+            auto bodyEnv = std::make_shared < Environment > (env);
 
-            for (auto &s : cn->body) {
-                evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
-                if (did_return && *did_return) return;
-                if (loopCtrl->did_break) {
-                    loopCtrl->did_break = false; // reset for outer flow
-                    return; // exit entire switch
-                }
+            for (auto &s: cn->body) {
+               evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+               if (did_return && *did_return) return;
+               if (loopCtrl->did_break) {
+                  loopCtrl->did_break = false; // reset for outer flow
+                  return; // exit entire switch
+               }
             }
-        }
-    }
+         }
+      }
 
-    // No case matched, execute default if present
-    if (!matched && defaultCase) {
-        auto bodyEnv = std::make_shared<Environment>(env);
+      // No case matched, execute default if present
+      if (!matched && defaultCase) {
+         auto bodyEnv = std::make_shared < Environment > (env);
 
-        for (auto &s : defaultCase->body) {
+         for (auto &s: defaultCase->body) {
             evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
             if (did_return && *did_return) return;
             if (loopCtrl->did_break) {
-                loopCtrl->did_break = false;
-                return; // exit switch
+               loopCtrl->did_break = false;
+               return; // exit switch
             }
-        }
-    }
+         }
+      }
 
-    return;
-}
+      return;
+   }
 
-   
+
    throw std::runtime_error("Unhandled statement node in evaluator at " + stmt->token.loc.to_string());
 }

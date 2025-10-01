@@ -1,4 +1,5 @@
 #include "evaluator.hpp"
+#include "ClassRuntime.hpp"
 #include <iostream>
 #include <cmath>
 #include <stdexcept>
@@ -14,27 +15,27 @@ bool supports_color() {
 }
 
 namespace Color {
-    const std::string reset   = "\033[0m";
+   const std::string reset = "\033[0m";
 
-    // Standard
-    const std::string black   = "\033[30m";
-    const std::string red     = "\033[31m";
-    const std::string green   = "\033[32m";
-    const std::string yellow  = "\033[33m";
-    const std::string blue    = "\033[34m";
-    const std::string magenta = "\033[35m";
-    const std::string cyan    = "\033[36m";
-    const std::string white   = "\033[37m";
+   // Standard
+   const std::string black = "\033[30m";
+   const std::string red = "\033[31m";
+   const std::string green = "\033[32m";
+   const std::string yellow = "\033[33m";
+   const std::string blue = "\033[34m";
+   const std::string magenta = "\033[35m";
+   const std::string cyan = "\033[36m";
+   const std::string white = "\033[37m";
 
-    // Bright versions
-    const std::string bright_black   = "\033[90m";  // gray
-    const std::string bright_red     = "\033[91m";
-    const std::string bright_green   = "\033[92m";
-    const std::string bright_yellow  = "\033[93m";
-    const std::string bright_blue    = "\033[94m";
-    const std::string bright_magenta = "\033[95m";
-    const std::string bright_cyan    = "\033[96m";
-    const std::string bright_white   = "\033[97m";
+   // Bright versions
+   const std::string bright_black = "\033[90m"; // gray
+   const std::string bright_red = "\033[91m";
+   const std::string bright_green = "\033[92m";
+   const std::string bright_yellow = "\033[93m";
+   const std::string bright_blue = "\033[94m";
+   const std::string bright_magenta = "\033[95m";
+   const std::string bright_cyan = "\033[96m";
+   const std::string bright_white = "\033[97m";
 }
 
 
@@ -47,6 +48,8 @@ static std::string value_type_name(const Value& v) {
    if (std::holds_alternative < bool > (v)) return "bool";
    if (std::holds_alternative < FunctionPtr > (v)) return "function";
    if (std::holds_alternative < ArrayPtr > (v)) return "orodha";
+   if (std::holds_alternative < ObjectPtr > (v)) return "object";
+   if (std::holds_alternative < ClassPtr > (v)) return "muundo";
    return "unknown";
 }
 
@@ -79,17 +82,17 @@ std::string Evaluator::to_string_value(const Value& v) {
       else ss << d;
       return use_color ? Color::yellow + ss.str() + Color::reset: ss.str();
    }
-   if (std::holds_alternative<bool>(v)) {
-        std::string s = std::get<bool>(v) ? "kweli" : "sikweli";
-        return use_color ? Color::bright_magenta + s + Color::reset : s;
-    }
+   if (std::holds_alternative < bool > (v)) {
+      std::string s = std::get < bool > (v) ? "kweli": "sikweli";
+      return use_color ? Color::bright_magenta + s + Color::reset: s;
+   }
    if (std::holds_alternative < std::string > (v)) return std::get < std::string > (v);
-   if (std::holds_alternative<FunctionPtr>(v)) {
-        FunctionPtr fn = std::get<FunctionPtr>(v);
-        std::string name = fn->name.empty() ? "<anon>" : fn->name;
-        std::string s = "[" + (use_color ? (Color::bright_cyan + "kazi: " + Color::reset ): "kazi: " ) + name + "]";
-        return  s ;
-    }
+   if (std::holds_alternative < FunctionPtr > (v)) {
+      FunctionPtr fn = std::get < FunctionPtr > (v);
+      std::string name = fn->name.empty() ? "<anon>": fn->name;
+      std::string s = "[" + (use_color ? (Color::bright_cyan + "kazi: " + Color::reset): "kazi: ") + name + "]";
+      return s;
+   }
    if (std::holds_alternative < ArrayPtr > (v)) {
       auto arr = std::get < ArrayPtr > (v);
       if (!arr) return "[]";
@@ -104,8 +107,13 @@ std::string Evaluator::to_string_value(const Value& v) {
    if (std::holds_alternative < ObjectPtr > (v)) {
       ObjectPtr op = std::get < ObjectPtr > (v);
       if (!op) return "{}";
-      std::unordered_set<const ObjectValue*> visited;
+      std::unordered_set < const ObjectValue*> visited;
       return print_object(op, 0, visited); // <- you write this pretty-printer
+   }
+   if (std::holds_alternative < ClassPtr > (v)) {
+      ClassPtr cp = std::get < ClassPtr > (v);
+      std::string nm = cp ? cp->name: "<anon>";
+      return use_color ? (Color::bright_blue + std::string("muundo ") + nm + Color::reset): std::string("muudo " + nm);
    }
    return "";
 }
@@ -259,274 +267,318 @@ static constexpr int INLINE_MAX_LEN = 80;
 
 // Helper: are we a primitive-ish value that can be inlined simply?
 static bool is_simple_value(const Value &v) {
-    return std::holds_alternative<std::monostate>(v) ||
-           std::holds_alternative<double>(v) ||
-           std::holds_alternative<std::string>(v) ||
-           std::holds_alternative<bool>(v);
+   return std::holds_alternative < std::monostate > (v) ||
+   std::holds_alternative < double > (v) ||
+   std::holds_alternative < std::string > (v) ||
+   std::holds_alternative < bool > (v);
 }
 
 
 // Try to render an object inline. Returns std::nullopt if not suitable for inline.
-static std::optional<std::string> try_render_inline_object(ObjectPtr o,
-                                                           std::unordered_set<const ObjectValue*>& visited) {
-    if (!o) return std::string("{}");
-    const ObjectValue* p = o.get();
-    if (visited.count(p)) return std::string("{/*cycle*/}");
+static std::optional < std::string > try_render_inline_object(ObjectPtr o,
+   std::unordered_set < const ObjectValue*>& visited) {
+   if (!o) return std::string("{}");
+   const ObjectValue* p = o.get();
+   if (visited.count(p)) return std::string("{/*cycle*/}");
 
-    // Count visible properties and ensure they're all simple values (no nested objects/arrays/functions).
-    std::vector<std::pair<std::string, Value>> kvs;
-    kvs.reserve(o->properties.size());
-    for (const auto &kv : o->properties) {
-        const std::string &k = kv.first;
-        const PropertyDescriptor &desc = kv.second;
-        if (desc.is_private) continue; // skip private from inline view
-        // if value is not simple, bail
-        if (!is_simple_value(desc.value)) return std::nullopt;
-        kvs.emplace_back(k, desc.value);
-        if ((int)kvs.size() > INLINE_MAX_PROPS) return std::nullopt;
-    }
+   // Count visible properties and ensure they're all simple values (no nested objects/arrays/functions).
+   std::vector < std::pair < std::string,
+   Value>> kvs;
+   kvs.reserve(o->properties.size());
+   for (const auto &kv: o->properties) {
+      const std::string &k = kv.first;
+      const PropertyDescriptor &desc = kv.second;
+      if (desc.is_private) continue; // skip private from inline view
+      // if value is not simple, bail
+      if (!is_simple_value(desc.value)) return std::nullopt;
+      kvs.emplace_back(k, desc.value);
+      if ((int)kvs.size() > INLINE_MAX_PROPS) return std::nullopt;
+   }
 
-    // Build inline string (temporarily without tracking visited since values are simple)
-    std::ostringstream oss;
-    oss << "{";
-    for (size_t i = 0; i < kvs.size(); ++i) {
-        if (i) oss << ", ";
-        // use plain, non-colored formatting here — color will be added in print_value
-        // but print_value returns colored string already so use it.
-        // key formatting: we want key only (no quotes)
-        oss << kvs[i].first << ": " << /* value will be colored by print_value caller */ "";
-    }
-    oss << "}";
+   // Build inline string (temporarily without tracking visited since values are simple)
+   std::ostringstream oss;
+   oss << "{";
+   for (size_t i = 0; i < kvs.size(); ++i) {
+      if (i) oss << ", ";
+      // use plain, non-colored formatting here — color will be added in print_value
+      // but print_value returns colored string already so use it.
+      // key formatting: we want key only (no quotes)
+      oss << kvs[i].first << ": " << /* value will be colored by print_value caller */ "";
+   }
+   oss << "}";
 
-    // Now we need values rendered to check length — render values inline using print_value
-    std::string combined;
-    {
-        std::ostringstream tmp;
-        tmp << "{";
-        for (size_t i = 0; i < kvs.size(); ++i) {
-            if (i) tmp << ", ";
-            tmp << kvs[i].first << ": " << /* placeholder, will be replaced below */ "";
-        }
-        tmp << "}";
-        combined = tmp.str();
-    }
+   // Now we need values rendered to check length — render values inline using print_value
+   std::string combined;
+   {
+      std::ostringstream tmp;
+      tmp << "{";
+      for (size_t i = 0; i < kvs.size(); ++i) {
+         if (i) tmp << ", ";
+         tmp << kvs[i].first << ": " << /* placeholder, will be replaced below */ "";
+      }
+      tmp << "}";
+      combined = tmp.str();
+   }
 
-    // To produce the exact inline string with colors, build properly:
-    std::ostringstream finaloss;
-    finaloss << "{";
-    for (size_t i = 0; i < kvs.size(); ++i) {
-        if (i) finaloss << ", ";
-        finaloss << kvs[i].first << ": " << /* we'll call Evaluator::print_value below */ "";
-    }
-    // But we cannot call Evaluator::print_value here (static function). We'll instead let the caller
-    // render final inline (so return list of keys+values). To keep it simpler, we will instead
-    // let the caller call print_value. So return nullopt to avoid complexity.
-    // For simplicity, here we bail out and let the main printer decide inline rendering.
-    return std::nullopt;
+   // To produce the exact inline string with colors, build properly:
+   std::ostringstream finaloss;
+   finaloss << "{";
+   for (size_t i = 0; i < kvs.size(); ++i) {
+      if (i) finaloss << ", ";
+      finaloss << kvs[i].first << ": " << /* we'll call Evaluator::print_value below */ "";
+   }
+   // But we cannot call Evaluator::print_value here (static function). We'll instead let the caller
+   // render final inline (so return list of keys+values). To keep it simpler, we will instead
+   // let the caller call print_value. So return nullopt to avoid complexity.
+   // For simplicity, here we bail out and let the main printer decide inline rendering.
+   return std::nullopt;
 }
 
 // Color-aware string escape helper for display (keeps simple escaping)
 static std::string quote_and_color(const std::string &s, bool use_color) {
-    if (!use_color) {
-        std::ostringstream ss;
-        ss << "\"" ;
-        for (char c : s) {
-            if (c == '\\') ss << "\\\\";
-            else if (c == '\"') ss << "\\\"";
-            else if (c == '\n') ss << "\\n";
-            else ss << c;
-        }
-        ss << "\"";
-        return ss.str();
-    }
-    // with color: color the inner string green, keep quotes white
-    std::ostringstream ss;
-    ss << Color::white << "\"" << Color::reset;
-    ss << Color::green;
-    for (char c : s) {
-        if (c == '\\') ss << "\\\\";
-        else if (c == '\"') ss << "\\\"";
-        else if (c == '\n') ss << "\\n";
-        else ss << c;
-    }
-    ss << Color::reset;
-    ss << Color::white << "\"" << Color::reset;
-    return ss.str();
+   if (!use_color) {
+      std::ostringstream ss;
+      ss << "\"";
+      for (char c: s) {
+         if (c == '\\') ss << "\\\\";
+         else if (c == '\"') ss << "\\\"";
+         else if (c == '\n') ss << "\\n";
+         else ss << c;
+      }
+      ss << "\"";
+      return ss.str();
+   }
+   // with color: color the inner string green, keep quotes white
+   std::ostringstream ss;
+   ss << Color::white << "\"" << Color::reset;
+   ss << Color::green;
+   for (char c: s) {
+      if (c == '\\') ss << "\\\\";
+      else if (c == '\"') ss << "\\\"";
+      else if (c == '\n') ss << "\\n";
+      else ss << c;
+   }
+   ss << Color::reset;
+   ss << Color::white << "\"" << Color::reset;
+   return ss.str();
 }
 
 std::string Evaluator::print_value(
-    const Value &v,
-    int depth,
-    std::unordered_set<const ObjectValue*> visited
+   const Value &v,
+   int depth,
+   std::unordered_set < const ObjectValue*> visited
 ) {
-    bool use_color = supports_color();
+   bool use_color = supports_color();
 
-    if (std::holds_alternative<std::monostate>(v)) {
-        return use_color ? (Color::bright_black + std::string("null") + Color::reset) : std::string("null");
-    }
+   if (std::holds_alternative < std::monostate > (v)) {
+      return use_color ? (Color::bright_black + std::string("null") + Color::reset): std::string("null");
+   }
 
-    if (std::holds_alternative<double>(v)) {
-        std::ostringstream ss;
-        double d = std::get<double>(v);
-        if (std::fabs(d - std::round(d)) < 1e-12) ss << (long long)std::llround(d);
-        else ss << d;
-        return use_color ? (Color::yellow + ss.str() + Color::reset) : ss.str();
-    }
+   if (std::holds_alternative < double > (v)) {
+      std::ostringstream ss;
+      double d = std::get < double > (v);
+      if (std::fabs(d - std::round(d)) < 1e-12) ss << (long long)std::llround(d);
+      else ss << d;
+      return use_color ? (Color::yellow + ss.str() + Color::reset): ss.str();
+   }
 
-    if (std::holds_alternative<bool>(v)) {
-        std::string s = std::get<bool>(v) ? "kweli" : "sikweli";
-        return use_color ? (Color::bright_magenta + s + Color::reset) : s;
-    }
+   if (std::holds_alternative < bool > (v)) {
+      std::string s = std::get < bool > (v) ? "kweli": "sikweli";
+      return use_color ? (Color::bright_magenta + s + Color::reset): s;
+   }
 
-    if (std::holds_alternative<std::string>(v)) {
-        const std::string &s = std::get<std::string>(v);
-        return quote_and_color(s, use_color);
-    }
+   if (std::holds_alternative < std::string > (v)) {
+      const std::string &s = std::get < std::string > (v);
+      return quote_and_color(s, use_color);
+   }
 
-    if (std::holds_alternative<FunctionPtr>(v)) {
-        FunctionPtr fn = std::get<FunctionPtr>(v);
-        std::string nm = fn->name.empty() ? "<anon>" : fn->name;
-        std::ostringstream ss;
-        ss << "[fn " << nm << "]";
-        return use_color ? (Color::bright_cyan + ss.str() + Color::reset) : ss.str();
-    }
+   if (std::holds_alternative < FunctionPtr > (v)) {
+      FunctionPtr fn = std::get < FunctionPtr > (v);
+      std::string nm = fn->name.empty() ? "<anon>": fn->name;
+      std::ostringstream ss;
+      ss << "[fn " << nm << "]";
+      return use_color ? (Color::bright_cyan + ss.str() + Color::reset): ss.str();
+   }
 
-    if (std::holds_alternative<ArrayPtr>(v)) {
-        ArrayPtr arr = std::get<ArrayPtr>(v);
-        if (!arr) return "[]";
-        // try compact inline if small and elements simple
-        bool can_inline = (arr->elements.size() <= (size_t)INLINE_MAX_PROPS);
-        if (can_inline) {
-            for (const auto &e : arr->elements) {
-                if (!is_simple_value(e)) { can_inline = false; break; }
+   if (std::holds_alternative < ArrayPtr > (v)) {
+      ArrayPtr arr = std::get < ArrayPtr > (v);
+      if (!arr) return "[]";
+      // try compact inline if small and elements simple
+      bool can_inline = (arr->elements.size() <= (size_t)INLINE_MAX_PROPS);
+      if (can_inline) {
+         for (const auto &e: arr->elements) {
+            if (!is_simple_value(e)) {
+               can_inline = false; break;
             }
-        }
-        std::ostringstream ss;
-        if (can_inline) {
-            ss << "[";
-            for (size_t i = 0; i < arr->elements.size(); ++i) {
-                if (i) ss << ", ";
-                ss << print_value(arr->elements[i], depth + 1);
-            }
-            ss << "]";
-            return ss.str();
-        } else {
-            // multi-line array
-            ss << "[\n";
-            std::string ind(depth + 2, ' ');
-            for (size_t i = 0; i < arr->elements.size(); ++i) {
-                ss << ind << print_value(arr->elements[i], depth + 2);
-                if (i + 1 < arr->elements.size()) ss << ",\n";
-            }
-            ss << "\n" << std::string(depth, ' ') << "]";
-            return ss.str();
-        }
-    }
+         }
+      }
+      std::ostringstream ss;
+      if (can_inline) {
+         ss << "[";
+         for (size_t i = 0; i < arr->elements.size(); ++i) {
+            if (i) ss << ", ";
+            ss << print_value(arr->elements[i], depth + 1);
+         }
+         ss << "]";
+         return ss.str();
+      } else {
+         // multi-line array
+         ss << "[\n";
+         std::string ind(depth + 2, ' ');
+         for (size_t i = 0; i < arr->elements.size(); ++i) {
+            ss << ind << print_value(arr->elements[i], depth + 2);
+            if (i + 1 < arr->elements.size()) ss << ",\n";
+         }
+         ss << "\n" << std::string(depth, ' ') << "]";
+         return ss.str();
+      }
+   }
 
-    if (std::holds_alternative<ObjectPtr>(v)) {
-        ObjectPtr op = std::get<ObjectPtr>(v);
-        if (!op) return "{}";
-        return print_object(op, depth, visited);
-    }
+   if (std::holds_alternative < ObjectPtr > (v)) {
+      ObjectPtr op = std::get < ObjectPtr > (v);
+      if (!op) return "{}";
+      return print_object(op, depth, visited);
+   }
 
-    return "<?>"; // fallback
+   if (std::holds_alternative < ClassPtr > (v)) {
+      ClassPtr cp = std::get < ClassPtr > (v);
+      std::ostringstream ss;
+      ss << "[muundo " << (cp ? cp->name: "<anon>") << "]";
+      return use_color ? (Color::bright_blue + ss.str() + Color::reset): ss.str();
+   }
+   return "<?>"; // fallback
 }
 
 std::string Evaluator::print_object(
-    ObjectPtr obj,
-    int indent,
-    std::unordered_set<const ObjectValue*> visited
+   ObjectPtr obj,
+   int indent,
+   std::unordered_set < const ObjectValue*> visited
 ) {
-    if (!obj) return "{}";
-    
+   if (!obj) return "{}";
 
-    bool use_color = supports_color();
-    //std::unordered_set<const ObjectValue*> visited;
 
-    // Decide inline vs expanded:
-    auto should_inline = [&](ObjectPtr o) -> bool {
-        if (!o) return true;
-        int visible = 0;
-        for (const auto &kv : o->properties) {
-            if (kv.second.is_private) continue;
-            visible++;
-            if (visible > INLINE_MAX_PROPS) return false;
-            // only simple values allowed inline
-            if (!is_simple_value(kv.second.value)) return false;
-        }
-        return visible > 0; // inline empty object as {}
-    };
+   bool use_color = supports_color();
+   //std::unordered_set<const ObjectValue*> visited;
 
-    std::function<std::string(ObjectPtr,int)> rec;
-    rec = [&](ObjectPtr o, int depth) -> std::string {
-        if (!o) return "{}";
-        const ObjectValue* p = o.get();
-        if (visited.count(p)) return "{/*cycle*/}";
-        visited.insert(p);
+   // Decide inline vs expanded:
+   auto should_inline = [&](ObjectPtr o) -> bool {
+      if (!o) return true;
+      int visible = 0;
+      for (const auto &kv: o->properties) {
+         if (kv.second.is_private) continue;
+         visible++;
+         if (visible > INLINE_MAX_PROPS) return false;
+         // only simple values allowed inline
+         if (!is_simple_value(kv.second.value)) return false;
+      }
+      return visible > 0; // inline empty object as {}
+   };
 
-        // Count visible props and collect them in stable order
-        std::vector<std::pair<std::string, const PropertyDescriptor*>> props;
-        props.reserve(o->properties.size());
-        for (const auto &kv : o->properties) {
-            if (kv.second.is_private) continue; // keep private hidden
-            props.push_back({kv.first, &kv.second});
-        }
+   std::function < std::string(ObjectPtr, int) > rec;
+   rec = [&](ObjectPtr o, int depth) -> std::string {
+      if (!o) return "{}";
+      const ObjectValue* p = o.get();
+      if (visited.count(p)) return "{/*cycle*/}";
+      visited.insert(p);
 
-        if (props.empty()) return "{}";
+      // Count visible props and collect them in stable order
+      std::vector < std::pair < std::string,
+      const PropertyDescriptor*>> props;
+      props.reserve(o->properties.size());
+      std::string class_name;
+      auto class_it = o->properties.find("__class__");
+      if (class_it != o->properties.end() && std::holds_alternative < ClassPtr > (class_it->second.value)) {
+         ClassPtr cp = std::get < ClassPtr > (class_it->second.value);
+         if (cp) class_name = cp->name;
+      }
+      for (const auto &kv: o->properties) {
+         // skip internal class link
+         if (kv.first == "__class__") continue;
 
-        bool inline_ok = should_inline(o);
-        if (inline_ok) {
-            // Build inline: {a: 1, b: "x"}
-            std::ostringstream oss;
-            oss << "{";
-            for (size_t i = 0; i < props.size(); ++i) {
-                if (i) oss << ", ";
-                // key in white
-                if (use_color) oss << Color::white;
-                oss << props[i].first;
-                if (use_color) oss << Color::reset;
-                oss << ": ";
-                oss << print_value(props[i].second->value, depth + 1);
-            }
-            oss << "}";
-            std::string s = oss.str();
-            if ((int)s.size() <= INLINE_MAX_LEN) return s;
-            // otherwise fallthrough to expanded representation
-        }
+         // keep private hidden
+         if (kv.second.is_private) continue;
 
-        // Expanded multi-line representation
-        std::ostringstream oss;
-        std::string ind(depth, ' ');
-        oss << "{\n";
-        for (size_t i = 0; i < props.size(); ++i) {
-            const auto &key = props[i].first;
-            const auto &desc = *props[i].second;
+         // Hide constructor/destructor methods:
+         // If this property is a function and its name matches the instance's class name,
+         // skip it from the printed property list.
+         if (!class_name.empty() && std::holds_alternative < FunctionPtr > (kv.second.value)) {
+            FunctionPtr f = std::get < FunctionPtr > (kv.second.value);
+            if (f && f->name == class_name) continue;
+         }
 
-            oss << ind << "  ";
-            // key color (white)
+         props.push_back({
+            kv.first, &kv.second
+         });
+      }
+
+      if (props.empty()) return "{}";
+
+      bool inline_ok = should_inline(o);
+      if (inline_ok) {
+         // Build inline: {a: 1, b: "x"}
+         std::ostringstream oss;
+         oss << "{";
+         for (size_t i = 0; i < props.size(); ++i) {
+            if (i) oss << ", ";
+            // key in white
             if (use_color) oss << Color::white;
-            oss << key;
+            oss << props[i].first;
             if (use_color) oss << Color::reset;
             oss << ": ";
+            oss << print_value(props[i].second->value, depth + 1);
+         }
+         oss << "}";
+         std::string s = oss.str();
+         if ((int)s.size() <= INLINE_MAX_LEN) return s;
+         // otherwise fallthrough to expanded representation
+      }
 
-            // Functions as short label
-            if (std::holds_alternative<FunctionPtr>(desc.value)) {
-                FunctionPtr f = std::get<FunctionPtr>(desc.value);
-                std::string nm = f->name.empty() ? "<anon>" : f->name;
-                if (use_color) oss << Color::bright_cyan;
-                oss << "[fn " << nm << "]";
-                if (use_color) oss << Color::reset;
+      // Expanded multi-line representation
+      std::ostringstream oss;
+      std::string ind(depth, ' ');
+      oss << "{\n";
+      for (size_t i = 0; i < props.size(); ++i) {
+         const auto &key = props[i].first;
+         const auto &desc = *props[i].second;
+
+         oss << ind << "  ";
+         // key color (white)
+         if (use_color) oss << Color::white;
+         oss << key;
+         if (use_color) oss << Color::reset;
+         oss << ": ";
+
+         // Functions as short label
+         if (std::holds_alternative < FunctionPtr > (desc.value)) {
+            FunctionPtr f = std::get < FunctionPtr > (desc.value);
+            std::string nm = f->name.empty() ? "<anon>": f->name;
+
+            std::ostringstream label;
+
+            if (desc.is_readonly) {
+               // getter: only show [getter]
+               label << "[getter]";
+               if (use_color) oss << Color::bright_magenta;
             } else {
-                // recurse for other values (arrays/objects/primitive)
-                oss << print_value(desc.value, depth + 2, visited);
+               // normal function: show [tabia name]
+               label << "[tabia " << nm << "]";
+               if (use_color) oss << Color::bright_cyan;
             }
 
-            if (i + 1 < props.size()) oss << ",\n";
-            else oss << "\n";
-        }
-        oss << ind << "}";
-        return oss.str();
-    };
+            oss << label.str();
+            if (use_color) oss << Color::reset;
 
-    return rec(obj, indent);
+         } else {
+            // recurse for other values (arrays/objects/primitive)
+            oss << print_value(desc.value, depth + 2, visited);
+         }
+
+         if (i + 1 < props.size()) oss << ",\n";
+         else oss << "\n";
+      }
+      oss << ind << "}";
+      return oss.str();
+   };
+
+   return rec(obj, indent);
 }

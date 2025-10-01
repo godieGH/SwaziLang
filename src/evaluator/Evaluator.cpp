@@ -1,5 +1,6 @@
 // src/evaluator/Evaluator.cpp
 #include "evaluator.hpp"
+#include "ClassRuntime.hpp"
 #include "globals.hpp"
 #include <iostream>
 #include <cmath>

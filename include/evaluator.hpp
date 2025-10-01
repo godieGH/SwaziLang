@@ -22,6 +22,9 @@ using EnvPtr = std::shared_ptr < Environment >;
 struct ArrayValue;
 using ArrayPtr = std::shared_ptr < ArrayValue >;
 
+struct ClassValue;
+using ClassPtr = std::shared_ptr<ClassValue>;
+
 
 struct ObjectValue;
 using ObjectPtr = std::shared_ptr<ObjectValue>;
@@ -31,9 +34,10 @@ using Value = std::variant<
     double,
     std::string,
     bool,
-    FunctionPtr,   
+    FunctionPtr,
     ArrayPtr,
-    ObjectPtr
+    ObjectPtr,
+    ClassPtr   
 >;
 
 
@@ -149,10 +153,13 @@ class Evaluator {
 
    private:
    EnvPtr global_env;
-
+   
+   ClassPtr current_class_context = nullptr;
+   
    // Expression & statement evaluators. Pass the environment explicitly for lexical scoping.
    Value evaluate_expression(ExpressionNode* expr, EnvPtr env);
    Value call_function(FunctionPtr fn, const std::vector < Value>& args, const Token& callToken);
+   Value call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, const Token& callToken);
    void evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value = nullptr, bool* did_return = nullptr, LoopControl* lc = nullptr);
 
    // helpers: conversions and formatting
