@@ -2,6 +2,9 @@
 #include <stdexcept>
 #include <cctype>
 #include <sstream>
+#include <unordered_map>
+
+#include <csignal>
 
 std::unique_ptr < StatementNode > Parser::parse_variable_declaration() {
    bool is_constant = false;
@@ -38,6 +41,157 @@ std::unique_ptr < StatementNode > Parser::parse_variable_declaration() {
    node->token = idTok;
    return node;
 }
+
+
+std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
+    // muundo has already been consumed by caller
+    expect(TokenType::IDENTIFIER, "Expected class name after 'muundo' keyword.");
+    Token idTok = tokens[position - 1];
+    auto nameNode = std::make_unique<IdentifierNode>();
+    nameNode->name = idTok.value;
+    nameNode->token = idTok;
+
+    std::unique_ptr<IdentifierNode> superNode = nullptr;
+    if (peek().type == TokenType::RITHI) {
+        consume(); // consume 'rithi'
+        expect(TokenType::IDENTIFIER, "Expected base class name after 'rithi'.");
+        Token superTok = tokens[position - 1];
+        superNode = std::make_unique<IdentifierNode>();
+        superNode->name = superTok.value;
+        superNode->token = superTok;
+    }
+
+    std::unique_ptr<ClassBodyNode> body = nullptr;
+
+    if (match(TokenType::COLON)) {
+        // pythonic / indent-based body
+        expect(TokenType::NEWLINE, "Expected newline after ':' in class declaration.");
+        expect(TokenType::INDENT, "Expected indented block for class body.");
+
+        // pass the class name and indicate non-brace style
+        body = parse_class_body(nameNode->name, /*braceStyle=*/false);
+        if (!body) body = std::make_unique<ClassBodyNode>();
+
+        // caller closes the indented block
+        expect(TokenType::DEDENT, "Expected dedent to close class body.");
+
+    } else if (match(TokenType::OPENBRACE)) {
+        // C-style block { ... }
+        // pass the class name and indicate brace style = true
+        body = parse_class_body(nameNode->name, /*braceStyle=*/true);
+        if (!body) body = std::make_unique<ClassBodyNode>();
+
+        // skip stray separators, then expect the closing brace
+        while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+            consume();
+        }
+        expect(TokenType::CLOSEBRACE, "Expected '}' to close class body.");
+    } else {
+        expect(TokenType::COLON, "Expected ':' or '{' to begin class body.");
+    }
+
+    // Construct node
+    auto classNode = std::make_unique<ClassDeclarationNode>(
+        std::move(nameNode),
+        std::move(superNode),
+        std::move(body)
+    );
+
+    // --- IMPORTANT: set token BEFORE any validation that might use it ---
+    classNode->token = idTok;
+
+    // Validation block (constructor/destructor handled specially)
+    if (classNode->body) {
+        int constructorCount = 0;
+        int destructorCount = 0;
+        std::unordered_map<std::string, int> memberCount; // composite key -> count
+
+        // methods
+        for (const auto &mPtr : classNode->body->methods) {
+            if (!mPtr) continue;
+            const ClassMethodNode &m = *mPtr;
+
+            // token fallback (use class token if method token is missing)
+            Token methodTok = (m.token.type != TokenType::EOF_TOKEN) ? m.token : classNode->token;
+
+            // constructor
+            if (m.is_constructor) {
+                constructorCount++;
+                if (m.name != classNode->name->name) {
+                    throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
+                        ": constructor name '" + m.name + "' must match class name '" + classNode->name->name + "'.");
+                }
+                if (m.is_static) {
+                    throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
+                        ": constructor must not be static.");
+                }
+                // do NOT add constructor to memberCount (avoid collision with members named same as class)
+                continue; // <-- important: skip normal member counting
+            }
+
+            // destructor
+            if (m.is_destructor) {
+                destructorCount++;
+                if (m.name != classNode->name->name) {
+                    throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
+                        ": destructor name '" + m.name + "' must match class name '" + classNode->name->name + "'.");
+                }
+                if (m.is_static) {
+                    throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
+                        ": destructor must not be static.");
+                }
+                // do NOT add destructor to memberCount
+                continue; // <-- important
+            }
+
+            // getter arg rule
+            if (m.is_getter && !m.params.empty()) {
+                throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
+                    ": getter '" + m.name + "' must not have parameters.");
+            }
+
+            // composite key: static/instance + method + name
+            std::string mkey = std::string(m.is_static ? "S:" : "I:") + "M:" + m.name;
+            memberCount[mkey]++;
+        }
+
+        // properties
+        for (const auto &pPtr : classNode->body->properties) {
+            if (!pPtr) continue;
+            const ClassPropertyNode &p = *pPtr;
+            Token propTok = (p.token.type != TokenType::EOF_TOKEN) ? p.token : classNode->token;
+
+            std::string pkey = std::string(p.is_static ? "S:" : "I:") + "P:" + p.name;
+            memberCount[pkey]++;
+        }
+
+        // enforce at most one constructor/destructor
+        if (constructorCount > 1) {
+            throw std::runtime_error("Parse error at " + classNode->token.loc.to_string() +
+                ": multiple constructors defined for class '" + classNode->name->name + "'.");
+        }
+        if (destructorCount > 1) {
+            throw std::runtime_error("Parse error at " + classNode->token.loc.to_string() +
+                ": multiple destructors defined for class '" + classNode->name->name + "'.");
+        }
+
+        // report duplicates (static/instance and kind-aware)
+        for (const auto &kv : memberCount) {
+            if (kv.second > 1) {
+                // pretty name: substring after last ':'
+                auto pos = kv.first.rfind(':');
+                std::string pretty = (pos == std::string::npos) ? kv.first : kv.first.substr(pos + 1);
+                throw std::runtime_error("Parse error at " + classNode->token.loc.to_string() +
+                    ": duplicate member name '" + pretty + "' found " + std::to_string(kv.second) + " times.");
+            }
+        }
+    }
+
+    return std::unique_ptr<StatementNode>(std::move(classNode));
+}
+
+
+
 
 std::unique_ptr < StatementNode > Parser::parse_print_statement(bool newline) {
    // capture the keyword token (CHAPISHA / ANDIKA) which was consumed by caller

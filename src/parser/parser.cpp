@@ -127,16 +127,63 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
 
    Token p = peek(); // now capture the first non-newline/non-indent token
 
+   if (p.type == TokenType::FUTA) {
+      Token futaTok = consume(); // consume 'futa'
+
+      // if followed by '(' treat as expression form, else treat as bare-target form
+      if (peek().type == TokenType::OPENPARENTHESIS) {
+         // parse futa(...) then wrap as expression-statement
+         // reuse parse_primary() behavior OR repeat parsing here
+         expect(TokenType::OPENPARENTHESIS, "Expected '(' after 'futa'");
+         std::unique_ptr < ExpressionNode > target;
+         if (peek().type != TokenType::CLOSEPARENTHESIS) {
+            target = parse_expression();
+         }
+         expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after futa(...)");
+         auto delExpr = std::make_unique < DeleteExpressionNode > (std::move(target));
+         delExpr->token = futaTok;
+         // Option A: wrap in generic ExpressionStatementNode
+         auto exprStmt = std::make_unique < ExpressionStatementNode > ();
+         exprStmt->token = futaTok;
+         exprStmt->expression = std::move(delExpr);
+         return exprStmt;
+
+         // Option B (if you prefer a dedicated wrapper):
+         // auto delStmt = std::make_unique<DeleteStatementNode>(std::move(delExpr));
+         // delStmt->token = futaTok;
+         // return delStmt;
+      } else {
+         // Bare-form: futa <expression>   (no parentheses)
+         // parse the target as an expression (typically an IDENTIFIER, member, or call result)
+         auto target = parse_expression(); // parse expression grammar to consume the target correctly
+         auto delExpr = std::make_unique < DeleteExpressionNode > (std::move(target));
+         delExpr->token = futaTok;
+
+         // wrap in statement so it's a statement-level delete
+         auto exprStmt = std::make_unique < ExpressionStatementNode > ();
+         exprStmt->token = futaTok;
+         exprStmt->expression = std::move(delExpr);
+         return exprStmt;
+      }
+   }
+
+
    if (p.type == TokenType::KAZI) {
       consume(); // consume 'kazi'
       return parse_function_declaration();
    }
-   
+
+   if (p.type == TokenType::MUUNDO) {
+      consume(); // consume 'muundo'
+      return parse_class_declaration();
+   }
+
+
    if (p.type == TokenType::CHAGUA) {
       consume(); // consume 'chagua'
       return parse_switch_statement();
    }
-   
+
    if (p.type == TokenType::RUDISHA) {
       consume(); // consume 'rudisha'
       return parse_return_statement();

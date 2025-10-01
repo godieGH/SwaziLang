@@ -656,10 +656,10 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       node->token = s;
       return node;
    }
-   
-   
+
+
    if(t.type == TokenType::NULL_LITERAL) {
-      return std::make_unique<NullNode>(consume());
+      return std::make_unique < NullNode > (consume());
    }
 
    // template literals: either a single TEMPLATE_STRING token (no interpolation)
@@ -687,12 +687,69 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
       ident->token = id;
       return ident;
    }
+   
+   if (t.type == TokenType::FUTA) {
+    Token futaTok = consume(); // consume 'futa'
+    auto node = std::make_unique<DeleteExpressionNode>();
+    node->token = futaTok;
 
+    // require parenthesized argument list for expression form
+    expect(TokenType::OPENPARENTHESIS, "Expected '(' after 'futa' for expression form");
+    // single-arg or allow comma-separated but we expect a single primary/expression as the target
+    if (peek().type != TokenType::CLOSEPARENTHESIS) {
+        node->target = parse_expression();
+        // if you allow multiple args for some reason, you can parse more
+    }
+    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after futa(...)");
+    return node;
+}
+   
+   
    if (t.type == TokenType::SELF) {
       Token id = consume();
       auto thisNode = std::make_unique < ThisExpressionNode > ();
       thisNode->token = id;
       return thisNode;
+   }
+
+   if (t.type == TokenType::UNDA) {
+      Token newTok = consume();
+
+      auto node = std::make_unique < NewExpressionNode > ();
+      node->token = newTok;
+
+      // expect a class identifier or callee expression
+      node->callee = parse_primary();
+
+      // optional argument list
+      if (match(TokenType::OPENPARENTHESIS)) {
+         if (peek().type != TokenType::CLOSEPARENTHESIS) {
+            do {
+               node->arguments.push_back(parse_expression());
+            } while (match(TokenType::COMMA));
+         }
+         expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after new expression arguments.");
+      }
+
+      return node;
+   }
+
+   if (t.type == TokenType::SUPA) {
+      Token superTok = consume();
+
+      auto node = std::make_unique < SuperExpressionNode > ();
+      node->token = superTok;
+
+      // require argument list
+      expect(TokenType::OPENPARENTHESIS, "Expected '(' after 'super'.");
+      if (peek().type != TokenType::CLOSEPARENTHESIS) {
+         do {
+            node->arguments.push_back(parse_expression());
+         } while (match(TokenType::COMMA));
+      }
+      expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after super arguments.");
+
+      return node;
    }
 
    if (t.type == TokenType::OPENPARENTHESIS) {
@@ -708,32 +765,30 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
 
 
    auto skip_layout_tokens = [&]() {
-    while (peek().type == TokenType::NEWLINE
-        || peek().type == TokenType::INDENT
-        || peek().type == TokenType::DEDENT) {
-        consume();
-    }
-};
+      while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+         consume();
+      }
+   };
 
    if (t.type == TokenType::OPENBRACKET) {
-    Token openTok = consume();
-    auto arrayNode = std::make_unique<ArrayExpressionNode>();
-    arrayNode->token = openTok;
+      Token openTok = consume();
+      auto arrayNode = std::make_unique < ArrayExpressionNode > ();
+      arrayNode->token = openTok;
 
-    skip_layout_tokens(); // ignore layout tokens immediately after '['
+      skip_layout_tokens(); // ignore layout tokens immediately after '['
 
-    if (peek().type != TokenType::CLOSEBRACKET) {
-        while (true) {
+      if (peek().type != TokenType::CLOSEBRACKET) {
+         while (true) {
             skip_layout_tokens(); // ignore before element
 
             if (peek().type == TokenType::ELLIPSIS) {
-                Token ell = consume();
-                auto spread = std::make_unique<SpreadElementNode>();
-                spread->token = ell;
-                spread->argument = parse_expression();
-                arrayNode->elements.push_back(std::move(spread));
+               Token ell = consume();
+               auto spread = std::make_unique < SpreadElementNode > ();
+               spread->token = ell;
+               spread->argument = parse_expression();
+               arrayNode->elements.push_back(std::move(spread));
             } else {
-                arrayNode->elements.push_back(parse_expression());
+               arrayNode->elements.push_back(parse_expression());
             }
 
             skip_layout_tokens(); // ignore after element
@@ -742,13 +797,13 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
 
             skip_layout_tokens(); // allow comma then layout before next element
             if (peek().type == TokenType::CLOSEBRACKET) break; // trailing comma allowed
-        }
-    }
+         }
+      }
 
-    skip_layout_tokens(); // before ']'
-    expect(TokenType::CLOSEBRACKET, "Expected ']' after array elements");
-    return arrayNode;
-}
+      skip_layout_tokens(); // before ']'
+      expect(TokenType::CLOSEBRACKET, "Expected ']' after array elements");
+      return arrayNode;
+   }
 
 
    if (t.type == TokenType::OPENBRACE) {

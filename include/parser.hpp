@@ -55,6 +55,17 @@ class Parser {
 
    // function parsing
    std::unique_ptr < StatementNode > parse_function_declaration();
+   std::unique_ptr < StatementNode > parse_class_declaration();
+   std::unique_ptr<ClassBodyNode> parse_class_body(const std::string& className, bool braceStyle = false);
+   std::unique_ptr<ClassMethodNode> parse_class_method(
+        bool is_private,
+        bool is_static,
+        bool is_locked,
+        const std::string& className,
+        bool isCtor = false,
+        bool isDtor = false,
+        bool braceStyle = false
+    );
    std::unique_ptr < StatementNode > parse_return_statement();
 
    // control-flow parsing
