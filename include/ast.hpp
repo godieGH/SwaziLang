@@ -725,6 +725,256 @@ struct SwitchNode : StatementNode {
 };
 
 
+
+
+
+
+
+
+// --- Class AST additions ---
+struct ClassPropertyNode : public Node {
+    std::string name; // simple name
+    std::unique_ptr<ExpressionNode> value; // initializer (may be null)
+    bool is_private = false; // @
+    bool is_static  = false; // *
+    bool is_locked  = false; // &
+
+    ClassPropertyNode() = default;
+
+    std::unique_ptr<ClassPropertyNode> clone() const {
+        auto n = std::make_unique<ClassPropertyNode>();
+        n->token = token;
+        n->name = name;
+        n->is_private = is_private;
+        n->is_static = is_static;
+        n->is_locked = is_locked;
+        n->value = value ? value->clone() : nullptr;
+        return n;
+    }
+
+    std::string to_string() const {
+        std::ostringstream ss;
+        if (is_static) ss << "*";
+        if (is_private) ss << "@";
+        if (is_locked) ss << "&";
+        ss << name;
+        if (value) ss << " = " << value->to_string();
+        return ss.str();
+    }
+};
+
+// Represents a method inside a class. This is NOT a wrapper around FunctionExpressionNode
+// to avoid clone-signature mismatches — we store the method shape directly.
+struct ClassMethodNode : public Node {
+    std::string name; // method name (for constructor/destructor rules parser enforces equality)
+    std::vector<std::string> params;
+    std::vector<std::unique_ptr<StatementNode>> body;
+
+    // modifiers
+    bool is_private = false;      // @
+    bool is_static  = false;      // *
+    bool is_locked  = false;      // &
+    bool is_getter  = false;      // 'thabiti' style: no params allowed; treated like readonly getter
+    bool is_constructor = false;  // constructor (name must equal class name, parser enforces)
+    bool is_destructor  = false;  // destructor (marked with ~ in source; parser enforces name)
+
+    ClassMethodNode() = default;
+
+    std::unique_ptr<ClassMethodNode> clone() const {
+        auto n = std::make_unique<ClassMethodNode>();
+        n->token = token;
+        n->name = name;
+        n->params = params;
+        n->is_private = is_private;
+        n->is_static  = is_static;
+        n->is_locked  = is_locked;
+        n->is_getter  = is_getter;
+        n->is_constructor = is_constructor;
+        n->is_destructor  = is_destructor;
+
+        n->body.reserve(body.size());
+        for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
+        return n;
+    }
+
+    std::string to_string() const {
+        std::ostringstream ss;
+        if (is_static) ss << "*";
+        if (is_private) ss << "@";
+        if (is_locked) ss << "&";
+        if (is_constructor) ss << name;             // constructors rendered as "Name(...) { ... }"
+        else if (is_destructor) ss << "~" << name;  // destructor syntax
+        else ss << "tabia " << name;
+
+        if (!is_getter) {
+            ss << "(";
+            for (size_t i = 0; i < params.size(); ++i) {
+                if (i) ss << ", ";
+                ss << params[i];
+            }
+            ss << ")";
+        } else {
+            // getter has no args; indicate it
+            ss << " (getter)";
+        }
+
+        ss << " " << "{ ... }";
+        return ss.str();
+    }
+};
+
+// Dedicated class body: ordered collection of properties and methods.
+// Keeps class internals separate from normal blocks.
+struct ClassBodyNode : public Node {
+    std::vector<std::unique_ptr<ClassPropertyNode>> properties;
+    std::vector<std::unique_ptr<ClassMethodNode>> methods;
+
+    ClassBodyNode() = default;
+
+    std::unique_ptr<ClassBodyNode> clone() const {
+        auto n = std::make_unique<ClassBodyNode>();
+        n->token = token;
+        n->properties.reserve(properties.size());
+        for (const auto &p : properties) n->properties.push_back(p ? p->clone() : nullptr);
+        n->methods.reserve(methods.size());
+        for (const auto &m : methods) n->methods.push_back(m ? m->clone() : nullptr);
+        return n;
+    }
+
+    std::string to_string() const {
+        std::ostringstream ss;
+        ss << "{ ";
+        for (size_t i = 0; i < properties.size(); ++i) {
+            if (i) ss << "; ";
+            ss << properties[i]->to_string();
+        }
+        if (!properties.empty() && !methods.empty()) ss << "; ";
+        for (size_t i = 0; i < methods.size(); ++i) {
+            if (i) ss << "; ";
+            ss << methods[i]->to_string();
+        }
+        ss << " }";
+        return ss.str();
+    }
+};
+
+// Class declaration: uses IdentifierNode for class name and optional superClass (static only)
+struct ClassDeclarationNode : public StatementNode {
+    std::unique_ptr<IdentifierNode> name;
+    std::unique_ptr<IdentifierNode> superClass; // optional static superclass identifier (rithi)
+    std::unique_ptr<ClassBodyNode> body;
+
+    ClassDeclarationNode(
+        std::unique_ptr<IdentifierNode> n,
+        std::unique_ptr<IdentifierNode> sc,
+        std::unique_ptr<ClassBodyNode> b
+    )
+        : name(std::move(n)), superClass(std::move(sc)), body(std::move(b)) {}
+
+    std::unique_ptr<StatementNode> clone() const override {
+        return std::make_unique<ClassDeclarationNode>(
+            name ? std::make_unique<IdentifierNode>(*name) : nullptr,
+            superClass ? std::make_unique<IdentifierNode>(*superClass) : nullptr,
+            body ? body->clone() : nullptr
+        );
+    }
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "muundo " << (name ? name->to_string() : "<anon>");
+        if (superClass) ss << " rithi " << superClass->to_string();
+        ss << " " << (body ? body->to_string() : "{ }");
+        return ss.str();
+    }
+};
+
+
+
+
+struct SuperExpressionNode : public ExpressionNode {
+    std::vector<std::unique_ptr<ExpressionNode>> arguments;
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<SuperExpressionNode>();
+        n->token = token;
+        for (auto &arg : arguments) {
+            n->arguments.push_back(arg ? arg->clone() : nullptr);
+        }
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::string s = "super(";
+        for (size_t i = 0; i < arguments.size(); i++) {
+            s += arguments[i] ? arguments[i]->to_string() : "<null>";
+            if (i + 1 < arguments.size()) s += ", ";
+        }
+        return s + ")";
+    }
+};
+struct NewExpressionNode : public ExpressionNode {
+    std::unique_ptr<ExpressionNode> callee; // class identifier or expr
+    std::vector<std::unique_ptr<ExpressionNode>> arguments;
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<NewExpressionNode>();
+        n->token = token;
+        n->callee = callee ? callee->clone() : nullptr;
+        for (auto &arg : arguments) {
+            n->arguments.push_back(arg ? arg->clone() : nullptr);
+        }
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::string s = "new " + (callee ? callee->to_string() : "<null>") + "(";
+        for (size_t i = 0; i < arguments.size(); i++) {
+            s += arguments[i] ? arguments[i]->to_string() : "<null>";
+            if (i + 1 < arguments.size()) s += ", ";
+        }
+        return s + ")";
+    }
+};
+struct DeleteExpressionNode : public ExpressionNode {
+    // the object to delete (Identifier, MemberExpression, NewExpression result, etc.)
+    std::unique_ptr<ExpressionNode> target;
+
+    DeleteExpressionNode() = default;
+    explicit DeleteExpressionNode(std::unique_ptr<ExpressionNode> t) : target(std::move(t)) {}
+
+    std::string to_string() const override {
+        return "futa(" + (target ? target->to_string() : "<null>") + ")";
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<DeleteExpressionNode>();
+        n->token = token;
+        n->target = target ? target->clone() : nullptr;
+        return n;
+    }
+};
+struct DeleteStatementNode : public StatementNode {
+    // store DeleteExpressionNode so tooling can inspect destructor return type if desired
+    std::unique_ptr<DeleteExpressionNode> expr;
+
+    DeleteStatementNode() = default;
+    explicit DeleteStatementNode(std::unique_ptr<DeleteExpressionNode> e) : expr(std::move(e)) {}
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<DeleteStatementNode>();
+        n->token = token;
+        n->expr = expr ? std::unique_ptr<DeleteExpressionNode>(
+                               static_cast<DeleteExpressionNode*>(expr->clone().release()))
+                       : nullptr;
+        return n;
+    }
+
+    std::string to_string() const override {
+        return "futa " + (expr && expr->target ? expr->target->to_string() : "<null>");
+    }
+};
+
+
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;

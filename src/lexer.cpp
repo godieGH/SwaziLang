@@ -212,6 +212,13 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"si", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
+        
+        //calsses keywords
+        {"muundo", TokenType::MUUNDO},
+        {"rithi", TokenType::RITHI},
+        {"unda", TokenType::UNDA},
+        {"supa", TokenType::SUPA},
+        {"futa", TokenType::FUTA},
 
         // control-flow keywords
         {"kama", TokenType::KAMA},             // if
@@ -398,6 +405,7 @@ void Lexer::scan_token(std::vector<Token>& out) {
         case '?': add_token(out, TokenType::QUESTIONMARK, "?", line, col, 1); advance(); return;
         case '@': add_token(out, TokenType::AT_SIGN, "@", line, col, 1); advance(); return;
         case '&': add_token(out, TokenType::AMPERSAND, "&", line, col, 1); advance(); return;
+        case '~': add_token(out, TokenType::TILDE, "~", line, col, 1); advance(); return;
         case '=': add_token(out, TokenType::ASSIGN, "=", line, col, 1); advance(); return;
         case '+': add_token(out, TokenType::PLUS, "+", line, col, 1); advance(); return;
         case '-': add_token(out, TokenType::MINUS, "-", line, col, 1); advance(); return;

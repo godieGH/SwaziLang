@@ -62,6 +62,14 @@ enum class TokenType {
     ELLIPSIS,
     
     SELF, // $ sign
+    
+    //class tokens
+    MUUNDO,
+    RITHI,
+    UNDA,
+    FUTA,
+    TILDE,
+    SUPA,
 
     // assignment / file end
     ASSIGN,
