@@ -5,7 +5,10 @@
 
 // Token types (keep in sync with your parser/lexer)
 enum class TokenType {
-    // keywords
+    // -----------------------
+    // Declaration / statements
+    // (top-level language keywords)
+    // -----------------------
     DATA,
     CHAPISHA,
     ANDIKA,
@@ -16,22 +19,50 @@ enum class TokenType {
     SIMAMA,
     ENDELEA,
 
-    // control-flow keywords (if / else)
+    // -----------------------
+    // Control-flow (if / else / switches / guards)
+    // -----------------------
     KAMA,         // 'kama' (if)
     VINGINEVYO,   // 'vinginevyo' (else)
+    KAIDA,        // (could be 'case' / pattern guard style)
+    IKIWA,        // conditional-like (keeps related keywords together)
+    CHAGUA,       // (switch / choose)
+    NI,           // (helper keyword often used in control constructs)
+
+    // -----------------------
+    // Loops
+    // -----------------------
     FOR,
     KILA,
     KATIKA,
     WHILE,
     DOWHILE,
-    NI,
-    CHAGUA,
-    IKIWA,
-    KAIDA,
-    
+
+    // -----------------------
+    // Error handling / flow modifiers
+    // -----------------------
+    JARIBU,   // try
+    MAKOSA,   // catch / errors
+    KISHA,    // finally / after
+
+    // -----------------------
+    // Functions / lambdas / functional helpers
+    // -----------------------
     LAMBDA,
 
-    // literals & identifiers
+    // -----------------------
+    // Class / OOP related
+    // -----------------------
+    MUUNDO,
+    RITHI,
+    UNDA,
+    FUTA,
+    TILDE,
+    SUPA,
+
+    // -----------------------
+    // Literals & identifiers
+    // -----------------------
     IDENTIFIER,
     NUMBER,
     STRING,                // double-quoted string
@@ -40,11 +71,13 @@ enum class TokenType {
     TEMPLATE_CHUNK,        // raw chunk inside a template literal (full interpolation mode)
     TEMPLATE_EXPR_START,   // "${"
     TEMPLATE_EXPR_END,     // "}" that closes interpolation
-    TEMPLATE_END,          // closing backtick (optional: some lexers emit it)
+    TEMPLATE_END,          // closing backtick (optional)
     BOOLEAN,
     NULL_LITERAL,
 
-    // punctuation
+    // -----------------------
+    // Punctuation & operators (single-character / structural)
+    // -----------------------
     SEMICOLON,
     COMMA,
     OPENPARENTHESIS,
@@ -60,22 +93,19 @@ enum class TokenType {
     AMPERSAND,
     QUESTION_DOT,
     ELLIPSIS,
-    
-    SELF, // $ sign
-    
-    //class tokens
-    MUUNDO,
-    RITHI,
-    UNDA,
-    FUTA,
-    TILDE,
-    SUPA,
 
-    // assignment / file end
+    // special single-char tokens
+    SELF, // $ sign
+
+    // -----------------------
+    // Assignment / file end
+    // -----------------------
     ASSIGN,
     EOF_TOKEN,
 
-    // arithmetic
+    // -----------------------
+    // Arithmetic
+    // -----------------------
     PLUS,
     MINUS,
     STAR,
@@ -83,17 +113,24 @@ enum class TokenType {
     PERCENT,
     POWER,
 
+    // -----------------------
+    // Compound arithmetic / increments
+    // -----------------------
     PLUS_ASSIGN,
     MINUS_ASSIGN,
     INCREMENT,
     DECREMENT,
 
-    // logical
+    // -----------------------
+    // Logical
+    // -----------------------
     AND,
     OR,
     NOT,
 
-    // comparison
+    // -----------------------
+    // Comparison
+    // -----------------------
     GREATERTHAN,
     GREATEROREQUALTHAN,
     LESSTHAN,
@@ -101,11 +138,16 @@ enum class TokenType {
     EQUALITY,
     NOTEQUAL,
 
-    // indentation-based blocks
+    // -----------------------
+    // Indentation-based blocks / newlines (for indent-sensitive grammars)
+    // -----------------------
     NEWLINE,
     INDENT,
     DEDENT,
 
+    // -----------------------
+    // Miscellaneous
+    // -----------------------
     COMMENT,
     UNKNOWN
 };
