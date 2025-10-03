@@ -6,6 +6,8 @@
 #include <sstream>
 #include <string>
 #include <stdexcept>
+#include <exception>
+
 
 static std::string to_property_key(const Value &v) {
    // string first
@@ -712,7 +714,63 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
       return;
    }
+   
+   if (auto tcf = dynamic_cast<TryCatchNode*>(stmt)) {
+    bool hadException = false;
+    std::exception_ptr eptr;
 
+    // Try block (use a separate env)
+    {
+        auto tryEnv = std::make_shared<Environment>(env);
+        try {
+            for (auto &s : tcf->tryBlock) {
+                evaluate_statement(s.get(), tryEnv, return_value, did_return, lc);
+                // don't return here — break so finally can run
+                if (did_return && *did_return) break;
+            }
+        } catch (...) {
+            // capture exception for catch handling
+            hadException = true;
+            eptr = std::current_exception();
+        }
+    }
+
+    // Catch block (if an exception occurred)
+    if (hadException) {
+        auto catchEnv = std::make_shared<Environment>(env);
+
+        // bind errorVar if provided
+        if (!tcf->errorVar.empty()) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &e) {
+                Environment::Variable var{ std::string(e.what()), false };
+                catchEnv->set(tcf->errorVar, var);
+            } catch (...) {
+                Environment::Variable var{ std::string("non-standard exception"), false };
+                catchEnv->set(tcf->errorVar, var);
+            }
+        }
+
+        for (auto &s : tcf->catchBlock) {
+            evaluate_statement(s.get(), catchEnv, return_value, did_return, lc);
+            if (did_return && *did_return) break;
+        }
+    }
+
+    // Finally block — ALWAYS run (if non-empty)
+    if (!tcf->finallyBlock.empty()) {
+        auto finallyEnv = std::make_shared<Environment>(env);
+        for (auto &s : tcf->finallyBlock) {
+            evaluate_statement(s.get(), finallyEnv, return_value, did_return, lc);
+            if (did_return && *did_return) break;
+        }
+    }
+
+    return;
+}
+
+   
 
    throw std::runtime_error("Unhandled statement node in evaluator at " + stmt->token.loc.to_string());
 }

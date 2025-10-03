@@ -1,3 +1,4 @@
+#include <iostream>
 #include "parser.hpp"
 #include <stdexcept>
 #include <cctype>
@@ -5,6 +6,8 @@
 #include <unordered_map>
 
 #include <csignal>
+#include "debugging/outputTry.hpp"
+
 
 std::unique_ptr < StatementNode > Parser::parse_variable_declaration() {
    bool is_constant = false;
@@ -565,4 +568,90 @@ std::unique_ptr<StatementNode> Parser::parse_switch_statement() {
     }
 
     return node;
+}
+
+
+
+
+std::unique_ptr<StatementNode> Parser::parse_try_catch() {
+    // caller already consumed 'jaribu' (JARIBU)
+    if (position == 0) {
+        throw std::runtime_error("Internal parser error: parse_try_catch called with position == 0");
+    }
+
+    auto node = std::make_unique<TryCatchNode>();
+
+    // record the starting 'jaribu' token on the node (useful for error reporting / locations)
+    node->token = tokens[position - 1];
+
+    // small lambda to parse either an indentation-based or brace-based block
+    auto parse_block_into = [&](std::vector<std::unique_ptr<StatementNode>>& dest) {
+        if (match(TokenType::COLON)) {
+            // indentation-based body
+            expect(TokenType::NEWLINE, "Expected newline after ':'");
+            expect(TokenType::INDENT, "Expected indented block");
+
+            while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
+                auto stmt = parse_statement();
+                if (!stmt) break; // defensive: EOF or parse error
+                dest.push_back(std::move(stmt));
+            }
+
+            expect(TokenType::DEDENT, "Expected dedent to close block");
+
+        } else if (match(TokenType::OPENBRACE)) {
+            // brace-based body
+            while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
+                // skip separators between statements
+                while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+                    consume();
+                }
+                if (peek().type == TokenType::CLOSEBRACE || peek().type == TokenType::EOF_TOKEN) break;
+                auto stmt = parse_statement();
+                if (!stmt) break;
+                dest.push_back(std::move(stmt));
+            }
+            expect(TokenType::CLOSEBRACE, "Expected '}' to close block");
+        } else {
+            // helpful error-message: caller expected a block start
+            expect(TokenType::COLON, "Expected ':' or '{' to begin block");
+        }
+    };
+
+    // --- parse try block ---
+    parse_block_into(node->tryBlock);
+
+    // --- parse catch (MAKOSA) ---
+    if (match(TokenType::MAKOSA)) {
+        // optional error variable: either IDENTIFIER or ( IDENTIFIER )
+        if (match(TokenType::IDENTIFIER)) {
+            // match() consumed the identifier, so the token is at tokens[position-1]
+            node->errorVar = tokens[position - 1].value; // <-- fixed: use the lexeme/text field
+        } else if (match(TokenType::OPENPARENTHESIS)) {
+            expect(TokenType::IDENTIFIER, "Expected identifier in catch parentheses");
+            node->errorVar = tokens[position - 1].value;
+            expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after catch identifier");
+        } else {
+            // no explicit variable provided — make this a clear error
+            expect(TokenType::IDENTIFIER, "Expected an error identifier to hold the error object after 'makosa'.");
+            // (expect will throw, so we won't reach here)
+        }
+
+        // now parse the catch body into catchBlock
+        parse_block_into(node->catchBlock);
+    } else {
+        // error: 'makosa' expected after try block
+        expect(TokenType::MAKOSA, "Expected 'makosa' after 'jaribu' block");
+    }
+
+    // --- optional finally (KISHA) ---
+    if (match(TokenType::KISHA)) {
+        parse_block_into(node->finallyBlock);
+    }
+    
+    // debugging the ast
+    //std::cout << trycatch_to_json(*node) << std::endl;
+
+
+    return std::unique_ptr<StatementNode>(std::move(node));
 }

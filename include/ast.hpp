@@ -993,6 +993,38 @@ struct DeleteStatementNode : public StatementNode {
     }
 };
 
+struct TryCatchNode : public StatementNode {
+    std::vector<std::unique_ptr<StatementNode>> tryBlock;
+    std::string errorVar;
+    std::vector<std::unique_ptr<StatementNode>> catchBlock;
+    std::vector<std::unique_ptr<StatementNode>> finallyBlock;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<TryCatchNode>();
+        n->token = token;
+        n->errorVar = errorVar;
+
+        n->tryBlock.reserve(tryBlock.size());
+        for (auto &s : tryBlock) n->tryBlock.push_back(s ? s->clone() : nullptr);
+
+        n->catchBlock.reserve(catchBlock.size());
+        for (auto &s : catchBlock) n->catchBlock.push_back(s ? s->clone() : nullptr);
+
+        n->finallyBlock.reserve(finallyBlock.size());
+        for (auto &s : finallyBlock) n->finallyBlock.push_back(s ? s->clone() : nullptr);
+
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "try { ... } catch (" << errorVar << ") { ... }";
+        if (!finallyBlock.empty()) {
+            ss << " finally { ... }";
+        }
+        return ss.str();
+    }
+};
 
 // Program root
 struct ProgramNode : public Node {

@@ -166,7 +166,11 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
          return exprStmt;
       }
    }
-
+   
+   if(p.type == TokenType::JARIBU) {
+     Token tryTok = consume();
+     return parse_try_catch();
+   }
 
    if (p.type == TokenType::KAZI) {
       consume(); // consume 'kazi'

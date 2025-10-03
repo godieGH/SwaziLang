@@ -223,6 +223,10 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         // control-flow keywords
         {"kama", TokenType::KAMA},             // if
         {"vinginevyo", TokenType::VINGINEVYO}, // else
+        
+        {"jaribu", TokenType::JARIBU},
+        {"makosa", TokenType::MAKOSA},
+        {"kisha", TokenType::KISHA},
 
         // loop-related keywords
         {"kwa", TokenType::FOR},              // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...

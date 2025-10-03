@@ -284,6 +284,13 @@ static Value builtin_lcm(const std::vector < Value>& args, EnvPtr env, const Tok
 
 
 
+static Value builtin_tupa(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    std::string msg = args.empty() ? "Error" : value_to_string(args[0]);
+    throw std::runtime_error(msg);
+}
+
+
+
 void init_globals(EnvPtr env) {
    if (!env) return;
 
@@ -304,6 +311,7 @@ void init_globals(EnvPtr env) {
    add_fn("Namba", builtin_namba);
    add_fn("Neno", builtin_neno);
    add_fn("soma", builtin_ingiza);
+   add_fn("Makosa", builtin_tupa);
 
 
    auto objectVal = std::make_shared < ObjectValue > ();
