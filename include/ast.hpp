@@ -612,18 +612,64 @@ struct ContinueStatementNode : public StatementNode {
     }
 };
 
+struct ParameterNode : public Node {
+    // name: parameter identifier (empty for anonymous/rest-only?)
+    std::string name;
+
+    // optional default value (if present, parameter is optional)
+    std::unique_ptr<ExpressionNode> defaultValue; // e.g. "b = 5"
+
+    // rest (variadic) marker: true for `...args[n]` style param
+    bool is_rest = false;
+
+    // when is_rest == true, this is the "required count" encoded in brackets:
+    // `...args[2]` sets rest_required_count = 2 meaning the first 2 elements of the
+    // rest array are required; in effect the function requires (required_count +
+    // number of prior non-default/non-rest required params) arguments to be provided.
+    size_t rest_required_count = 0;
+
+    ParameterNode() = default;
+
+    std::unique_ptr<ParameterNode> clone() const {
+        auto n = std::make_unique<ParameterNode>();
+        n->token = token;
+        n->name = name;
+        n->is_rest = is_rest;
+        n->rest_required_count = rest_required_count;
+        n->defaultValue = defaultValue ? defaultValue->clone() : nullptr;
+        return n;
+    }
+
+    std::string to_string() const {
+        std::ostringstream ss;
+        if (is_rest) {
+            ss << "..." << name << "[" << rest_required_count << "]";
+        } else {
+            ss << name;
+            if (defaultValue) ss << " = " << defaultValue->to_string();
+        }
+        return ss.str();
+    }
+};
+
 
 // Function declaration
 struct FunctionDeclarationNode : public StatementNode {
     std::string name; // function name
-    std::vector<std::string> parameters; // parameter names
+
+    // parameters are now ParameterNode objects (allow defaults and rest descriptors)
+    std::vector<std::unique_ptr<ParameterNode>> parameters;
+
     std::vector<std::unique_ptr<StatementNode>> body; // function body statements
 
     std::unique_ptr<StatementNode> clone() const override {
         auto n = std::make_unique<FunctionDeclarationNode>();
         n->token = token;
         n->name = name;
-        n->parameters = parameters;
+        n->parameters.reserve(parameters.size());
+        for (const auto &p : parameters) {
+            n->parameters.push_back(p ? p->clone() : nullptr);
+        }
         n->body.reserve(body.size());
         for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
         return n;
@@ -650,7 +696,7 @@ struct ThisExpressionNode : public ExpressionNode {
 };
 struct FunctionExpressionNode : public ExpressionNode {
     std::string name;
-    std::vector<std::string> parameters;
+    std::vector<std::unique_ptr<ParameterNode>> parameters;
     std::vector<std::unique_ptr<StatementNode>> body;
     bool is_getter = false;
     // use Node::token
@@ -661,7 +707,7 @@ struct FunctionExpressionNode : public ExpressionNode {
         s += name + "(";
         for (size_t i = 0; i < parameters.size(); ++i) {
             if (i) s += ", ";
-            s += parameters[i];
+            s += parameters[i] ? parameters[i]->to_string() : "<param>";
         }
         s += ") { ... }";
         return s;
@@ -671,8 +717,9 @@ struct FunctionExpressionNode : public ExpressionNode {
         auto n = std::make_unique<FunctionExpressionNode>();
         n->token = token;                  // Node::token
         n->name = name;
-        n->parameters = parameters;
         n->is_getter = is_getter;
+        n->parameters.reserve(parameters.size());
+        for (const auto &p : parameters) n->parameters.push_back(p ? p->clone() : nullptr);
         n->body.reserve(body.size());
         for (const auto &s : body) {
             n->body.push_back(s ? s->clone() : nullptr);
@@ -680,16 +727,41 @@ struct FunctionExpressionNode : public ExpressionNode {
         return n;
     }
 };
+
 struct LambdaNode : public ExpressionNode {
-    std::vector<std::string> params;
+    std::vector<std::unique_ptr<ParameterNode>> params;
     std::unique_ptr<ExpressionNode> exprBody;                     // for expr-lambdas
     std::vector<std::unique_ptr<StatementNode>> blockBody;        // for block-lambdas
-    bool isBlock;
+    bool isBlock = false;
 
-    LambdaNode(std::vector<std::string> p, std::unique_ptr<ExpressionNode> expr)
+    // convenience constructor from names (keeps some backwards compatibility with existing parser)
+    LambdaNode(const std::vector<std::string>& p, std::unique_ptr<ExpressionNode> expr)
+        : exprBody(std::move(expr)), isBlock(false)
+    {
+        params.reserve(p.size());
+        for (const auto &n : p) {
+            auto pn = std::make_unique<ParameterNode>();
+            pn->name = n;
+            params.push_back(std::move(pn));
+        }
+    }
+
+    LambdaNode(const std::vector<std::string>& p, std::vector<std::unique_ptr<StatementNode>> blk)
+        : blockBody(std::move(blk)), isBlock(true)
+    {
+        params.reserve(p.size());
+        for (const auto &n : p) {
+            auto pn = std::make_unique<ParameterNode>();
+            pn->name = n;
+            params.push_back(std::move(pn));
+        }
+    }
+
+    // preferred constructor that accepts ParameterNode descriptors
+    LambdaNode(std::vector<std::unique_ptr<ParameterNode>> p, std::unique_ptr<ExpressionNode> expr)
         : params(std::move(p)), exprBody(std::move(expr)), isBlock(false) {}
 
-    LambdaNode(std::vector<std::string> p, std::vector<std::unique_ptr<StatementNode>> blk)
+    LambdaNode(std::vector<std::unique_ptr<ParameterNode>> p, std::vector<std::unique_ptr<StatementNode>> blk)
         : params(std::move(p)), blockBody(std::move(blk)), isBlock(true) {}
 
     std::unique_ptr<ExpressionNode> clone() const override {
@@ -699,19 +771,34 @@ struct LambdaNode : public ExpressionNode {
             for (const auto &s : blockBody) {
                 clonedBlock.push_back(s ? s->clone() : nullptr);
             }
-            return std::make_unique<LambdaNode>(params, std::move(clonedBlock));
+            // clone params
+            std::vector<std::unique_ptr<ParameterNode>> clonedParams;
+            clonedParams.reserve(params.size());
+            for (const auto &p : params) clonedParams.push_back(p ? p->clone() : nullptr);
+            return std::make_unique<LambdaNode>(std::move(clonedParams), std::move(clonedBlock));
         } else {
             auto clonedExpr = exprBody ? exprBody->clone() : nullptr;
-            return std::make_unique<LambdaNode>(params, std::move(clonedExpr));
+            std::vector<std::unique_ptr<ParameterNode>> clonedParams;
+            clonedParams.reserve(params.size());
+            for (const auto &p : params) clonedParams.push_back(p ? p->clone() : nullptr);
+            return std::make_unique<LambdaNode>(std::move(clonedParams), std::move(clonedExpr));
         }
     }
 
     std::string to_string() const override {
         if (isBlock) return "lambda { ... }";
-        else return "lambda " + (exprBody ? exprBody->to_string() : "<null>");
+        else {
+            std::string s = "lambda (";
+            for (size_t i = 0; i < params.size(); ++i) {
+                if (i) s += ", ";
+                s += params[i] ? params[i]->to_string() : "<param>";
+            }
+            s += ") => ";
+            s += (exprBody ? exprBody->to_string() : "<null>");
+            return s;
+        }
     }
 };
-
 struct NullNode : public ExpressionNode {
     explicit NullNode(const Token& t) { token = t; }
 
@@ -777,7 +864,10 @@ struct ClassPropertyNode : public Node {
 // to avoid clone-signature mismatches — we store the method shape directly.
 struct ClassMethodNode : public Node {
     std::string name; // method name (for constructor/destructor rules parser enforces equality)
-    std::vector<std::string> params;
+
+    // parameters now allow defaults and rest descriptors
+    std::vector<std::unique_ptr<ParameterNode>> params;
+
     std::vector<std::unique_ptr<StatementNode>> body;
 
     // modifiers
@@ -794,13 +884,15 @@ struct ClassMethodNode : public Node {
         auto n = std::make_unique<ClassMethodNode>();
         n->token = token;
         n->name = name;
-        n->params = params;
         n->is_private = is_private;
         n->is_static  = is_static;
         n->is_locked  = is_locked;
         n->is_getter  = is_getter;
         n->is_constructor = is_constructor;
         n->is_destructor  = is_destructor;
+
+        n->params.reserve(params.size());
+        for (const auto &p : params) n->params.push_back(p ? p->clone() : nullptr);
 
         n->body.reserve(body.size());
         for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
@@ -820,7 +912,7 @@ struct ClassMethodNode : public Node {
             ss << "(";
             for (size_t i = 0; i < params.size(); ++i) {
                 if (i) ss << ", ";
-                ss << params[i];
+                ss << (params[i] ? params[i]->to_string() : "<param>");
             }
             ss << ")";
         } else {
@@ -832,7 +924,6 @@ struct ClassMethodNode : public Node {
         return ss.str();
     }
 };
-
 // Dedicated class body: ordered collection of properties and methods.
 // Keeps class internals separate from normal blocks.
 struct ClassBodyNode : public Node {

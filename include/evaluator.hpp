@@ -59,54 +59,66 @@ struct ArrayValue {
 
 // Function value: closure with parameters, body, and defining environment
 struct FunctionValue {
-   // optional name (helps debugging, recursion)
-   std::string name;
+    std::string name;
+    std::vector<std::shared_ptr<ParameterNode>> parameters;
+    std::shared_ptr<FunctionDeclarationNode> body;
+    EnvPtr closure;
+    Token token;
+    bool is_native = false;
+    std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> native_impl;
 
-   // parameter names in order
-   std::vector < std::string > parameters;
+    FunctionValue(
+        const std::string& nm,
+        const std::vector<std::unique_ptr<ParameterNode>>& params,
+        const std::shared_ptr<FunctionDeclarationNode>& b,
+        const EnvPtr& env,
+        const Token& tok
+    )
+        : name(nm),
+          body(b),
+          closure(env),
+          token(tok),
+          is_native(false)
+    {
+        parameters.reserve(params.size());
+        for (const auto& p : params) {
+            if (p) {
+                auto cloned = p->clone();
+                parameters.emplace_back(std::shared_ptr<ParameterNode>(cloned.release()));
+            } else {
+                parameters.emplace_back(nullptr);
+            }
+        }
+    }
 
-   // shared ownership of function AST node (persisted inside evaluator)
-   std::shared_ptr < FunctionDeclarationNode > body;
+    FunctionValue(
+        const std::string& nm,
+        const std::vector<std::shared_ptr<ParameterNode>>& params,
+        const std::shared_ptr<FunctionDeclarationNode>& b,
+        const EnvPtr& env,
+        const Token& tok
+    )
+        : name(nm),
+          parameters(params),
+          body(b),
+          closure(env),
+          token(tok),
+          is_native(false) {}
 
-   // closure environment captured at definition time
-   EnvPtr closure;
-
-   // token for error locations / diagnostics
-   Token token;
-
-   // If native, this is filled and called by call_function.
-   bool is_native = false;
-   std::function < Value(const std::vector < Value>&, EnvPtr, const Token&) > native_impl;
-
-   // constructor: user-defined function
-   FunctionValue(
-      const std::string& nm,
-      const std::vector < std::string>& params,
-      const std::shared_ptr < FunctionDeclarationNode>& b,
-      const EnvPtr& env,
-      const Token& tok
-   ): name(nm),
-   parameters(params),
-   body(b),
-   closure(env),
-   token(tok),
-   is_native(false) {}
-
-   // constructor: native function
-   FunctionValue(
-      const std::string& nm,
-      std::function < Value(const std::vector < Value>&, EnvPtr, const Token&) > impl,
-      const EnvPtr& env,
-      const Token& tok
-   ): name(nm),
-   parameters(),
-   body(nullptr),
-   closure(env),
-   token(tok),
-   is_native(true),
-   native_impl(std::move(impl)) {}
+    FunctionValue(
+        const std::string& nm,
+        std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl,
+        const EnvPtr& env,
+        const Token& tok
+    )
+        : name(nm),
+          parameters(),
+          body(nullptr),
+          closure(env),
+          token(tok),
+          is_native(true),
+          native_impl(std::move(impl)) {}
 };
-
 // Environment with lexical parent pointer
 class Environment: public std::enable_shared_from_this < Environment > {
    public:

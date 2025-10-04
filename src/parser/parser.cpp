@@ -1,5 +1,6 @@
 // scr/parser/parser.cpp
 #include "parser.hpp"
+#include <iostream>
 #include <stdexcept>
 #include <cctype>
 #include <sstream>
@@ -59,36 +60,189 @@ void Parser::expect(TokenType t, const std::string& errMsg) {
 bool Parser::is_lambda_ahead() {
    size_t saved = position; // remember position
 
+   // must start with '('
+   if (peek().type != TokenType::OPENPARENTHESIS) return false;
    consume(); // consume '('
-   bool found = false;
 
-   // check for zero or more identifiers separated by commas
-   while (peek().type != TokenType::CLOSEPARENTHESIS &&
-      peek().type != TokenType::EOF_TOKEN) {
-      if (peek().type != TokenType::IDENTIFIER) {
-         position = saved;
-         return false;
+   // helper to advance over a "default expression" in a tolerant way:
+   auto skip_default_expr = [&]() -> bool {
+      int depth = 0;
+      while (true) {
+         Token t = peek();
+         if (t.type == TokenType::EOF_TOKEN) {
+            return false;
+         }
+         if (t.type == TokenType::NEWLINE || t.type == TokenType::INDENT || t.type == TokenType::DEDENT) {
+            consume();
+            continue;
+         }
+         if (t.type == TokenType::OPENPARENTHESIS || t.type == TokenType::OPENBRACKET) {
+            depth++;
+            consume();
+            continue;
+         }
+         if (t.type == TokenType::CLOSEPARENTHESIS || t.type == TokenType::CLOSEBRACKET) {
+            if (depth > 0) {
+               depth--;
+               consume();
+               continue;
+            }
+            return true;
+         }
+         if (depth == 0 && t.type == TokenType::COMMA) {
+            return true;
+         }
+         consume();
       }
-      consume();
-      if (peek().type == TokenType::COMMA) consume();
+   };
+
+   // helper to detect ellipsis token tolerant to lexer differences
+   auto is_ellipsis_token = [&]() -> bool {
+      Token p = peek();
+      return p.type == TokenType::ELLIPSIS || p.value == "...";
+   };
+
+   bool ok = true;
+   bool seen_rest = false; // <<--- new: track if we've already seen a rest param
+
+   // Skip initial layout inside parens
+   while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+
+   // Empty parameter list
+   if (peek().type == TokenType::CLOSEPARENTHESIS) {
+      consume(); // consume ')'
+      // skip layout before checking LAMBDA
+      while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+         consume();
+      }
+      bool found = (peek().type == TokenType::LAMBDA);
+      position = saved;
+      return found;
    }
 
-   if (peek().type != TokenType::CLOSEPARENTHESIS) {
+   while (peek().type != TokenType::CLOSEPARENTHESIS &&
+          peek().type != TokenType::EOF_TOKEN) {
+
+      // skip layout between parameters
+      if (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+         consume();
+         continue;
+      }
+
+      // rest param '...name' (optional [...number])
+      if (is_ellipsis_token()) {
+         // If we've already seen a rest param, that's a syntax error.
+         if (seen_rest) {
+            // produce a helpful error pointing at the current token
+            throw std::runtime_error("Multiple rest parameters are not allowed at " + peek().loc.to_string());
+         }
+
+         consume(); // consume '...'
+         while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+         if (peek().type != TokenType::IDENTIFIER) { ok = false; break; }
+         consume(); // identifier
+
+         while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+         if (peek().type == TokenType::OPENBRACKET) {
+            consume();
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            if (peek().type != TokenType::NUMBER) { ok = false; break; }
+            consume();
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            if (peek().type != TokenType::CLOSEBRACKET) { ok = false; break; }
+            consume();
+         }
+
+         // rest must be last or followed only by a trailing comma before ')'
+         while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+         if (peek().type == TokenType::COMMA) {
+            // if comma and next isn't closeparen, it's not a valid lambda param list
+            if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
+               // throw with location because a parameter follows a rest -> syntax error
+               throw std::runtime_error("Parameter not allowed after rest parameter at " + peek_next().loc.to_string());
+            }
+            consume(); // consume trailing comma
+         }
+
+         // mark that we've seen the rest (so any further param tokens are invalid)
+         seen_rest = true;
+         continue;
+      }
+
+      // If we've already seen a rest parameter, any other parameter is an error.
+      if (seen_rest) {
+         throw std::runtime_error("Cannot have parameter after rest parameter at " + peek().loc.to_string());
+      }
+
+      // identifier param (maybe with default 'id = <expr>')
+      if (peek().type == TokenType::IDENTIFIER) {
+         consume(); // identifier
+         // allow layout between identifier and '='
+         while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+
+         if (peek().type == TokenType::ASSIGN) {
+            consume(); // consume '='
+            // allow layout after '='
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+
+            // scan the default expression until comma or ')', leaving them unconsumed
+            if (!skip_default_expr()) { ok = false; break; }
+
+            // Now explicitly handle the token that ended the default expression:
+            // accept either a comma (consume it and continue) or a close-paren (leave loop)
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            if (peek().type == TokenType::COMMA) {
+               consume(); // consume separator and continue to next param
+               // allow trailing comma before ')'
+               while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+               if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+               continue;
+            } else if (peek().type == TokenType::CLOSEPARENTHESIS) {
+               break; // end of param list
+            } else {
+               ok = false;
+               break;
+            }
+         }
+
+         // no default: handle comma separator if present
+         while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+         if (peek().type == TokenType::COMMA) {
+            consume();
+            // allow trailing comma before ')'
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+            continue;
+         }
+
+         // otherwise expect ')' or next param (handled by loop)
+         continue;
+      }
+
+      // anything else is invalid inside a lambda param-list
+      ok = false;
+      break;
+   }
+
+   // must end with ')'
+   if (!ok || peek().type != TokenType::CLOSEPARENTHESIS) {
       position = saved;
       return false;
    }
 
    consume(); // consume ')'
 
-   // check if next token is LAMBDA
-   if (peek().type == TokenType::LAMBDA) {
-      found = true;
+   // skip layout tokens between ')' and '=>'
+   while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+      consume();
    }
+
+   // check if next token is LAMBDA
+   bool found = (peek().type == TokenType::LAMBDA);
 
    position = saved; // restore
    return found;
 }
-
 
 // ---------- parse entry ----------
 std::unique_ptr < ProgramNode > Parser::parse() {

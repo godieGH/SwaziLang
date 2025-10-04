@@ -244,149 +244,169 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
    }
 
    if (auto fd = dynamic_cast<FunctionDeclarationNode*>(stmt)) {
-      auto persisted = std::make_shared < FunctionDeclarationNode > ();
-      persisted->name = fd->name;
-      persisted->parameters = fd->parameters;
-      persisted->token = fd->token;
-      persisted->body = std::move(fd->body);
+    // Persist a fresh FunctionDeclarationNode and clone parameter descriptors so
+    // the evaluator owns independent ParameterNode instances.
+    auto persisted = std::make_shared<FunctionDeclarationNode>();
+    persisted->token = fd->token;
+    persisted->name = fd->name;
 
-      auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
-      Environment::Variable var {
-         fn,
-         true
-      };
-      env->set(persisted->name, var);
-      return;
-   }
+    // Clone parameter descriptors (fd->parameters is vector<unique_ptr<ParameterNode>>)
+    persisted->parameters.reserve(fd->parameters.size());
+    for (const auto &p : fd->parameters) {
+        if (p) persisted->parameters.push_back(p->clone());
+        else persisted->parameters.push_back(nullptr);
+    }
 
+    // Move or clone the body into persisted (we can move here since fd is ephemeral)
+    persisted->body = std::move(fd->body);
+
+    // Construct FunctionValue from persisted declaration (FunctionValue ctor will
+    // clone the parameter descriptors into its own storage as required).
+    auto fn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, env, persisted->token);
+    Environment::Variable var{ fn, true };
+    env->set(persisted->name, var);
+    return;
+}
 
    if (auto cd = dynamic_cast<ClassDeclarationNode*>(stmt)) {
-      // create runtime class descriptor
-      auto classDesc = std::make_shared < ClassValue > ();
-      classDesc->token = cd->token;
-      classDesc->name = cd->name ? cd->name->name: "<anon>";
-      if (cd->body) {
-         classDesc->body = cd->body->clone();
-      }
+    // create runtime class descriptor
+    auto classDesc = std::make_shared < ClassValue > ();
+    classDesc->token = cd->token;
+    classDesc->name = cd->name ? cd->name->name: "<anon>";
+    if (cd->body) {
+       classDesc->body = cd->body->clone();
+    }
 
-      // resolve super if present
-      if (cd->superClass) {
-         // try to get super class from environment
-         EnvPtr walk = env;
-         bool found = false;
-         while (walk) {
-            auto it = walk->values.find(cd->superClass->name);
-            if (it != walk->values.end()) {
-               if (std::holds_alternative < ClassPtr > (it->second.value)) {
-                  classDesc->super = std::get < ClassPtr > (it->second.value);
-                  found = true;
-               } else {
-                  throw std::runtime_error("Super identifier '" + cd->superClass->name + "' is not a class at " + cd->superClass->token.loc.to_string());
-               }
-               break;
-            }
-            walk = walk->parent;
-         }
-         if (!found) throw std::runtime_error("Unknown super class '" + cd->superClass->name + "' at " + cd->superClass->token.loc.to_string());
-      }
+    // resolve super if present
+    if (cd->superClass) {
+       // try to get super class from environment
+       EnvPtr walk = env;
+       bool found = false;
+       while (walk) {
+          auto it = walk->values.find(cd->superClass->name);
+          if (it != walk->values.end()) {
+             if (std::holds_alternative < ClassPtr > (it->second.value)) {
+                classDesc->super = std::get < ClassPtr > (it->second.value);
+                found = true;
+             } else {
+                throw std::runtime_error("Super identifier '" + cd->superClass->name + "' is not a class at " + cd->superClass->token.loc.to_string());
+             }
+             break;
+          }
+          walk = walk->parent;
+       }
+       if (!found) throw std::runtime_error("Unknown super class '" + cd->superClass->name + "' at " + cd->superClass->token.loc.to_string());
+    }
 
-      // materialize static table: iterate properties and methods in the ClassBodyNode clone
-      if (classDesc->body) {
-         // properties
-         for (auto &p_uptr: classDesc->body->properties) {
-            if (!p_uptr) continue;
-            if (p_uptr->is_static) {
-               // evaluate initializer if present
-               Value initVal = std::monostate {};
-               if (p_uptr->value) initVal = evaluate_expression(p_uptr->value.get(), env);
-               PropertyDescriptor pd;
-               pd.value = initVal;
-               pd.is_private = p_uptr->is_private;
-               pd.is_locked = p_uptr->is_locked;
-               pd.is_readonly = false;
-               pd.token = p_uptr->token;
-               classDesc->static_table->properties[p_uptr->name] = std::move(pd);
-            }
-         }
+    // materialize static table: iterate properties and methods in the ClassBodyNode clone
+    if (classDesc->body) {
+       // properties
+       for (auto &p_uptr: classDesc->body->properties) {
+          if (!p_uptr) continue;
+          if (p_uptr->is_static) {
+             // evaluate initializer if present
+             Value initVal = std::monostate {};
+             if (p_uptr->value) initVal = evaluate_expression(p_uptr->value.get(), env);
+             PropertyDescriptor pd;
+             pd.value = initVal;
+             pd.is_private = p_uptr->is_private;
+             pd.is_locked = p_uptr->is_locked;
+             pd.is_readonly = false;
+             pd.token = p_uptr->token;
+             classDesc->static_table->properties[p_uptr->name] = std::move(pd);
+          }
+       }
 
-         // methods
-         for (auto &m_uptr: classDesc->body->methods) {
-            if (!m_uptr) continue;
-            if (m_uptr->is_static) {
-               // create a FunctionValue persisted from the ClassMethodNode
-               auto persisted = std::make_shared < FunctionDeclarationNode > ();
-               persisted->name = m_uptr->name;
-               persisted->parameters = m_uptr->params;
-               persisted->token = m_uptr->token;
+       // methods
+       for (auto &m_uptr: classDesc->body->methods) {
+          if (!m_uptr) continue;
+          if (m_uptr->is_static) {
+             // create a FunctionValue persisted from the ClassMethodNode
+             auto persisted = std::make_shared<FunctionDeclarationNode>();
+             persisted->name = m_uptr->name;
+             persisted->token = m_uptr->token;
 
-               // clone body statements properly (do NOT use vector in boolean context)
-               persisted->body.reserve(m_uptr->body.size());
-               for (const auto &s: m_uptr->body) {
-                  persisted->body.push_back(s ? s->clone(): nullptr);
-               }
+             // clone parameter descriptors from ClassMethodNode::params
+             persisted->parameters.reserve(m_uptr->params.size());
+             for (const auto &pp : m_uptr->params) {
+                if (pp) persisted->parameters.push_back(pp->clone());
+                else persisted->parameters.push_back(nullptr);
+             }
 
-               auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
-               PropertyDescriptor pd;
-               pd.value = fn;
-               pd.is_private = m_uptr->is_private;
-               pd.is_locked = m_uptr->is_locked;
-               pd.is_readonly = m_uptr->is_getter; // getter on static method makes it readonly
-               pd.token = m_uptr->token;
-               classDesc->static_table->properties[m_uptr->name] = std::move(pd);
-            }
-         }
+             // clone body statements properly (do NOT use vector in boolean context)
+             persisted->body.reserve(m_uptr->body.size());
+             for (const auto &s: m_uptr->body) {
+                persisted->body.push_back(s ? s->clone(): nullptr);
+             }
 
-      }
+             // construct FunctionValue (the FunctionValue ctor will clone these param descriptors into its own storage)
+             auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+             PropertyDescriptor pd;
+             pd.value = fn;
+             pd.is_private = m_uptr->is_private;
+             pd.is_locked = m_uptr->is_locked;
+             pd.is_readonly = m_uptr->is_getter; // getter on static method makes it readonly
+             pd.token = m_uptr->token;
+             classDesc->static_table->properties[m_uptr->name] = std::move(pd);
+          }
+       }
 
-      // store class descriptor into current env as a constant
-      Environment::Variable var;
-      var.value = classDesc;
-      var.is_constant = true;
-      env->set(classDesc->name, var);
-      return;
-   }
+    }
 
+    // store class descriptor into current env as a constant
+    Environment::Variable var;
+    var.value = classDesc;
+    var.is_constant = true;
+    env->set(classDesc->name, var);
+    return;
+}
    if (auto ds = dynamic_cast<DeleteStatementNode*>(stmt)) {
-      // evaluate the delete expression to call destructor and cleanup
-      // Evaluate inner expression which should be a DeleteExpressionNode
-      if (!ds->expr) return;
-      // Evaluate target object value
-      Value v = evaluate_expression(ds->expr->target.get(), env);
-      if (!std::holds_alternative < ObjectPtr > (v)) {
-         // nothing to delete or error depending on language semantics
-         return;
-      }
-      ObjectPtr obj = std::get < ObjectPtr > (v);
-      // try to find class meta on object: __class__ property
-      auto it = obj->properties.find("__class__");
-      if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
-         ClassPtr cls = std::get < ClassPtr > (it->second.value);
-         // find destructor in cls->body
-         if (cls->body) {
-            for (auto &m: cls->body->methods) {
-               if (m && m->is_destructor) {
-                  // create FunctionPtr and call it with receiver and no args
-                  auto persisted = std::make_shared < FunctionDeclarationNode > ();
-                  persisted->name = m->name;
-                  persisted->parameters = m->params;
-                  persisted->token = m->token;
-                  persisted->body.reserve(m->body.size());
-                  for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+    // evaluate the delete expression to call destructor and cleanup
+    // Evaluate inner expression which should be a DeleteExpressionNode
+    if (!ds->expr) return;
+    // Evaluate target object value
+    Value v = evaluate_expression(ds->expr->target.get(), env);
+    if (!std::holds_alternative < ObjectPtr > (v)) {
+       // nothing to delete or error depending on language semantics
+       return;
+    }
+    ObjectPtr obj = std::get < ObjectPtr > (v);
+    // try to find class meta on object: __class__ property
+    auto it = obj->properties.find("__class__");
+    if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
+       ClassPtr cls = std::get < ClassPtr > (it->second.value);
+       // find destructor in cls->body
+       if (cls->body) {
+          for (auto &m: cls->body->methods) {
+             if (m && m->is_destructor) {
+                // create FunctionPtr and call it with receiver and no args
+                auto persisted = std::make_shared<FunctionDeclarationNode>();
+                persisted->name = m->name;
+                persisted->token = m->token;
 
-                  auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+                // clone parameter descriptors from method node
+                persisted->parameters.reserve(m->params.size());
+                for (const auto &pp : m->params) {
+                   if (pp) persisted->parameters.push_back(pp->clone());
+                   else persisted->parameters.push_back(nullptr);
+                }
 
-                  // call with receiver bound
-                  call_function_with_receiver(fn, obj, {}, m->token);
-                  break;
-               }
-            }
-         }
-      }
-      // Cleanup: remove properties so object is effectively destroyed
-      obj->properties.clear();
-      return;
-   }
+                persisted->body.reserve(m->body.size());
+                for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
 
+                auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+
+                // call with receiver bound
+                call_function_with_receiver(fn, obj, {}, m->token);
+                break;
+             }
+          }
+       }
+    }
+    // Cleanup: remove properties so object is effectively destroyed
+    obj->properties.clear();
+    return;
+}
 
 
 
