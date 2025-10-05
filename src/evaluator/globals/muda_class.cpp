@@ -572,7 +572,53 @@ void init_muda_class(EnvPtr env) {
     add_forwarder("sekunde");
     add_forwarder("millis");
     add_forwarder("zone");
-    add_forwarder("fmt", {"fmt", "zone"});
+    // custom forwarder for fmt with default zone = "UTC"
+{
+    auto m = std::make_unique<ClassMethodNode>();
+    m->name = "fmt";
+    m->is_locked = true;
+    m->is_private = false;
+
+    // fmt parameter (required)
+    auto p_fmt = std::make_unique<ParameterNode>();
+    p_fmt->token = Token{};
+    p_fmt->name = "fmt";
+    p_fmt->is_rest = false;
+    p_fmt->rest_required_count = 0;
+    p_fmt->defaultValue = nullptr;
+    m->params.push_back(std::move(p_fmt));
+
+    // zone parameter (optional, default "UTC")
+    auto p_zone = std::make_unique<ParameterNode>();
+    p_zone->token = Token{};
+    p_zone->name = "zone";
+    p_zone->is_rest = false;
+    p_zone->rest_required_count = 0;
+    auto defZone = std::make_unique<StringLiteralNode>();
+    defZone->value = "UTC";
+    p_zone->defaultValue = std::move(defZone);
+    m->params.push_back(std::move(p_zone));
+
+    // call Muda_native_fmt(this, fmt, zone)
+    auto call = std::make_unique<CallExpressionNode>();
+    call->callee = std::make_unique<IdentifierNode>();
+    static_cast<IdentifierNode*>(call->callee.get())->name = std::string("Muda_native_fmt");
+
+    call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+
+    auto idfmt = std::make_unique<IdentifierNode>();
+    idfmt->name = "fmt";
+    call->arguments.push_back(std::move(idfmt));
+
+    auto idzone = std::make_unique<IdentifierNode>();
+    idzone->name = "zone";
+    call->arguments.push_back(std::move(idzone));
+
+    auto ret = std::make_unique<ReturnStatementNode>();
+    ret->value = std::move(call);
+    m->body.push_back(std::move(ret));
+    classDesc->body->methods.push_back(std::move(m));
+}
     add_forwarder("ms");
     add_forwarder("iso");
     add_forwarder("object");

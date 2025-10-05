@@ -60,51 +60,104 @@ std::string format_time_from_ms(double ms, const std::string& fmt, const std::st
     double adjusted_ms = ms + static_cast<double>(offset) * 1000.0; // show in that zone
     std::tm t = tm_from_ms(adjusted_ms);
 
+    // millisecond part (absolute modulo, handle negatives)
+    long long msll = static_cast<long long>(std::llround(adjusted_ms));
+    int milli = static_cast<int>(std::llabs(msll % 1000LL));
+    int year = 1900 + t.tm_year;
+    int month = t.tm_mon + 1;
+    int day = t.tm_mday;
+    int hour = t.tm_hour;
+    int minute = t.tm_min;
+    int second = t.tm_sec;
+    int wday = t.tm_wday;
+
     std::ostringstream out;
     size_t i = 0;
     while (i < fmt.size()) {
-        // try longer tokens first
+        // escaping with backslash: \X prints X literally
+        if (fmt[i] == '\\' && i + 1 < fmt.size()) {
+            out << fmt[i + 1];
+            i += 2;
+            continue;
+        }
+
+        // prefer longest tokens first
+        // 4-char tokens
         if (i + 4 <= fmt.size()) {
             std::string s4 = fmt.substr(i, 4);
-            if (s4 == "YYYY") { out << (1900 + t.tm_year); i += 4; continue; }
+            if (s4 == "YYYY") { out << year; i += 4; continue; }
             if (s4 == "dddd") { std::ostringstream tmp; tmp << std::put_time(&t, "%A"); out << tmp.str(); i += 4; continue; }
             if (s4 == "MMMM") { std::ostringstream tmp; tmp << std::put_time(&t, "%B"); out << tmp.str(); i += 4; continue; }
         }
+
+        // 3-char tokens
         if (i + 3 <= fmt.size()) {
             std::string s3 = fmt.substr(i, 3);
             if (s3 == "MMM") { std::ostringstream tmp; tmp << std::put_time(&t, "%b"); out << tmp.str(); i += 3; continue; }
+            if (s3 == "ddd") { std::ostringstream tmp; tmp << std::put_time(&t, "%a"); out << tmp.str(); i += 3; continue; }
+            if (s3 == "SSS") { out << std::setw(3) << std::setfill('0') << milli; i += 3; continue; }
         }
+
+        // 2-char tokens
         if (i + 2 <= fmt.size()) {
             std::string s2 = fmt.substr(i, 2);
-            if (s2 == "MM") { out << std::setw(2) << std::setfill('0') << (t.tm_mon + 1); i += 2; continue; }
-            if (s2 == "DD") { out << std::setw(2) << std::setfill('0') << t.tm_mday; i += 2; continue; }
-            if (s2 == "HH") { out << std::setw(2) << std::setfill('0') << t.tm_hour; i += 2; continue; }
-            if (s2 == "hh") { int h = t.tm_hour % 12; if (h == 0) h = 12; out << std::setw(2) << std::setfill('0') << h; i += 2; continue; }
-            if (s2 == "mm") { out << std::setw(2) << std::setfill('0') << t.tm_min; i += 2; continue; }
-            if (s2 == "ss") { out << std::setw(2) << std::setfill('0') << t.tm_sec; i += 2; continue; }
-            if (s2 == "Do") { out << t.tm_mday << ordinal_suffix(t.tm_mday); i += 2; continue; }
+            if (s2 == "YY") { out << std::setw(2) << std::setfill('0') << (year % 100); i += 2; continue; }
+            if (s2 == "MM") { out << std::setw(2) << std::setfill('0') << month; i += 2; continue; }
+            if (s2 == "DD") { out << std::setw(2) << std::setfill('0') << day; i += 2; continue; }
+            if (s2 == "HH") { out << std::setw(2) << std::setfill('0') << hour; i += 2; continue; }
+            if (s2 == "hh") { int hh = hour % 12; if (hh == 0) hh = 12; out << std::setw(2) << std::setfill('0') << hh; i += 2; continue; }
+            if (s2 == "mm") { out << std::setw(2) << std::setfill('0') << minute; i += 2; continue; }
+            if (s2 == "ss") { out << std::setw(2) << std::setfill('0') << second; i += 2; continue; }
+            if (s2 == "Do") { out << day << ordinal_suffix(day); i += 2; continue; }
+            if (s2 == "ZZ") { // +HHMM
+                int off = parse_offset_seconds(zone);
+                int sign = off >= 0 ? 1 : -1;
+                int aoff = std::abs(off);
+                int oh = aoff / 3600;
+                int om = (aoff % 3600) / 60;
+                std::ostringstream z; z << (sign >= 0 ? "+" : "-")
+                                       << std::setw(2) << std::setfill('0') << oh
+                                       << std::setw(2) << std::setfill('0') << om;
+                out << z.str();
+                i += 2;
+                continue;
+            }
         }
+
+        // 1-char tokens
         char c = fmt[i];
-        if (c == 'H') { out << t.tm_hour; ++i; continue; }
-        if (c == 'h') { int hh = t.tm_hour % 12; if (hh == 0) hh = 12; out << hh; ++i; continue; }
-        if (c == 'm') { out << t.tm_min; ++i; continue; }
-        if (c == 's') { out << t.tm_sec; ++i; continue; }
-        if (c == 'S') { out << "000"; ++i; continue; } // milliseconds placeholder (no stored ms in tm)
-        if (c == 'Z') {
+        if (c == 'Y') { out << year; ++i; continue; }
+        if (c == 'M') { out << month; ++i; continue; }
+        if (c == 'D') { out << day; ++i; continue; }
+        if (c == 'H') { out << hour; ++i; continue; }
+        if (c == 'h') { int hh = hour % 12; if (hh == 0) hh = 12; out << hh; ++i; continue; }
+        if (c == 'm') { out << minute; ++i; continue; }
+        if (c == 's') { out << second; ++i; continue; }
+        if (c == 'S') { // single-digit fractional seconds (hundreds)
+            // S -> first digit of milliseconds, SS -> two digits, SSS -> three digits handled above
+            out << (milli / 100); ++i; continue;
+        }
+        if (c == 'a') { out << (hour < 12 ? "am" : "pm"); ++i; continue; }
+        if (c == 'A') { out << (hour < 12 ? "AM" : "PM"); ++i; continue; }
+        if (c == 'Z') { // +HH:MM
             int off = parse_offset_seconds(zone);
             int oh = std::abs(off) / 3600;
             int om = (std::abs(off) % 3600) / 60;
-            std::ostringstream z; z << (off >= 0 ? "+" : "-") << std::setw(2) << std::setfill('0') << oh << ":" << std::setw(2) << std::setfill('0') << om;
+            std::ostringstream z; z << (off >= 0 ? "+" : "-")
+                                   << std::setw(2) << std::setfill('0') << oh << ":" << std::setw(2) << std::setfill('0') << om;
             out << z.str();
             ++i;
             continue;
         }
+        if (c == 'x') { out << msll; ++i; continue; } // unix ms
+        if (c == 'X') { out << (msll / 1000); ++i; continue; } // unix seconds
+
+        // default: literal char
         out << c;
         ++i;
     }
     return out.str();
 }
-
 // Parse a date string. If fmt provided, try to parse with limited supported patterns.
 // If zone provided, interpret parsed local time in that zone (subtract offset to obtain UTC).
 double parse_time_to_ms(const std::string& s, const std::string& fmt, const std::string& zone) {
