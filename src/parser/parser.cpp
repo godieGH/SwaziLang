@@ -478,7 +478,16 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
       consume(); // consume 'muundo'
       return parse_class_declaration();
    }
+   
+   if (p.type == TokenType::TUMIA) {
+      consume(); // consume 'tumia'
+      return parse_import_declaration();
+   }
 
+   if (p.type == TokenType::RUHUSU) {
+      consume(); // consume 'ruhusu'
+      return parse_export_declaration();
+   }
 
    if (p.type == TokenType::CHAGUA) {
       consume(); // consume 'chagua'

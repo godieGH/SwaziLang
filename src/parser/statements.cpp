@@ -70,6 +70,244 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
 }
 
 
+// --- REPLACE existing Parser::parse_import_declaration() and Parser::parse_export_declaration()
+// with these more layout-tolerant implementations that accept NEWLINE/INDENT/DEDENT before '}'
+// and allow trailing commas and dedent-then-close style used by the indent grammar.
+
+std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
+    // 'tumia' token already consumed by caller; tokens[position-1] is the 'tumia' token.
+    Token tumiaTok = tokens[position - 1];
+
+    auto node = std::make_unique<ImportDeclarationNode>();
+    node->token = tumiaTok;
+
+    // Helper to consume optional trailing semicolon
+    auto maybe_consume_semicolon = [&]() {
+        if (peek().type == TokenType::SEMICOLON) consume();
+    };
+
+    // Helper: skip formatting tokens
+    auto skip_formatting = [&]() {
+        while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+    };
+
+    // Case A: side-effect only import: tumia "path"
+    if (peek().type == TokenType::STRING || peek().type == TokenType::SINGLE_QUOTED_STRING) {
+        Token pathTok = consume();
+        node->side_effect_only = true;
+        node->module_path = pathTok.value;
+        node->module_token = pathTok;
+        maybe_consume_semicolon();
+        return node;
+    }
+
+    // Case B: tumia * kutoka "path"
+    if (peek().type == TokenType::STAR) {
+        Token star = consume();
+        node->import_all = true;
+        expect(TokenType::KUTOKA, "Expected 'kutoka' after '*' in import");
+        expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+        Token pathTok = tokens[position - 1];
+        node->module_path = pathTok.value;
+        node->module_token = pathTok;
+        maybe_consume_semicolon();
+        return node;
+    }
+
+    // Case C: tumia { a, b as c } kutoka "path"
+    if (peek().type == TokenType::OPENBRACE) {
+        consume(); // '{'
+        skip_formatting();
+
+        // empty import list {}
+        if (peek().type == TokenType::CLOSEBRACE) {
+            consume();
+            expect(TokenType::KUTOKA, "Expected 'kutoka' after import specifiers");
+            expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+            Token pathTok = tokens[position - 1];
+            node->module_path = pathTok.value;
+            node->module_token = pathTok;
+            maybe_consume_semicolon();
+            return node;
+        }
+
+        while (true) {
+            skip_formatting();
+
+            // allow early close when layout inserted a DEDENT/newline before '}'
+            if (peek().type == TokenType::CLOSEBRACE) break;
+
+            expect(TokenType::IDENTIFIER, "Expected identifier in import specifier");
+            Token impTok = tokens[position - 1];
+            std::string imported = impTok.value;
+            std::string local = imported;
+
+            // optional alias: 'kama' IDENT
+            skip_formatting();
+            if (peek().type == TokenType::KAMA) {
+                consume(); // 'kama'
+                skip_formatting();
+                expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' in import alias");
+                Token localTok = tokens[position - 1];
+                local = localTok.value;
+            }
+
+            auto spec = std::make_unique<ImportSpecifier>();
+            spec->imported = imported;
+            spec->local = local;
+            spec->token = impTok;
+            node->specifiers.push_back(std::move(spec));
+
+            skip_formatting();
+
+            if (peek().type == TokenType::COMMA) {
+                consume();
+                // allow trailing comma before close (skip formatting then allow close)
+                skip_formatting();
+                if (peek().type == TokenType::CLOSEBRACE) break;
+                continue;
+            }
+
+            // If next is closebrace or layout that eventually leads to closebrace, continue loop to detect it
+            if (peek().type == TokenType::CLOSEBRACE) break;
+
+            // otherwise break and let expect(CLOSEBRACE) validate
+            break;
+        }
+
+        // Accept closing brace possibly after layout tokens
+        skip_formatting();
+        expect(TokenType::CLOSEBRACE, "Expected '}' after import specifiers");
+        // require 'kutoka' and string path
+        skip_formatting();
+        expect(TokenType::KUTOKA, "Expected 'kutoka' after import specifiers");
+        skip_formatting();
+        expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+        Token pathTok = tokens[position - 1];
+        node->module_path = pathTok.value;
+        node->module_token = pathTok;
+        maybe_consume_semicolon();
+        return node;
+    }
+
+    // Case D: default/module binding: tumia localName [kama alias] kutoka "path"
+    if (peek().type == TokenType::IDENTIFIER) {
+        Token idTok = consume();
+        std::string imported = "default"; // by convention: single identifier imports module default/object
+        std::string local = idTok.value;
+
+        // optional alias: tumia original kama alias  (rare; support either exported name or default)
+        skip_formatting();
+        if (peek().type == TokenType::KAMA) {
+            consume(); // 'kama'
+            skip_formatting();
+            expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
+            Token aliasTok = tokens[position - 1];
+            local = aliasTok.value;
+        }
+
+        // require 'kutoka' and module path
+        skip_formatting();
+        expect(TokenType::KUTOKA, "Expected 'kutoka' after import target");
+        skip_formatting();
+        expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+        Token pathTok = tokens[position - 1];
+
+        auto spec = std::make_unique<ImportSpecifier>();
+        spec->imported = imported;
+        spec->local = local;
+        spec->token = idTok;
+        node->specifiers.push_back(std::move(spec));
+        node->module_path = pathTok.value;
+        node->module_token = pathTok;
+        maybe_consume_semicolon();
+        return node;
+    }
+
+    // Otherwise it's a syntax error
+    Token bad = peek();
+    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": invalid import syntax after 'tumia'");
+}
+
+std::unique_ptr<StatementNode> Parser::parse_export_declaration() {
+    // 'ruhusu' token already consumed by caller
+    Token ruhusuTok = tokens[position - 1];
+
+    if (saw_export) {
+        throw std::runtime_error("Parse error at " + ruhusuTok.loc.to_string() + ": multiple 'ruhusu' (export) declarations are not allowed");
+    }
+
+    auto node = std::make_unique<ExportDeclarationNode>();
+    node->token = ruhusuTok;
+
+    // Helper to skip formatting tokens
+    auto skip_formatting = [&]() {
+        while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+    };
+
+    // Two main forms:
+    //  - ruhusu IDENT  (default export of identifier)
+    //  - ruhusu { a, b, c }  (named exports list)
+    skip_formatting();
+    if (peek().type == TokenType::IDENTIFIER) {
+        Token idTok = consume();
+        node->is_default = true;
+        node->single_identifier = idTok.value;
+        saw_export = true;
+        if (peek().type == TokenType::SEMICOLON) consume();
+        return node;
+    }
+
+    if (peek().type == TokenType::OPENBRACE) {
+        consume(); // '{'
+        skip_formatting();
+
+        // empty export list {}
+        if (peek().type == TokenType::CLOSEBRACE) {
+            consume();
+            saw_export = true;
+            if (peek().type == TokenType::SEMICOLON) consume();
+            return node;
+        }
+
+        while (true) {
+            skip_formatting();
+
+            // allow early close when layout inserted a DEDENT/newline before '}'
+            if (peek().type == TokenType::CLOSEBRACE) break;
+
+            expect(TokenType::IDENTIFIER, "Expected identifier in export list");
+            Token idTok = tokens[position - 1];
+            node->names.push_back(idTok.value);
+
+            skip_formatting();
+            if (peek().type == TokenType::COMMA) {
+                consume();
+                // allow trailing comma before close
+                skip_formatting();
+                if (peek().type == TokenType::CLOSEBRACE) break;
+                continue;
+            } else {
+                // if next is CLOSEBRACE, loop will exit; otherwise break and let expect validate
+                if (peek().type == TokenType::CLOSEBRACE) break;
+                // allow layout -> next iteration will handle it
+                continue;
+            }
+        }
+
+        skip_formatting();
+        expect(TokenType::CLOSEBRACE, "Expected '}' after export list");
+        saw_export = true;
+        if (peek().type == TokenType::SEMICOLON) consume();
+        return node;
+    }
+
+    Token bad = peek();
+    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": expected identifier or '{' after 'ruhusu'");
+}
+
+
+
 std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
     // muundo has already been consumed by caller
     expect(TokenType::IDENTIFIER, "Expected class name after 'muundo' keyword.");
@@ -216,9 +454,6 @@ std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
 
     return std::unique_ptr<StatementNode>(std::move(classNode));
 }
-
-
-
 
 std::unique_ptr < StatementNode > Parser::parse_print_statement(bool newline) {
    // capture the keyword token (CHAPISHA / ANDIKA) which was consumed by caller

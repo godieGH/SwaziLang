@@ -212,7 +212,12 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"si", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
-        
+
+        // module / import / export
+        {"tumia", TokenType::TUMIA},   // import
+        {"kutoka", TokenType::KUTOKA}, // from
+        {"ruhusu", TokenType::RUHUSU}, // export
+
         //calsses keywords
         {"muundo", TokenType::MUUNDO},
         {"rithi", TokenType::RITHI},
@@ -223,20 +228,20 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         // control-flow keywords
         {"kama", TokenType::KAMA},             // if
         {"vinginevyo", TokenType::VINGINEVYO}, // else
-        
+
         {"jaribu", TokenType::JARIBU},
         {"makosa", TokenType::MAKOSA},
         {"kisha", TokenType::KISHA},
 
         // loop-related keywords
-        {"kwa", TokenType::FOR},              // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...
-        {"kila", TokenType::KILA},              // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...
-        {"katika", TokenType::KATIKA},              // for-like loop with parentheses: kwa(a=0; a<6; a++) { ... } or kwa(a=0; a<6; a++): <INDENT> ...
-        {"wakati", TokenType::WHILE},          // while style: wakati a < 6: ...  or wakati a < 8 { ... }
-        {"fanya", TokenType::DOWHILE},         // do-while: fanya: <INDENT> ... wakati cond
-        {"simama", TokenType::SIMAMA},         // do-while: fanya: <INDENT> ... wakati cond
-        {"endelea", TokenType::ENDELEA},         // do-while: fanya: <INDENT> ... wakati cond
-        
+        {"kwa", TokenType::FOR},              // for-like loop
+        {"kila", TokenType::KILA},
+        {"katika", TokenType::KATIKA},
+        {"wakati", TokenType::WHILE},
+        {"fanya", TokenType::DOWHILE},
+        {"simama", TokenType::SIMAMA},
+        {"endelea", TokenType::ENDELEA},
+
         {"null", TokenType::NULL_LITERAL}       // null token
     };
 

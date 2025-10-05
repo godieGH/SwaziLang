@@ -168,6 +168,29 @@ class Evaluator {
    
    ClassPtr current_class_context = nullptr;
    
+  
+// Module loader records for caching and circular dependency handling.
+struct ModuleRecord {
+    enum class State { Loading, Loaded };
+    State state = State::Loading;
+    ObjectPtr exports = nullptr; // object holding exported properties
+    EnvPtr module_env = nullptr; // environment used while evaluating module
+    std::string path;            // canonical filesystem path used as cache key
+};
+
+ // map canonical module path -> ModuleRecord (shared_ptr)
+ std::unordered_map<std::string, std::shared_ptr<ModuleRecord>> module_cache;
+
+ // Import API: load module by specifier (relative path like "./file" or "./dir/file.sl"),
+ // returns the module's exports object (ObjectPtr). 'requesterTok' is used to resolve
+ // relative paths with respect to the importing file; for REPL/unknown filename use cwd.
+ ObjectPtr import_module(const std::string &module_spec, const Token &requesterTok, EnvPtr requesterEnv);
+
+ // Helper: resolve a module specifier to an existing filesystem path (tries spec, then .sl/.swz)
+ std::string resolve_module_path(const std::string &module_spec, const std::string &requester_filename, const Token &tok);
+   
+   
+   
    // Expression & statement evaluators. Pass the environment explicitly for lexical scoping.
    Value evaluate_expression(ExpressionNode* expr, EnvPtr env);
    Value call_function(FunctionPtr fn, const std::vector < Value>& args, const Token& callToken);

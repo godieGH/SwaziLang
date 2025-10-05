@@ -45,7 +45,96 @@ static std::string to_property_key(const Value &v) {
 // ----------------- Statement evaluation -----------------
 void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return, LoopControl* lc) {
    if (!stmt) return;
+   
+   
+   // --- MODIFY: add handling for ImportDeclarationNode near top of evaluate_statement ---
+// Insert this block near the other "if (auto vd = ...)" and before assignment handling.
+// It handles import declarations at runtime by calling Evaluator::import_module and binding names.
 
+   if (auto imp = dynamic_cast<ImportDeclarationNode*>(stmt)) {
+      // Load the module (may return an exports object even for circular deps)
+      ObjectPtr exports = import_module(imp->module_path, imp->module_token, env);
+
+      // If side-effect-only with no specifiers (tumia "./file.sl"), bring all exported names into current env
+      if (imp->side_effect_only && imp->specifiers.empty() && !imp->import_all) {
+         if (!exports) return;
+         for (const auto &kv : exports->properties) {
+            const std::string &name = kv.first;
+            const PropertyDescriptor &pd = kv.second;
+            Environment::Variable var;
+            var.value = pd.value;
+            var.is_constant = false;
+            env->set(name, var);
+         }
+         return;
+      }
+
+      // If import_all (tumia * kutoka "./file.sl"), bring all exported names under their own names into current env
+      if (imp->import_all) {
+         if (!exports) return;
+         for (const auto &kv : exports->properties) {
+            const std::string &name = kv.first;
+            const PropertyDescriptor &pd = kv.second;
+            Environment::Variable var;
+            var.value = pd.value;
+            var.is_constant = false;
+            env->set(name, var);
+         }
+         return;
+      }
+
+      // Otherwise named/default specifiers
+      for (const auto &sptr : imp->specifiers) {
+         if (!sptr) continue;
+         std::string requested = sptr->imported; // "default" for default import
+         std::string local = sptr->local;
+
+         Value v = std::monostate {};
+
+         if (requested == "default") {
+             // Default-style import semantics:
+             // - If module has an explicit "default" export -> use it.
+             // - Otherwise bind the import name to the module's exports object (so tumia ddd from "./mod"
+             //   gives you an object of the named exports).
+             if (exports) {
+                 auto it = exports->properties.find("default");
+                 if (it != exports->properties.end()) {
+                     v = it->second.value;
+                 } else {
+                     // no explicit default -> bind the entire exports object
+                     v = exports;
+                 }
+             } else {
+                 v = std::monostate {};
+             }
+         } else {
+             // Named import: look up the export by name; missing -> undefined
+             if (exports) {
+                 auto it = exports->properties.find(requested);
+                 if (it != exports->properties.end()) {
+                     v = it->second.value;
+                 } else {
+                     v = std::monostate {};
+                 }
+             }
+         }
+
+         Environment::Variable var;
+         var.value = v;
+         var.is_constant = false;
+         env->set(local, var);
+      }
+
+      return;
+   }
+// --- ALSO ADD: a lightweight no-op for ExportDeclarationNode so top-level evaluation won't crash.
+// Modules are handled by import_module which explicitly processes ExportDeclarationNodes;
+// but if an ExportDeclarationNode appears in evaluate_statement, ignore it (no-op).
+   if (auto ed = dynamic_cast<ExportDeclarationNode*>(stmt)) {
+       // no-op at runtime; module loader collects exports itself.
+       return;
+   }
+   
    if (auto vd = dynamic_cast<VariableDeclarationNode*>(stmt)) {
     Value val = std::monostate {};
     if (vd->value) val = evaluate_expression(vd->value.get(), env);

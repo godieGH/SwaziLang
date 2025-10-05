@@ -49,7 +49,11 @@ class Parser {
    std::unique_ptr<ExpressionNode> parse_object_expression();
    std::unique_ptr<ExpressionNode> parse_tabia_method();
    std::unique_ptr<ExpressionNode> parse_lambda();
-
+   
+  std::unique_ptr<StatementNode> parse_import_declaration();
+  std::unique_ptr<StatementNode> parse_export_declaration();
+  
+  bool saw_export = false;
    
    // statements
    std::unique_ptr < StatementNode > parse_statement();

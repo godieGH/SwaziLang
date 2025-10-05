@@ -18,6 +18,9 @@ enum class TokenType {
     RUDISHA,
     SIMAMA,
     ENDELEA,
+    TUMIA,     // 'tumia' (import)
+    KUTOKA,    // 'kutoka' (from)
+    RUHUSU,    // 'ruhusu' (export)
 
     // -----------------------
     // Control-flow (if / else / switches / guards)

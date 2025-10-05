@@ -1181,6 +1181,75 @@ struct TryCatchNode : public StatementNode {
     }
 };
 
+
+
+// Represents a single import specifier: imported name from module => local binding name
+// Examples:
+//   tumia { app } kutoka "./file"      -> imported = "app", local = "app"
+//   tumia { app kama fn } kutoka "./file" -> imported = "app", local = "fn"
+//   tumia app kutoka "./file"         -> imported = "default", local = "app"  (treat single IDENT as default import)
+//   tumia fff kutoka "./file"         -> imported = "default", local = "fff"
+struct ImportSpecifier {
+    std::string imported; // name exported by module (or "default" for default import)
+    std::string local;    // local binding name in this module
+    Token token;          // token for error reporting (usually identifier token)
+};
+
+// Import declaration: tumia ... kutoka "path"
+struct ImportDeclarationNode : public StatementNode {
+    // specifiers empty + side_effect_only == true  -> tumia "./mod"
+    // import_all == true                           -> tumia * kutoka "./mod"
+    std::vector<std::unique_ptr<ImportSpecifier>> specifiers;
+    bool import_all = false;
+    bool side_effect_only = false;
+    // module path (string literal token value). Store token so we can report errors/locations.
+    std::string module_path;
+    Token module_token;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ImportDeclarationNode>();
+        n->token = token;
+        n->module_path = module_path;
+        n->module_token = module_token;
+        n->import_all = import_all;
+        n->side_effect_only = side_effect_only;
+        n->specifiers.reserve(specifiers.size());
+        for (const auto &s : specifiers) {
+            if (!s) { n->specifiers.push_back(nullptr); continue; }
+            auto ns = std::make_unique<ImportSpecifier>();
+            ns->imported = s->imported;
+            ns->local = s->local;
+            ns->token = s->token;
+            n->specifiers.push_back(std::move(ns));
+        }
+        return n;
+    }
+};
+
+// Export declaration: ruhusu ...
+// Supports forms:
+//   ruhusu IDENT          -> export default IDENT   (or named default-ish; parser can decide semantics)
+//   ruhusu { a, b, c }    -> export named list
+// Only one ruhusu per file will be enforced by parser (parser will check placement rules).
+struct ExportDeclarationNode : public StatementNode {
+    // If single_identifier non-empty and is_default true -> export default single_identifier
+    bool is_default = false;
+    std::string single_identifier; // name being exported (for 'ruhusu app' style)
+    std::vector<std::string> names; // list of exported names for 'ruhusu { a, b }'
+    Token token; // for location
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ExportDeclarationNode>();
+        n->token = token;
+        n->is_default = is_default;
+        n->single_identifier = single_identifier;
+        n->names = names;
+        return n;
+    }
+};
+
+
+
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;
