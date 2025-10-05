@@ -24,6 +24,10 @@ class Parser {
    bool is_lambda_ahead();
    
    std::unique_ptr<ExpressionNode> parse_condition();
+   
+   std::unique_ptr<ExpressionNode> parse_pattern();
+   std::unique_ptr<ExpressionNode> parse_array_pattern();
+   std::unique_ptr<ExpressionNode> parse_object_pattern();
 
    // expression parsing (precedence chain)
    std::unique_ptr < ExpressionNode > parse_expression();

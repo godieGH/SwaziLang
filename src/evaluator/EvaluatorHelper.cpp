@@ -261,6 +261,104 @@ void Evaluator::set_object_property(ObjectPtr obj, const std::string &key, const
 }
 
 
+void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& value, EnvPtr env, bool is_constant, const Token& declToken) {
+    if (!pattern) return;
+
+    // Array pattern
+    if (auto arrPat = dynamic_cast<ArrayPatternNode*>(pattern)) {
+        // RHS must be an array
+        if (!std::holds_alternative<ArrayPtr>(value)) {
+            throw std::runtime_error("Cannot destructure non-array value at " + declToken.loc.to_string());
+        }
+        ArrayPtr src = std::get<ArrayPtr>(value);
+        size_t srcLen = src ? src->elements.size() : 0;
+
+        for (size_t i = 0; i < arrPat->elements.size(); ++i) {
+            auto &elem = arrPat->elements[i];
+            // hole
+            if (!elem) {
+                // leave hole as undefined / skip
+                continue;
+            }
+            // rest element (SpreadElementNode)
+            if (auto spread = dynamic_cast<SpreadElementNode*>(elem.get())) {
+                // argument should evaluate to an IdentifierNode (target)
+                if (!spread->argument) {
+                    throw std::runtime_error("Invalid rest target in array pattern at " + spread->token.loc.to_string());
+                }
+                auto idTarget = dynamic_cast<IdentifierNode*>(spread->argument.get());
+                if (!idTarget) {
+                    throw std::runtime_error("Only identifier allowed as rest target in array pattern at " + spread->token.loc.to_string());
+                }
+                // collect remaining elements starting at current index
+                auto restArr = std::make_shared<ArrayValue>();
+                restArr->elements.reserve((i < srcLen) ? (srcLen - i) : 0);
+                for (size_t k = i; k < srcLen; ++k) {
+                    restArr->elements.push_back(src->elements[k]);
+                }
+                Environment::Variable var;
+                var.value = restArr;
+                var.is_constant = is_constant;
+                env->set(idTarget->name, var);
+                // rest must be last; ignore any further pattern slots
+                break;
+            }
+
+            // normal identifier element
+            if (auto id = dynamic_cast<IdentifierNode*>(elem.get())) {
+                Value v = std::monostate {};
+                if (i < srcLen && src) v = src->elements[i];
+                Environment::Variable var;
+                var.value = v;
+                var.is_constant = is_constant;
+                env->set(id->name, var);
+                continue;
+            }
+
+            // spread could also be represented as an Identifier wrapped differently, but we only support the above
+            throw std::runtime_error("Unsupported element in array pattern at " + arrPat->token.loc.to_string());
+        }
+        return;
+    }
+
+    // Object pattern
+    if (auto objPat = dynamic_cast<ObjectPatternNode*>(pattern)) {
+        if (!std::holds_alternative<ObjectPtr>(value)) {
+            throw std::runtime_error("Cannot destructure non-object value at " + declToken.loc.to_string());
+        }
+        ObjectPtr src = std::get<ObjectPtr>(value);
+
+        for (const auto &propPtr : objPat->properties) {
+            if (!propPtr) continue;
+            const std::string &key = propPtr->key;
+            // target should be an IdentifierNode (we support only simple renames/shorthand)
+            auto targetId = dynamic_cast<IdentifierNode*>(propPtr->value.get());
+            if (!targetId) {
+                throw std::runtime_error("Only identifier targets supported in object pattern at " + propPtr->value->token.loc.to_string());
+            }
+
+            // Use existing getter to respect privacy/getters (get_object_property is a member)
+            Value v = std::monostate {};
+            if (src) {
+                try {
+                    v = get_object_property(src, key, env);
+                } catch (...) {
+                    // if getter throws, rethrow with context
+                    throw;
+                }
+            }
+            Environment::Variable var;
+            var.value = v;
+            var.is_constant = is_constant;
+            env->set(targetId->name, var);
+        }
+        return;
+    }
+
+    throw std::runtime_error("Unsupported pattern node in destructuring at " + pattern->token.loc.to_string());
+}
+
+
 // Tune these to control "small object" inline behavior:
 static constexpr int INLINE_MAX_PROPS = 3;
 static constexpr int INLINE_MAX_LEN = 80;

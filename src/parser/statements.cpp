@@ -9,7 +9,7 @@
 #include "debugging/outputTry.hpp"
 
 
-std::unique_ptr < StatementNode > Parser::parse_variable_declaration() {
+std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
    bool is_constant = false;
 
    if (peek().type == TokenType::CONSTANT) {
@@ -17,15 +17,33 @@ std::unique_ptr < StatementNode > Parser::parse_variable_declaration() {
       is_constant = true;
    }
 
-   expect(TokenType::IDENTIFIER, "Expected identifier after 'data'");
-   Token idTok = tokens[position - 1];
-   std::string name = idTok.value;
+   // After 'data' we allow either:
+   //   IDENTIFIER                    -> simple var
+   //   OPENBRACKET '[' ... ']'       -> array destructuring
+   //   OPENBRACE   '{' ... '}'       -> object destructuring
+   std::unique_ptr<ExpressionNode> pattern = nullptr;
+   std::string name;
+   Token idTok;
 
-   std::unique_ptr < ExpressionNode > value = nullptr;
+   if (peek().type == TokenType::IDENTIFIER) {
+      consume();
+      idTok = tokens[position - 1];
+      name = idTok.value;
+   } else if (peek().type == TokenType::OPENBRACKET || peek().type == TokenType::OPENBRACE) {
+      // parse a pattern and use its token as the declaration token
+      pattern = parse_pattern();
+      // choose token for error reporting
+      idTok = pattern->token;
+   } else {
+      Token tok = peek();
+      throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Expected identifier or destructuring pattern after 'data'");
+   }
+
+   std::unique_ptr<ExpressionNode> value = nullptr;
 
    if (is_constant) {
       // force an initializer for constants
-      expect(TokenType::ASSIGN, "Constant '" + name + "' must be initialized");
+      expect(TokenType::ASSIGN, "Constant '" + (pattern ? "<pattern>" : name) + "' must be initialized");
       value = parse_expression();
    } else {
       // non-constants: assignment is optional
@@ -37,8 +55,14 @@ std::unique_ptr < StatementNode > Parser::parse_variable_declaration() {
 
    if (peek().type == TokenType::SEMICOLON) consume();
 
-   auto node = std::make_unique < VariableDeclarationNode > ();
-   node->identifier = name;
+   auto node = std::make_unique<VariableDeclarationNode>();
+   if (pattern) {
+      node->pattern = std::move(pattern);
+      node->identifier = ""; // not a simple identifier
+   } else {
+      node->identifier = name;
+      node->pattern = nullptr;
+   }
    node->value = std::move(value);
    node->is_constant = is_constant;
    node->token = idTok;

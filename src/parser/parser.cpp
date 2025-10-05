@@ -244,6 +244,149 @@ bool Parser::is_lambda_ahead() {
    return found;
 }
 
+
+std::unique_ptr<ExpressionNode> Parser::parse_pattern() {
+    if (peek().type == TokenType::OPENBRACKET) {
+        return parse_array_pattern();
+    } else if (peek().type == TokenType::OPENBRACE) {
+        return parse_object_pattern();
+    }
+    Token tok = peek();
+    throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Expected array or object pattern");
+}
+
+std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
+    Token openTok = consume(); // consume '['
+    auto node = std::make_unique<ArrayPatternNode>();
+    node->token = openTok;
+
+    // empty pattern []
+    if (peek().type == TokenType::CLOSEBRACKET) {
+        consume();
+        return node;
+    }
+
+    while (true) {
+        // hole: leading comma indicates an empty slot
+        if (peek().type == TokenType::COMMA) {
+            consume();
+            node->elements.push_back(nullptr); // hole
+            // if immediate close then end
+            if (peek().type == TokenType::CLOSEBRACKET) break;
+            else continue;
+        }
+
+        // rest element: ...name
+        if (peek().type == TokenType::ELLIPSIS || peek().value == "...") {
+            Token ell = consume();
+            // allow layout tokens between ellipsis and identifier
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
+            Token nameTok = tokens[position - 1];
+            auto id = std::make_unique<IdentifierNode>();
+            id->name = nameTok.value;
+            id->token = nameTok;
+            // wrap as SpreadElementNode so evaluator can detect rest
+            auto spread = std::make_unique<SpreadElementNode>(ell, std::move(id));
+            node->elements.push_back(std::move(spread));
+
+            // rest must be last (optional trailing comma allowed)
+            if (peek().type == TokenType::COMMA) {
+                // if comma is followed by something other than CLOSEBRACKET it's an error
+                if (peek_next().type != TokenType::CLOSEBRACKET) {
+                    throw std::runtime_error("Parse error at " + peek_next().loc.to_string() + ": parameter not allowed after rest element");
+                }
+                consume(); // consume trailing comma
+            }
+            break;
+        }
+
+        // identifier element
+        if (peek().type == TokenType::IDENTIFIER) {
+            Token nameTok = consume();
+            auto id = std::make_unique<IdentifierNode>();
+            id->name = nameTok.value;
+            id->token = nameTok;
+            node->elements.push_back(std::move(id));
+        } else {
+            Token tok = peek();
+            throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Unexpected token in array pattern");
+        }
+
+        // separator or end
+        if (peek().type == TokenType::COMMA) {
+            consume();
+            // if trailing comma and immediate close, allow and break
+            if (peek().type == TokenType::CLOSEBRACKET) break;
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    expect(TokenType::CLOSEBRACKET, "Expected ']' to close array pattern");
+    return node;
+}
+
+std::unique_ptr<ExpressionNode> Parser::parse_object_pattern() {
+    Token openTok = consume(); // consume '{'
+    auto node = std::make_unique<ObjectPatternNode>();
+    node->token = openTok;
+
+    // empty pattern {}
+    if (peek().type == TokenType::CLOSEBRACE) {
+        consume();
+        return node;
+    }
+
+    while (true) {
+        // expect identifier as key
+        expect(TokenType::IDENTIFIER, "Expected property name in object pattern");
+        Token keyTok = tokens[position - 1];
+        std::string key = keyTok.value;
+
+        std::unique_ptr<ExpressionNode> target;
+
+        // either shorthand: name  OR  name : alias
+        if (peek().type == TokenType::COLON) {
+            consume(); // consume ':'
+            // allow layout between ':' and identifier
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            expect(TokenType::IDENTIFIER, "Expected identifier as target after ':' in object pattern");
+            Token tgtTok = tokens[position - 1];
+            auto id = std::make_unique<IdentifierNode>();
+            id->name = tgtTok.value;
+            id->token = tgtTok;
+            target = std::move(id);
+        } else {
+            // shorthand: bind to same name
+            auto id = std::make_unique<IdentifierNode>();
+            id->name = key;
+            id->token = keyTok;
+            target = std::move(id);
+        }
+
+        auto prop = std::make_unique<ObjectPatternProperty>();
+        prop->key = key;
+        prop->value = std::move(target);
+        node->properties.push_back(std::move(prop));
+
+        if (peek().type == TokenType::COMMA) {
+            consume();
+            // allow trailing comma before closing brace
+            if (peek().type == TokenType::CLOSEBRACE) break;
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    expect(TokenType::CLOSEBRACE, "Expected '}' to close object pattern");
+    return node;
+}
+
+
+
 // ---------- parse entry ----------
 std::unique_ptr < ProgramNode > Parser::parse() {
    auto program = std::make_unique < ProgramNode > ();

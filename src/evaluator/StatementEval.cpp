@@ -47,20 +47,31 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
    if (!stmt) return;
 
    if (auto vd = dynamic_cast<VariableDeclarationNode*>(stmt)) {
-      Value val = std::monostate {};
+    Value val = std::monostate {};
+    if (vd->value) val = evaluate_expression(vd->value.get(), env);
 
-      if (vd->value) val = evaluate_expression(vd->value.get(), env);
-      Environment::Variable var {
-         val,
-         vd->is_constant
-      };
-      if (vd->is_constant && std::holds_alternative < std::monostate > (val)) {
-         throw std::runtime_error("Constant '" + vd->identifier + "' must be initialized at " + vd->token.loc.to_string());
-      }
-      env->set(vd->identifier, var);
-      return;
-   }
+    // If this declaration uses a destructuring pattern, route to binder
+    if (vd->pattern) {
+        // For constants, parser already enforced an initializer is required.
+        // However, ensure we don't allow uninitialized constant elements here:
+        if (vd->is_constant && std::holds_alternative<std::monostate>(val)) {
+            throw std::runtime_error("Constant pattern must be initialized at " + vd->token.loc.to_string());
+        }
+        bind_pattern_to_value(vd->pattern.get(), val, env, vd->is_constant, vd->token);
+        return;
+    }
 
+    // Otherwise simple identifier declaration (existing behavior)
+    Environment::Variable var {
+        val,
+        vd->is_constant
+    };
+    if (vd->is_constant && std::holds_alternative<std::monostate>(val)) {
+        throw std::runtime_error("Constant '" + vd->identifier + "' must be initialized at " + vd->token.loc.to_string());
+    }
+    env->set(vd->identifier, var);
+    return;
+}
    // Assignment: target is now an ExpressionNode (IdentifierNode / IndexExpressionNode / MemberExpressionNode)
    if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
       Value rhs = evaluate_expression(an->value.get(), env);

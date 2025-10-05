@@ -178,6 +178,7 @@ class Evaluator {
    double to_number(const Value& v);
    std::string to_string_value(const Value& v);
    bool to_bool(const Value& v);
+   void bind_pattern_to_value(ExpressionNode* pattern, const Value& value, EnvPtr env, bool is_constant, const Token& declToken);
 
    // value equality helper (deep for arrays, tolerant for mixed number/string)
    bool is_equal(const Value& a, const Value& b);

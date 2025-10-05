@@ -265,8 +265,69 @@ struct ArrayExpressionNode : public ExpressionNode {
     }
 };
 
+struct ArrayPatternNode : public ExpressionNode {
+    // elements may be:
+    //  - IdentifierNode for named targets
+    //  - SpreadElementNode for rest (argument is IdentifierNode)
+    //  - nullptr to indicate a hole (e.g., [a,,,b])
+    std::vector<std::unique_ptr<ExpressionNode>> elements;
 
+    std::string to_string() const override {
+        std::string s = "[";
+        for (size_t i = 0; i < elements.size(); ++i) {
+            if (i) s += ", ";
+            if (!elements[i]) s += "";          // hole
+            else s += elements[i]->to_string();
+        }
+        s += "]";
+        return s;
+    }
 
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<ArrayPatternNode>();
+        n->token = token;
+        n->elements.reserve(elements.size());
+        for (const auto &e : elements) n->elements.push_back(e ? e->clone() : nullptr);
+        return n;
+    }
+};
+
+struct ObjectPatternProperty {
+    std::string key; // literal key name in source (e.g. "name")
+    // value is the target node (commonly an IdentifierNode); if shorthand, value is IdentifierNode with same name
+    std::unique_ptr<ExpressionNode> value;
+};
+
+struct ObjectPatternNode : public ExpressionNode {
+    std::vector<std::unique_ptr<ObjectPatternProperty>> properties;
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "{ ";
+        for (size_t i = 0; i < properties.size(); ++i) {
+            if (i) ss << ", ";
+            ss << properties[i]->key;
+            if (properties[i]->value && properties[i]->value->to_string() != properties[i]->key)
+                ss << " : " << properties[i]->value->to_string();
+        }
+        ss << " }";
+        return ss.str();
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<ObjectPatternNode>();
+        n->token = token;
+        n->properties.reserve(properties.size());
+        for (const auto &p : properties) {
+            if (!p) { n->properties.push_back(nullptr); continue; }
+            auto np = std::make_unique<ObjectPatternProperty>();
+            np->key = p->key;
+            np->value = p->value ? p->value->clone() : nullptr;
+            n->properties.push_back(std::move(np));
+        }
+        return n;
+    }
+};
 
 
 
@@ -408,7 +469,10 @@ struct StatementNode : public Node {
 };
 
 struct VariableDeclarationNode : public StatementNode {
+    // For simple declaration: identifier != ""
+    // For destructuring: pattern != nullptr and identifier == ""
     std::string identifier;
+    std::unique_ptr<ExpressionNode> pattern; // ArrayPatternNode or ObjectPatternNode for destructuring targets
     std::unique_ptr<ExpressionNode> value;
     bool is_constant = false;
 
@@ -418,10 +482,10 @@ struct VariableDeclarationNode : public StatementNode {
         n->identifier = identifier;
         n->is_constant = is_constant;
         n->value = value ? value->clone() : nullptr;
+        n->pattern = pattern ? pattern->clone() : nullptr;
         return n;
     }
 };
-
 // Assignment: target can be an identifier or an index/member expression
 struct AssignmentNode : public StatementNode {
     std::unique_ptr<ExpressionNode> target; // IdentifierNode or IndexExpressionNode or MemberExpressionNode
