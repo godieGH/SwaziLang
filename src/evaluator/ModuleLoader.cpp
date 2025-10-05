@@ -2,6 +2,7 @@
 #include "lexer.hpp"
 #include "parser.hpp"
 
+#include "builtins.hpp" // new: built-in module factories (regex, fs, http)
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -68,6 +69,68 @@ std::string Evaluator::resolve_module_path(const std::string &module_spec, const
 // in Loading state BEFORE evaluating the module so circular imports can receive a live
 // (possibly partially-initialized) exports object.
 ObjectPtr Evaluator::import_module(const std::string &module_spec, const Token &requesterTok, EnvPtr requesterEnv) {
+    
+    
+        // --- built-in modules short-circuit ---
+    // Handle built-ins first (so "regex", "fs", "http" refer to native factories).
+    // This must run before resolving filesystem paths.
+    if (module_spec == "regex" || module_spec == "swazi:regex") {
+        const std::string key = "__builtin__:regex";
+        auto it = module_cache.find(key);
+        if (it != module_cache.end()) return it->second->exports;
+
+        auto rec = std::make_shared<ModuleRecord>();
+        rec->state = ModuleRecord::State::Loading;
+        rec->exports = std::make_shared<ObjectValue>();
+        rec->path = key;
+        rec->module_env = std::make_shared<Environment>(global_env);
+        module_cache[key] = rec;
+
+        rec->exports = make_regex_exports(rec->module_env);
+
+        rec->state = ModuleRecord::State::Loaded;
+        return rec->exports;
+    }
+
+    if (module_spec == "fs" || module_spec == "swazi:fs") {
+        const std::string key = "__builtin__:fs";
+        auto it = module_cache.find(key);
+        if (it != module_cache.end()) return it->second->exports;
+
+        auto rec = std::make_shared<ModuleRecord>();
+        rec->state = ModuleRecord::State::Loading;
+        rec->exports = std::make_shared<ObjectValue>();
+        rec->path = key;
+        rec->module_env = std::make_shared<Environment>(global_env);
+        module_cache[key] = rec;
+
+        rec->exports = make_fs_exports(rec->module_env);
+
+        rec->state = ModuleRecord::State::Loaded;
+        return rec->exports;
+    }
+
+    if (module_spec == "http" || module_spec == "swazi:http") {
+        const std::string key = "__builtin__:http";
+        auto it = module_cache.find(key);
+        if (it != module_cache.end()) return it->second->exports;
+
+        auto rec = std::make_shared<ModuleRecord>();
+        rec->state = ModuleRecord::State::Loading;
+        rec->exports = std::make_shared<ObjectValue>();
+        rec->path = key;
+        rec->module_env = std::make_shared<Environment>(global_env);
+        module_cache[key] = rec;
+
+        rec->exports = make_http_exports(rec->module_env);
+
+        rec->state = ModuleRecord::State::Loaded;
+        return rec->exports;
+    }
+    // --- end built-in short-circuit ---
+    
+    
+    
     // Resolve filesystem path (throws if not found)
     std::string resolved = resolve_module_path(module_spec, requesterTok.loc.filename, requesterTok);
 
