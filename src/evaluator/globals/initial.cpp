@@ -1,5 +1,7 @@
 #include "globals.hpp"
 #include "evaluator.hpp"
+#include "time.hpp"
+#include "muda_class.hpp"
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
@@ -284,11 +286,25 @@ static Value builtin_lcm(const std::vector < Value>& args, EnvPtr env, const Tok
 
 
 
-static Value builtin_tupa(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_throw(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     std::string msg = args.empty() ? "Error" : value_to_string(args[0]);
     throw std::runtime_error(msg);
 }
+static Value builtin_thibitisha(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    bool ok = args.empty() ? false : value_to_bool(args[0]);
+    if (!ok) {
+        std::string msg = args.size() > 1 ? value_to_string(args[1]) : std::string("Assertion failed");
+        throw std::runtime_error(msg);
+    }
+    return Value();
+}
 
+static Value builtin_toka(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    int code = 0;
+    if (!args.empty()) code = static_cast<int>(std::llround(value_to_number(args[0])));
+    std::exit(code);
+    return std::string(""); // unreachable, keeps signature happy
+}
 
 
 void init_globals(EnvPtr env) {
@@ -311,7 +327,8 @@ void init_globals(EnvPtr env) {
    add_fn("Namba", builtin_namba);
    add_fn("Neno", builtin_neno);
    add_fn("soma", builtin_ingiza);
-   add_fn("Makosa", builtin_tupa);
+   add_fn("Makosa", builtin_throw);
+   add_fn("thibitisha", builtin_thibitisha);
 
 
    auto objectVal = std::make_shared < ObjectValue > ();
@@ -397,5 +414,31 @@ void init_globals(EnvPtr env) {
       hesabuVar.is_constant = true;
       env->set("Hesabu", hesabuVar);
    }
+   
+   init_time(env);
+   init_muda_class(env);
+  
+  
+   {
+      auto programVal = std::make_shared < ObjectValue > ();
 
+      auto add = [&](const std::string& name,
+         std::function < Value(const std::vector < Value>&, EnvPtr, const Token&) > impl) {
+         auto fn = std::make_shared < FunctionValue > (name, impl, env, Token {});
+         programVal->properties[name] = {
+            fn,
+            false,
+            false,
+            true,
+            Token {}
+         };
+      };
+
+      add("toka", builtin_toka);
+      
+      Environment::Variable program;
+      program.value = programVal;
+      program.is_constant = true;
+      env->set("swazi", program);
+   }
 }
