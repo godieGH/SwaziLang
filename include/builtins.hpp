@@ -7,3 +7,8 @@
 std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env);
+
+std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env);

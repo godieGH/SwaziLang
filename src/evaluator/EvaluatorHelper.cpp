@@ -74,7 +74,7 @@ double Evaluator::to_number(const Value& v) {
 
 std::string Evaluator::to_string_value(const Value& v) {
    static bool use_color = supports_color();
-   if (std::holds_alternative < std::monostate > (v)) return "null";
+   if (std::holds_alternative < std::monostate > (v)) return use_color ? Color::bright_black + "null" + Color::reset : "null";
    if (std::holds_alternative < double > (v)) {
       std::ostringstream ss;
       double d = std::get < double > (v);
