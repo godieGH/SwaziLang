@@ -376,7 +376,9 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     if (cd->body) {
        classDesc->body = cd->body->clone();
     }
-
+    
+    classDesc->defining_env = env;
+    
     // resolve super if present
     if (cd->superClass) {
        // try to get super class from environment
@@ -439,8 +441,8 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 persisted->body.push_back(s ? s->clone(): nullptr);
              }
 
-             // construct FunctionValue (the FunctionValue ctor will clone these param descriptors into its own storage)
-             auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
+             // NOTE: use the class's defining_env (which equals 'env' at declaration time)
+             auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, classDesc->defining_env, persisted->token);
              PropertyDescriptor pd;
              pd.value = fn;
              pd.is_private = m_uptr->is_private;

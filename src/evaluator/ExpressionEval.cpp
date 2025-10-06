@@ -89,22 +89,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     ObjectPtr obj = std::make_shared < ObjectValue > ();
 
     // helper: convert FunctionExpressionNode -> FunctionDeclarationNode
-    auto fnExprToDecl = [](FunctionExpressionNode* fe) -> std::shared_ptr<FunctionDeclarationNode> {
-    auto declptr = std::make_shared<FunctionDeclarationNode>();
-    declptr->token = fe->token;
-    declptr->name = fe->name;
+    auto fnExprToDecl = [](FunctionExpressionNode* fe) -> std::shared_ptr < FunctionDeclarationNode > {
+      auto declptr = std::make_shared < FunctionDeclarationNode > ();
+      declptr->token = fe->token;
+      declptr->name = fe->name;
 
-    // clone parameter descriptors (ParameterNode unique_ptrs)
-    declptr->parameters.reserve(fe->parameters.size());
-    for (const auto &pp : fe->parameters) {
+      // clone parameter descriptors (ParameterNode unique_ptrs)
+      declptr->parameters.reserve(fe->parameters.size());
+      for (const auto &pp: fe->parameters) {
         if (pp) declptr->parameters.push_back(pp->clone());
         else declptr->parameters.push_back(nullptr);
-    }
+      }
 
-    declptr->body.reserve(fe->body.size());
-    for (const auto &s: fe->body) declptr->body.push_back(s ? s->clone(): nullptr);
-    return declptr;
-};
+      declptr->body.reserve(fe->body.size());
+      for (const auto &s: fe->body) declptr->body.push_back(s ? s->clone(): nullptr);
+      return declptr;
+    };
 
     for (const auto &p: objNode->properties) {
       if (!p) continue;
@@ -1585,35 +1585,35 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
   if (auto ln = dynamic_cast<LambdaNode*>(expr)) {
     // Convert LambdaNode to a callable FunctionValue
-    auto fnDecl = std::make_shared<FunctionDeclarationNode>();
+    auto fnDecl = std::make_shared < FunctionDeclarationNode > ();
 
     // clone params from ln->params
     fnDecl->parameters.reserve(ln->params.size());
-    for (const auto &pp : ln->params) {
-        if (pp) fnDecl->parameters.push_back(pp->clone());
-        else fnDecl->parameters.push_back(nullptr);
+    for (const auto &pp: ln->params) {
+      if (pp) fnDecl->parameters.push_back(pp->clone());
+      else fnDecl->parameters.push_back(nullptr);
     }
 
     if (ln->isBlock) {
-        fnDecl->body = std::move(ln->blockBody); // block-lambda
+      fnDecl->body = std::move(ln->blockBody); // block-lambda
     } else {
-        // expression-lambda: wrap exprBody into a ReturnStatementNode for consistent execution
-        auto retStmt = std::make_unique<ReturnStatementNode>();
-        retStmt->value = std::move(ln->exprBody);
-        fnDecl->body.push_back(std::move(retStmt));
+      // expression-lambda: wrap exprBody into a ReturnStatementNode for consistent execution
+      auto retStmt = std::make_unique < ReturnStatementNode > ();
+      retStmt->value = std::move(ln->exprBody);
+      fnDecl->body.push_back(std::move(retStmt));
     }
 
     // Construct FunctionValue from the persisted declaration. FunctionValue ctor clones again as needed.
-    auto fn = std::make_shared<FunctionValue>(
-        std::string("<anon>"),
-        fnDecl->parameters,
-        fnDecl,
-        env,
-        ln->token
+    auto fn = std::make_shared < FunctionValue > (
+      std::string("<anon>"),
+      fnDecl->parameters,
+      fnDecl,
+      env,
+      ln->token
     );
 
     return fn;
-}
+  }
 
 
 
@@ -1639,16 +1639,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     // We want super class initializers to run before derived.
     std::vector < ClassPtr > chain;
     for (ClassPtr walk = cls; walk; walk = walk->super) chain.push_back(walk);
-    std::reverse(chain.begin(), chain.end()); // parent first
+    std::reverse(chain.begin(), chain.end());
 
     for (auto &c: chain) {
       if (!c || !c->body) continue;
+
+      // Use the environment where the class was declared for evaluating instance initializers
+      // and building method closures. If (for some reason) the defining_env is null, fall back
+      // to the current evaluation env to preserve previous behavior.
+      EnvPtr classEnv = c->defining_env ? c->defining_env: env;
+
       // properties
       for (auto &p: c->body->properties) {
         if (!p) continue;
         if (p->is_static) continue;
         // evaluate initializer in a child env where '$' is bound to instance so initializers can reference $
-        auto initEnv = std::make_shared < Environment > (env);
+        auto initEnv = std::make_shared < Environment > (classEnv);
         Environment::Variable thisVar; thisVar.value = instance; thisVar.is_constant = false;
         initEnv->set("$", thisVar);
         Value initVal = std::monostate {};
@@ -1665,43 +1671,46 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
       // methods (non-static)
       for (auto &m: c->body->methods) {
-    if (!m) continue;
-    if (m->is_static) continue;
+        if (!m) continue;
+        if (m->is_static) continue;
 
-    // persist a FunctionDeclarationNode like other functions do
-    auto persisted = std::make_shared<FunctionDeclarationNode>();
-    persisted->name = m->name;
-    persisted->token = m->token;
+        // persist a FunctionDeclarationNode like other functions do
+        auto persisted = std::make_shared < FunctionDeclarationNode > ();
+        persisted->name = m->name;
+        persisted->token = m->token;
 
-    // clone parameter descriptors from ClassMethodNode::params
-    persisted->parameters.reserve(m->params.size());
-    for (const auto &pp : m->params) {
-        if (pp) persisted->parameters.push_back(pp->clone());
-        else persisted->parameters.push_back(nullptr);
-    }
+        // clone parameter descriptors from ClassMethodNode::params
+        persisted->parameters.reserve(m->params.size());
+        for (const auto &pp: m->params) {
+          if (pp) persisted->parameters.push_back(pp->clone());
+          else persisted->parameters.push_back(nullptr);
+        }
 
-    // clone body statements
-    persisted->body.reserve(m->body.size());
-    for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+        // clone body statements
+        persisted->body.reserve(m->body.size());
+        for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
 
-    // IMPORTANT: each instance method must have a closure where '$' is bound
-    EnvPtr methodClosure = std::make_shared<Environment>(env); // parent = class-decl env
-    Environment::Variable thisVar;
-    thisVar.value = instance;
-    thisVar.is_constant = true; // treat $ as constant inside methods
-    methodClosure->set("$", thisVar);
+        // IMPORTANT: each instance method must have a closure where '$' is bound and whose parent
+        // is the class's defining environment (so free identifiers captured by the method resolve
+        // to the module where the class was defined).
+        EnvPtr methodClosureParent = classEnv;
+        EnvPtr methodClosure = std::make_shared < Environment > (methodClosureParent);
+        Environment::Variable thisVar;
+        thisVar.value = instance;
+        thisVar.is_constant = true; // treat $ as constant inside methods
+        methodClosure->set("$", thisVar);
 
-    // create the FunctionValue using the methodClosure (so call_function finds '$')
-    auto fn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, methodClosure, persisted->token);
+        // create the FunctionValue using the methodClosure (so call_function finds '$')
+        auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, methodClosure, persisted->token);
 
-    PropertyDescriptor pd;
-    pd.value = fn;
-    pd.is_private = m->is_private;
-    pd.is_locked = m->is_locked;
-    pd.is_readonly = m->is_getter;
-    pd.token = m->token;
-    instance->properties[m->name] = std::move(pd);
-}
+        PropertyDescriptor pd;
+        pd.value = fn;
+        pd.is_private = m->is_private;
+        pd.is_locked = m->is_locked;
+        pd.is_readonly = m->is_getter;
+        pd.token = m->token;
+        instance->properties[m->name] = std::move(pd);
+      }
     }
 
     // Call constructor if any on the class itself (derived class constructor should be found on cls->body->methods with is_constructor)
@@ -1716,38 +1725,39 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       }
 
       if (ctorNode) {
-    auto persisted = std::make_shared<FunctionDeclarationNode>();
-    persisted->name = ctorNode->name;
-    persisted->token = ctorNode->token;
+        auto persisted = std::make_shared < FunctionDeclarationNode > ();
+        persisted->name = ctorNode->name;
+        persisted->token = ctorNode->token;
 
-    // clone parameter descriptors from ctorNode->params
-    persisted->parameters.reserve(ctorNode->params.size());
-    for (const auto &pp : ctorNode->params) {
-        if (pp) persisted->parameters.push_back(pp->clone());
-        else persisted->parameters.push_back(nullptr);
-    }
+        // clone parameter descriptors from ctorNode->params
+        persisted->parameters.reserve(ctorNode->params.size());
+        for (const auto &pp: ctorNode->params) {
+          if (pp) persisted->parameters.push_back(pp->clone());
+          else persisted->parameters.push_back(nullptr);
+        }
 
-    // clone body statements
-    persisted->body.reserve(ctorNode->body.size());
-    for (const auto &stmt: ctorNode->body) {
-        persisted->body.push_back(stmt ? stmt->clone(): nullptr);
-    }
+        // clone body statements
+        persisted->body.reserve(ctorNode->body.size());
+        for (const auto &stmt: ctorNode->body) {
+          persisted->body.push_back(stmt ? stmt->clone(): nullptr);
+        }
 
-    // Create FunctionValue for constructor with closure = env (the class-decl environment)
-    auto constructorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, env, persisted->token);
+        // Create FunctionValue for constructor with closure = env (the class-decl environment)
+        EnvPtr ctorClosure = cls->defining_env ? cls->defining_env: env;
+        auto constructorFn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, ctorClosure, persisted->token);
 
-    // Evaluate call arguments
-    std::vector<Value> ctorArgs;
-    ctorArgs.reserve(ne->arguments.size());
-    for (auto &a: ne->arguments) ctorArgs.push_back(evaluate_expression(a.get(), env));
+        // Evaluate call arguments
+        std::vector < Value > ctorArgs;
+        ctorArgs.reserve(ne->arguments.size());
+        for (auto &a: ne->arguments) ctorArgs.push_back(evaluate_expression(a.get(), env));
 
-    // Call constructor with the instance as receiver so $ is available in the call frame,
-    // and set current_class_context so 'super(...)' works inside constructor.
-    ClassPtr saved_ctx = current_class_context;
-    current_class_context = cls;
-    call_function_with_receiver(constructorFn, instance, ctorArgs, persisted->token);
-    current_class_context = saved_ctx;
-}
+        // Call constructor with the instance as receiver so $ is available in the call frame,
+        // and set current_class_context so 'super(...)' works inside constructor.
+        ClassPtr saved_ctx = current_class_context;
+        current_class_context = cls;
+        call_function_with_receiver(constructorFn, instance, ctorArgs, persisted->token);
+        current_class_context = saved_ctx;
+      }
     }
 
     // return the created instance as a Value
@@ -1781,24 +1791,25 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     for (auto &m: parent->body->methods) {
       if (m && m->is_constructor) {
         // create FunctionValue from parent constructor and call with receiver
-        auto persisted = std::make_shared<FunctionDeclarationNode>();
+        auto persisted = std::make_shared < FunctionDeclarationNode > ();
         persisted->name = m->name;
         persisted->token = m->token;
 
         // clone parameters
         persisted->parameters.reserve(m->params.size());
-        for (const auto &pp : m->params) {
-            if (pp) persisted->parameters.push_back(pp->clone());
-            else persisted->parameters.push_back(nullptr);
+        for (const auto &pp: m->params) {
+          if (pp) persisted->parameters.push_back(pp->clone());
+          else persisted->parameters.push_back(nullptr);
         }
 
         // clone body
         persisted->body.reserve(m->body.size());
         for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
 
-        auto parentCtor = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, env, persisted->token);
+        EnvPtr parentCtorClosure = parent->defining_env ? parent->defining_env: env;
+        auto parentCtor = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, parentCtorClosure, persisted->token);
 
-        std::vector<Value> args;
+        std::vector < Value > args;
         args.reserve(se->arguments.size());
         for (auto &a: se->arguments) args.push_back(evaluate_expression(a.get(), env));
 
@@ -1811,46 +1822,47 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
   if (auto de = dynamic_cast<DeleteExpressionNode*>(expr)) {
     Value v = evaluate_expression(de->target.get(), env);
-    if (!std::holds_alternative<ObjectPtr>(v)) return std::monostate{};
-    ObjectPtr obj = std::get<ObjectPtr>(v);
+    if (!std::holds_alternative < ObjectPtr > (v)) return std::monostate {};
+    ObjectPtr obj = std::get < ObjectPtr > (v);
 
     // call destructor if class link exists
     auto it = obj->properties.find("__class__");
-    if (it != obj->properties.end() && std::holds_alternative<ClassPtr>(it->second.value)) {
-        ClassPtr cls = std::get<ClassPtr>(it->second.value);
-        if (cls->body) {
-            for (auto &m: cls->body->methods) {
-                if (m && m->is_destructor) {
-                    auto persisted = std::make_shared<FunctionDeclarationNode>();
-                    persisted->name = m->name;
-                    persisted->token = m->token;
+    if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
+      ClassPtr cls = std::get < ClassPtr > (it->second.value);
+      if (cls->body) {
+        for (auto &m: cls->body->methods) {
+          if (m && m->is_destructor) {
+            auto persisted = std::make_shared < FunctionDeclarationNode > ();
+            persisted->name = m->name;
+            persisted->token = m->token;
 
-                    // clone parameter descriptors from method node
-                    persisted->parameters.reserve(m->params.size());
-                    for (const auto &pp : m->params) {
-                        if (pp) persisted->parameters.push_back(pp->clone());
-                        else persisted->parameters.push_back(nullptr);
-                    }
-
-                    persisted->body.reserve(m->body.size());
-                    for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
-
-                    auto dtorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, env, persisted->token);
-
-                    // No args supported for delete-expression destructor call in current AST.
-                    std::vector<Value> args; // empty
-
-                    Value res = call_function_with_receiver(dtorFn, obj, args, m->token);
-                    obj->properties.clear();
-                    return res;
-                }
+            // clone parameter descriptors from method node
+            persisted->parameters.reserve(m->params.size());
+            for (const auto &pp: m->params) {
+              if (pp) persisted->parameters.push_back(pp->clone());
+              else persisted->parameters.push_back(nullptr);
             }
+
+            persisted->body.reserve(m->body.size());
+            for (const auto &s: m->body) persisted->body.push_back(s ? s->clone(): nullptr);
+
+            EnvPtr dtorClosure = cls->defining_env ? cls->defining_env: env;
+            auto dtorFn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, dtorClosure, persisted->token);
+
+            // No args supported for delete-expression destructor call in current AST.
+            std::vector < Value > args; // empty
+
+            Value res = call_function_with_receiver(dtorFn, obj, args, m->token);
+            obj->properties.clear();
+            return res;
+          }
         }
+      }
     }
 
     obj->properties.clear();
-    return std::monostate{};
-}
+    return std::monostate {};
+  }
 
 
   throw std::runtime_error("Unhandled expression node in evaluator");

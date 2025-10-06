@@ -12,4 +12,10 @@ struct ClassValue {
     ObjectPtr static_table = std::make_shared<ObjectValue>();
     // token for diagnostics
     Token token;
+
+    // DEFINING ENVIRONMENT:
+    // The environment in which the class declaration was evaluated (module/class lexical scope).
+    // Instance initializers and instance method closures must resolve free identifiers
+    // against this environment, not the environment where an object is later instantiated.
+    EnvPtr defining_env = nullptr;
 };
