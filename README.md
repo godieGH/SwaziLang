@@ -83,7 +83,7 @@ Below are preserved keywords and their meanings in SwaziLang syntax:
 | `kama`       | Alias keyword in imports (`as`)                             |
 | `ruhusu`     | Export from a module                                        |
 | `jaribu`     | Try block for error handling                                |
-| `kamata`     | Catch block                                                 |
+| `makosa`     | Catch block                                                 |
 | `kisha`      | Finally block                                               |
 | `onesha`     | Throw an error/exception                                    |
 | `AINAYA`     | Unary keyword to return type of a value                     |
