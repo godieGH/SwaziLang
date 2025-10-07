@@ -113,7 +113,7 @@ std::string Evaluator::to_string_value(const Value& v) {
    if (std::holds_alternative < ClassPtr > (v)) {
       ClassPtr cp = std::get < ClassPtr > (v);
       std::string nm = cp ? cp->name: "<anon>";
-      return use_color ? (Color::bright_blue + std::string("muundo ") + nm + Color::reset): std::string("muudo " + nm);
+      return use_color ? (Color::bright_blue + std::string("[muundo: ") + nm + "]" + Color::reset): std::string("[muudo: " + nm+ "]");
    }
    return "";
 }

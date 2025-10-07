@@ -1674,6 +1674,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (!m) continue;
         if (m->is_static) continue;
 
+        // Skip constructors and destructors: they must remain on the ClassValue (AST)
+        // and be invoked by the instantiation/delete machinery (new/super/delete).
+        // Materializing them onto the instance exposes them as callable instance props
+        // (e.g. ob.Base(...)) which is incorrect.
+        if (m->is_constructor || m->is_destructor) continue;
+
         // persist a FunctionDeclarationNode like other functions do
         auto persisted = std::make_shared < FunctionDeclarationNode > ();
         persisted->name = m->name;
