@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <numeric>
 #include <cstdint>
+#include <random>
+#include <mutex>
 
 
 static Value builtin_ainaya(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
@@ -180,17 +182,28 @@ static Value builtin_isnan(const std::vector < Value>& args, EnvPtr env, const T
    double x = value_to_number(args[0]);
    return std::isnan(x);
 }
-static Value builtin_rand(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
-   double r = static_cast<double > (std::rand()) / (static_cast<double > (RAND_MAX) + 1.0);
-   if (args.empty()) return r;
-   if (args.size() == 1) {
-      double a = value_to_number(args[0]);
-      return r * a; // 0..a
-   }
-   double a = value_to_number(args[0]);
-   double b = value_to_number(args[1]);
-   if (a > b) std::swap(a, b);
-   return a + r * (b - a);
+static Value builtin_rand(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    // thread_local engine seeded once per thread
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+
+    auto value_to_double = [](const Value &v){ return value_to_number(v); };
+
+    if (args.empty()) {
+        std::uniform_real_distribution<double> d(0.0, std::nextafter(1.0, 2.0)); // [0,1)
+        return d(rng);
+    }
+
+    if (args.size() == 1) {
+        double a = value_to_double(args[0]);
+        std::uniform_real_distribution<double> d(0.0, std::nextafter(a, std::numeric_limits<double>::infinity()));
+        return d(rng); // uniform in [0, a) (works even if a<0)
+    }
+
+    double a = value_to_double(args[0]);
+    double b = value_to_double(args[1]);
+    if (a > b) std::swap(a, b);
+    std::uniform_real_distribution<double> d(a, std::nextafter(b, std::numeric_limits<double>::infinity()));
+    return d(rng); // uniform in [a, b)
 }
 static Value builtin_sign(const std::vector < Value>& args, EnvPtr env, const Token& tok) {
    if (args.empty()) return 0.0;
@@ -434,7 +447,7 @@ void init_globals(EnvPtr env) {
          };
       };
 
-      add("toka", builtin_toka);
+      add("exit", builtin_toka);
       
       Environment::Variable program;
       program.value = programVal;
