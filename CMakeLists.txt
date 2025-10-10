@@ -14,6 +14,12 @@ add_executable(swazi ${SOURCES})
 # Include headers for this target
 target_include_directories(swazi PRIVATE include)
 
+# make the project version available as SWAZI_VERSION (a C string) to the compiler
+# use the PROJECT_VERSION variable set by `project(... VERSION ...)`
+target_compile_definitions(swazi PRIVATE SWAZI_VERSION=\"${PROJECT_VERSION}\")
+
+
+
 find_package(CURL QUIET)
 
 if (CURL_FOUND)
