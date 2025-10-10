@@ -2,6 +2,9 @@
 
 SwaziLang is a scripting language written in C++ that lets you program using natural Swahili keywords and syntax.
 
+Do you want to learn SwaziLang?
+[get started here](https://swazilang.netlify.app)
+
 ## Build Instructions
 
 ```bash
@@ -122,11 +125,15 @@ Use `#` for single-line comments.
 
 ---
 
+**See more about the language documentations and learning resources [here](https://swazilang.netlify.app)**
+
+
 ## Contributing
 
 Feel free to submit issues or pull requests to help improve SwaziLang!
 
 ---
+
 
 ## License
 
