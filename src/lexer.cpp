@@ -175,16 +175,55 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
 void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string val;
     bool seen_dot = false;
+
     while (!eof()) {
         char c = peek();
-        if (std::isdigit((unsigned char)c)) { val.push_back(advance()); }
-        else if (c == '.' && !seen_dot && std::isdigit((unsigned char)peek_next())) { seen_dot = true; val.push_back(advance()); }
-        else break;
+
+        // digits
+        if (std::isdigit((unsigned char)c)) {
+            val.push_back(advance());
+        }
+        // decimal point (only one allowed, and must be followed by a digit)
+        else if (c == '.' && !seen_dot && std::isdigit((unsigned char)peek_next())) {
+            seen_dot = true;
+            val.push_back(advance());
+        }
+        // exponent part: 'e' or 'E'
+        else if ((c == 'e' || c == 'E')) {
+            // Save state in case the exponent is invalid (e.g. "1e" or "1e+")
+            size_t save_i = i;
+            size_t saved_len = val.size();
+
+            // consume 'e' or 'E'
+            val.push_back(advance());
+
+            // optional sign after exponent
+            if (!eof() && (peek() == '+' || peek() == '-')) {
+                val.push_back(advance());
+            }
+
+            // require at least one digit after exponent
+            bool has_exp_digits = false;
+            while (!eof() && std::isdigit((unsigned char)peek())) {
+                has_exp_digits = true;
+                val.push_back(advance());
+            }
+
+            if (!has_exp_digits) {
+                // rollback to before 'e' if no digits followed -- leave 'e' for caller
+                i = save_i;
+                val.resize(saved_len);
+                break; // stop scanning number here
+            }
+        }
+        else {
+            break;
+        }
     }
+
     int tok_length = static_cast<int>(i - start_index);
     add_token(out, TokenType::NUMBER, val, tok_line, tok_col, tok_length);
 }
-
 void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string id;
     while (!eof()) {
