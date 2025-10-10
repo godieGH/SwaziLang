@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(SwaziLang VERSION 1.11.1 LANGUAGES CXX)
+project(SwaziLang VERSION 1.12.0 LANGUAGES CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 23)
