@@ -245,6 +245,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     // ainaya -> type name
     if (prop == "aina") {
       std::string t = "unknown"; // default
+      if (std::holds_alternative < std::monostate > (objVal)) t = "null";
       if (std::holds_alternative < double > (objVal)) t = "namba";
       else if (std::holds_alternative < std::string > (objVal)) t = "neno";
       else if (std::holds_alternative < bool > (objVal)) t = "bool";

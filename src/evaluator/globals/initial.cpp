@@ -21,6 +21,7 @@ static Value builtin_ainaya(const std::vector < Value>& args, EnvPtr env, const 
    const Value& v = args[0];
 
    if (std::holds_alternative < double > (v)) return std::string("namba");
+   if (std::holds_alternative < std::monostate > (v)) return std::string("null");
    if (std::holds_alternative < bool > (v)) return std::string("bool");
    if (std::holds_alternative < std::string > (v)) return std::string("neno");
    if (std::holds_alternative < ObjectPtr > (v)) return std::string("object");
