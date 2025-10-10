@@ -1234,11 +1234,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
   if (auto b = dynamic_cast<BinaryExpressionNode*>(expr)) {
 
-    // --- handle ++ / -- and += / -= as side-effecting ops ---
+    // --- handle ++ / -- and += / -= and *= as side-effecting ops ---
     if (b->token.type == TokenType::INCREMENT ||
       b->token.type == TokenType::DECREMENT ||
       b->token.type == TokenType::PLUS_ASSIGN ||
-      b->token.type == TokenType::MINUS_ASSIGN) {
+      b->token.type == TokenType::MINUS_ASSIGN ||
+      b->token.type == TokenType::TIMES_ASSIGN) {
 
       // Case A: left is an identifier (x++, x += ...)
       if (auto leftIdent = dynamic_cast<IdentifierNode*>(b->left.get())) {
@@ -1251,43 +1252,42 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
               throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string());
             }
 
-            double delta = 0.0;
+            // Compute new value (evaluate RHS at most once)
+            double oldv = to_number(it->second.value);
+            double newv = oldv;
 
-            // Special-case += when either side is a string -> string concatenation semantics
-            if (b->token.type == TokenType::PLUS_ASSIGN) {
-              // Evaluate right once
+            if (b->token.type == TokenType::INCREMENT) {
+              newv = oldv + 1.0;
+            } else if (b->token.type == TokenType::DECREMENT) {
+              newv = oldv - 1.0;
+            } else if (b->token.type == TokenType::PLUS_ASSIGN) {
+              // Special-case string concatenation
               Value rightVal = evaluate_expression(b->right.get(), env);
-
               if (std::holds_alternative < std::string > (it->second.value) ||
                 std::holds_alternative < std::string > (rightVal)) {
-                // Concatenate as strings (coerce both sides to string)
                 std::string out = to_string_value(it->second.value) + to_string_value(rightVal);
                 it->second.value = out;
                 return Value {
                   out
                 };
               }
-
-              // not a string case -> treat as numeric addition below
               double rv = to_number(rightVal);
-              delta = rv;
-            } else if (b->token.type == TokenType::INCREMENT) {
-              delta = 1.0;
-            } else if (b->token.type == TokenType::DECREMENT) {
-              delta = -1.0;
+              newv = oldv + rv;
             } else if (b->token.type == TokenType::MINUS_ASSIGN) {
               Value rightVal = evaluate_expression(b->right.get(), env);
               double rv = to_number(rightVal);
-              delta = -rv;
-            } else {
-              // (fallback, but we shouldn't reach here)
+              newv = oldv - rv;
+            } else if (b->token.type == TokenType::TIMES_ASSIGN) {
               Value rightVal = evaluate_expression(b->right.get(), env);
               double rv = to_number(rightVal);
-              delta = rv;
+              newv = oldv * rv;
+            } else {
+              // fallback numeric behaviour
+              Value rightVal = evaluate_expression(b->right.get(), env);
+              double rv = to_number(rightVal);
+              newv = oldv + rv;
             }
 
-            double oldv = to_number(it->second.value);
-            double newv = oldv + delta;
             it->second.value = newv;
             return Value {
               newv
@@ -1296,33 +1296,33 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           walk = walk->parent;
         }
 
-        // Not found in any parent -> create in current env (same behavior as assignment)
-        // For += when RHS is string, create a string value
+        // Not found in any parent -> create in current env (same behavior as assignment).
+        // Follow the existing interpreter's convention: treat missing as 0 for numeric ops,
+        // and for += with string RHS create a string.
         if (b->token.type == TokenType::PLUS_ASSIGN) {
           Value rightVal = evaluate_expression(b->right.get(), env);
+          Environment::Variable var;
           if (std::holds_alternative < std::string > (rightVal)) {
-            Environment::Variable var;
             var.value = to_string_value(rightVal);
-            var.is_constant = false;
-            env->set(leftIdent->name, var);
-            return var.value;
           } else {
-            double rv = to_number(rightVal);
-            Environment::Variable var;
-            var.value = rv;
-            var.is_constant = false;
-            env->set(leftIdent->name, var);
-            return var.value;
+            var.value = to_number(rightVal);
           }
+          var.is_constant = false;
+          env->set(leftIdent->name, var);
+          return var.value;
         }
 
+        // compute start value (treat missing as 0 for numeric ops)
         double start = 0.0;
         if (b->token.type == TokenType::INCREMENT) start = 1.0;
         else if (b->token.type == TokenType::DECREMENT) start = -1.0;
-        else {
+        else if (b->token.type == TokenType::TIMES_ASSIGN) {
+          // undefined treated as 0, 0 * rhs => 0
+          start = 0.0;
+        } else {
           Value rightVal = evaluate_expression(b->right.get(), env);
           double rv = to_number(rightVal);
-          start = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+          start = (b->token.type == TokenType::MINUS_ASSIGN) ? -rv: rv;
         }
         Environment::Variable var;
         var.value = start;
@@ -1339,7 +1339,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         Value objVal = evaluate_expression(idx->object.get(), env);
         Value indexVal = evaluate_expression(idx->index.get(), env);
 
-        // --- ARRAY PATH (unchanged behavior) ---
+        // --- ARRAY PATH (unchanged behavior except extended ops) ---
         if (std::holds_alternative < ArrayPtr > (objVal)) {
           ArrayPtr arr = std::get < ArrayPtr > (objVal);
           if (!arr) {
@@ -1351,8 +1351,15 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           size_t uidx = static_cast<size_t > (rawIndex);
           if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
 
-          // PLUS_ASSIGN string concatenation support:
-          if (b->token.type == TokenType::PLUS_ASSIGN) {
+          // Compute new element value (evaluate RHS at most once)
+          double oldv = to_number(arr->elements[uidx]);
+          double newv = oldv;
+
+          if (b->token.type == TokenType::INCREMENT) {
+            newv = oldv + 1.0;
+          } else if (b->token.type == TokenType::DECREMENT) {
+            newv = oldv - 1.0;
+          } else if (b->token.type == TokenType::PLUS_ASSIGN) {
             Value rightVal = evaluate_expression(b->right.get(), env);
             if (std::holds_alternative < std::string > (arr->elements[uidx]) ||
               std::holds_alternative < std::string > (rightVal)) {
@@ -1364,32 +1371,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 out
               };
             }
-            // otherwise fall through to numeric behavior below
             double rv = to_number(rightVal);
-            double oldv = to_number(arr->elements[uidx]);
-            double newv = oldv + rv;
-            arr->elements[uidx] = Value {
-              newv
-            };
-            return Value {
-              newv
-            };
-          }
-
-          // existing ++/--/other numeric assignment handling:
-          double oldv = to_number(arr->elements[uidx]);
-
-          double delta = 0.0;
-          if (b->token.type == TokenType::INCREMENT) delta = 1.0;
-          else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
-          else {
-            // evaluate right side once
+            newv = oldv + rv;
+          } else if (b->token.type == TokenType::MINUS_ASSIGN) {
             Value rightVal = evaluate_expression(b->right.get(), env);
             double rv = to_number(rightVal);
-            delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+            newv = oldv - rv;
+          } else if (b->token.type == TokenType::TIMES_ASSIGN) {
+            Value rightVal = evaluate_expression(b->right.get(), env);
+            double rv = to_number(rightVal);
+            newv = oldv * rv;
+          } else {
+            Value rightVal = evaluate_expression(b->right.get(), env);
+            double rv = to_number(rightVal);
+            newv = oldv + rv;
           }
 
-          double newv = oldv + delta;
           arr->elements[uidx] = Value {
             newv
           };
@@ -1398,7 +1395,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           };
         }
 
-        // --- OBJECT PATH (support obj[key]++ / obj[key] += v) ---
+        // --- OBJECT PATH (support obj[key]++ / obj[key] += v / obj[key] *= v) ---
         if (std::holds_alternative < ObjectPtr > (objVal)) {
           ObjectPtr op = std::get < ObjectPtr > (objVal);
           if (!op) {
@@ -1434,8 +1431,15 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
               throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
             }
 
-            // PLUS_ASSIGN string concatenation support for existing property
-            if (b->token.type == TokenType::PLUS_ASSIGN) {
+            // Compute new property value (evaluate RHS at most once)
+            double oldv = to_number(it->second.value);
+            double newv = oldv;
+
+            if (b->token.type == TokenType::INCREMENT) {
+              newv = oldv + 1.0;
+            } else if (b->token.type == TokenType::DECREMENT) {
+              newv = oldv - 1.0;
+            } else if (b->token.type == TokenType::PLUS_ASSIGN) {
               Value rightVal = evaluate_expression(b->right.get(), env);
               if (std::holds_alternative < std::string > (it->second.value) ||
                 std::holds_alternative < std::string > (rightVal)) {
@@ -1448,33 +1452,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   out
                 };
               }
-              // otherwise numeric fallback below
-              double oldv = to_number(it->second.value);
               double rv = to_number(rightVal);
-              double newv = oldv + rv;
-              it->second.value = Value {
-                newv
-              };
-              it->second.token = idx->token;
-              return Value {
-                newv
-              };
-            }
-
-            // compute numeric old value (coerce as your to_number does) for other numeric ops
-            double oldv = to_number(it->second.value);
-
-            double delta = 0.0;
-            if (b->token.type == TokenType::INCREMENT) delta = 1.0;
-            else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
-            else {
-              // evaluate right side once
+              newv = oldv + rv;
+            } else if (b->token.type == TokenType::MINUS_ASSIGN) {
               Value rightVal = evaluate_expression(b->right.get(), env);
               double rv = to_number(rightVal);
-              delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+              newv = oldv - rv;
+            } else if (b->token.type == TokenType::TIMES_ASSIGN) {
+              Value rightVal = evaluate_expression(b->right.get(), env);
+              double rv = to_number(rightVal);
+              newv = oldv * rv;
+            } else {
+              Value rightVal = evaluate_expression(b->right.get(), env);
+              double rv = to_number(rightVal);
+              newv = oldv + rv;
             }
-
-            double newv = oldv + delta;
 
             // update in-place preserving flags
             it->second.value = Value {
@@ -1487,44 +1479,40 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           }
 
           // Property does not exist -> create public property:
-          // If += and RHS is string: create a string property with the RHS coerced to string (concatenate with empty)
+          // If += with string RHS create string property; otherwise create numeric property
           if (b->token.type == TokenType::PLUS_ASSIGN) {
             Value rightVal = evaluate_expression(b->right.get(), env);
+            PropertyDescriptor desc;
             if (std::holds_alternative < std::string > (rightVal)) {
-              PropertyDescriptor desc;
               desc.value = Value {
                 to_string_value(rightVal)
               };
-              desc.is_private = false;
-              desc.is_readonly = false;
-              desc.token = idx->token;
-              op->properties[prop] = std::move(desc);
-              return op->properties[prop].value;
             } else {
-              double rv = to_number(rightVal);
-              PropertyDescriptor desc;
               desc.value = Value {
-                rv
+                to_number(rightVal)
               };
-              desc.is_private = false;
-              desc.is_readonly = false;
-              desc.token = idx->token;
-              op->properties[prop] = std::move(desc);
-              return op->properties[prop].value;
             }
+            desc.is_private = false;
+            desc.is_readonly = false;
+            desc.token = idx->token;
+            op->properties[prop] = std::move(desc);
+            return op->properties[prop].value;
           }
 
-          // Existing non-+= path (create numeric property defaulting to 0, then apply ++/-= semantics)
+          // Create numeric property starting from 0 and apply op
           double oldv = 0.0;
-          double delta = 0.0;
-          if (b->token.type == TokenType::INCREMENT) delta = 1.0;
-          else if (b->token.type == TokenType::DECREMENT) delta = -1.0;
-          else {
+          double newv = oldv;
+          if (b->token.type == TokenType::INCREMENT) newv = oldv + 1.0;
+          else if (b->token.type == TokenType::DECREMENT) newv = oldv - 1.0;
+          else if (b->token.type == TokenType::TIMES_ASSIGN) {
             Value rightVal = evaluate_expression(b->right.get(), env);
             double rv = to_number(rightVal);
-            delta = (b->token.type == TokenType::PLUS_ASSIGN) ? rv: -rv;
+            newv = oldv * rv;
+          } else {
+            Value rightVal = evaluate_expression(b->right.get(), env);
+            double rv = to_number(rightVal);
+            newv = oldv + ((b->token.type == TokenType::MINUS_ASSIGN) ? -rv: rv);
           }
-          double newv = oldv + delta;
 
           PropertyDescriptor desc;
           desc.value = Value {
@@ -1534,16 +1522,15 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           desc.is_readonly = false;
           desc.token = idx->token;
           op->properties[prop] = std::move(desc);
-
           return Value {
             newv
           };
         }
+
         // Fallback: not array nor object
         throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string());
       }
     }
-
     // --- Normal binary evaluation path ---
     Value left = evaluate_expression(b->left.get(), env);
     Value right = evaluate_expression(b->right.get(), env);

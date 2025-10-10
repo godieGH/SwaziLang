@@ -395,6 +395,7 @@ void Lexer::scan_token(std::vector<Token>& out) {
     if (c == '-' && peek_next() == '-') { add_token(out, TokenType::DECREMENT, "--", line, col, 2); advance(); advance(); return; }
     if (c == '+' && peek_next() == '=') { add_token(out, TokenType::PLUS_ASSIGN, "+=", line, col, 2); advance(); advance(); return; }
     if (c == '-' && peek_next() == '=') { add_token(out, TokenType::MINUS_ASSIGN, "-=", line, col, 2); advance(); advance(); return; }
+    if (c == '*' && peek_next() == '=') { add_token(out, TokenType::TIMES_ASSIGN, "*=", line, col, 2); advance(); advance(); return; }
     if (c == '&' && peek_next() == '&') { add_token(out, TokenType::AND, "&&", line, col, 2); advance(); advance(); return; }
     if (c == '|' && peek_next() == '|') { add_token(out, TokenType::OR, "||", line, col, 2); advance(); advance(); return; }
 

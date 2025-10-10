@@ -121,6 +121,7 @@ enum class TokenType {
     // -----------------------
     PLUS_ASSIGN,
     MINUS_ASSIGN,
+    TIMES_ASSIGN,
     INCREMENT,
     DECREMENT,
 
