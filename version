@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+bump_version.py
+
+Usage:
+  ./scripts/bump_version.py [major|minor|patch|X.Y.Z] [--mode normal|tag-only] [--push] [--force] [--dry-run]
+
+Default:
+  mode = normal
+
+Examples:
+  ./scripts/bump_version.py patch
+  ./scripts/bump_version.py 1.12.0 --mode tag-only
+  ./scripts/bump_version.py minor --push
+"""
+
+import subprocess
+import sys
+import os
+import re
+import tempfile
+from pathlib import Path
+import argparse
+import shutil
+import textwrap
+
+# ---------- helpers ----------
+def run(cmd, capture=True, check=True, env=None):
+    if capture:
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf8', env=env)
+        if check and res.returncode != 0:
+            raise RuntimeError(f"Command failed: {cmd}\nstdout: {res.stdout}\nstderr: {res.stderr}")
+        return res.stdout.strip()
+    else:
+        res = subprocess.run(cmd, shell=True, env=env)
+        if check and res.returncode != 0:
+            raise RuntimeError(f"Command failed: {cmd}")
+        return None
+
+def die(msg):
+    print("✖", msg, file=sys.stderr)
+    sys.exit(1)
+
+def info(msg):
+    print("ℹ", msg)
+
+# ---------- version helpers ----------
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+def bump_semver(cur, kind):
+    parts = [int(x) for x in cur.split(".")]
+    if len(parts) != 3:
+        die(f'Current version "{cur}" is not MAJOR.MINOR.PATCH style')
+    major, minor, patch = parts
+    if kind == "major":
+        major += 1; minor = 0; patch = 0
+    elif kind == "minor":
+        minor += 1; patch = 0
+    elif kind == "patch":
+        patch += 1
+    else:
+        die(f"Unknown bump kind: {kind}")
+    return f"{major}.{minor}.{patch}"
+
+# ---------- file helpers ----------
+CMAKE_FILENAME = "CMakeLists.txt"
+PROJECT_VERSION_RE = re.compile(r'(project\([^\)]*VERSION\s+)(\d+\.\d+\.\d+)([^\)]*\))', re.IGNORECASE)
+
+def read_cmake_version(path: Path):
+    s = path.read_text(encoding='utf8')
+    m = PROJECT_VERSION_RE.search(s)
+    if not m:
+        return None
+    return {"content": s, "version": m.group(2), "match_span": m.span(), "full_match": m.group(0)}
+
+def write_cmake_version(path: Path, content: str, old: str, new: str):
+    # safer: replace the first occurrence found by regex (case-insensitive)
+    def _repl(m):
+        return m.group(1) + new + m.group(3)
+    new_content, n = PROJECT_VERSION_RE.subn(_repl, content, count=1)
+    if n == 0:
+        raise RuntimeError("Failed to apply replacement to CMakeLists.txt")
+    path.write_text(new_content, encoding='utf8')
+
+# ---------- git checks ----------
+def ensure_git_available():
+    try:
+        run("git --version")
+    except Exception:
+        die("git is not available in PATH")
+
+def ensure_inside_repo():
+    try:
+        inside = run("git rev-parse --is-inside-work-tree")
+        if inside.strip() != "true":
+            die("Not inside a git repository.")
+    except Exception:
+        die("Not inside a git repository.")
+
+def working_tree_clean(force=False):
+    s = run("git status --porcelain")
+    if s and not force:
+        print(s)
+        return False
+    return True
+
+def tag_exists(tag):
+    out = run(f'git tag --list {tag}')
+    return bool(out)
+
+# ---------- normal mode flow ----------
+def normal_mode_bump(cmake_path: Path, old_version: str, new_version: str, dry_run=False, push=False):
+    info("Performing normal mode bump (commit + tag).")
+    if dry_run:
+        info("[dry-run] would update CMakeLists.txt from %s -> %s" % (old_version, new_version))
+    else:
+        write_cmake_version(cmake_path, cmake_path.read_text(encoding='utf8'), old_version, new_version)
+        info(f"Updated {CMAKE_FILENAME}")
+
+    run(f'git add "{CMAKE_FILENAME}"')
+    commit_msg = f'chore(release): v{new_version}'
+    run(f'git commit -m "{commit_msg}" --no-verify')
+    run(f'git tag -a v{new_version} -m "v{new_version}"')
+    info(f"Created commit and tag v{new_version}")
+    if push:
+        run("git push")
+        run("git push --tags")
+        info("Pushed commit and tags to remote")
+
+# ---------- tag-only mode flow (uses temporary index & plumbing) ----------
+def tag_only_bump(cmake_path: Path, old_version: str, new_version: str, dry_run=False, push=False):
+    info("Performing tag-only bump: create a commit object and tag it, WITHOUT changing current branch history.")
+    # read current HEAD and tree
+    head = run("git rev-parse HEAD")
+    tree = run("git rev-parse HEAD^{tree}")
+
+    # compute the new blob for the updated CMake file
+    original_content = cmake_path.read_text(encoding='utf8')
+    updated_content = PROJECT_VERSION_RE.sub(lambda m: m.group(1)+new_version+m.group(3), original_content, count=1)
+    if updated_content == original_content:
+        raise RuntimeError("Failed to produce updated content for CMakeLists.txt")
+
+    info("Preparing temporary index")
+    with tempfile.TemporaryDirectory() as td:
+        tmp_index = os.path.join(td, "git-index")
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = tmp_index
+
+        # read current tree into the temporary index
+        run(f'git read-tree {tree}', env=env)
+
+        # create blob object for updated CMakeLists content
+        proc = subprocess.run('git hash-object -w --stdin', input=updated_content.encode('utf8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, env=env)
+        if proc.returncode != 0:
+            raise RuntimeError(f"git hash-object failed: {proc.stderr.decode('utf8')}")
+        blob = proc.stdout.decode('utf8').strip()
+        info(f"Created blob {blob} for updated {CMAKE_FILENAME}")
+
+        # update the temporary index entry for CMakeLists.txt with the new blob
+        # assume regular file mode 100644
+        run(f'git update-index --add --cacheinfo 100644,{blob},"{CMAKE_FILENAME}"', env=env)
+
+        # write the tree from the temporary index
+        new_tree = run('git write-tree', env=env)
+        info(f"Created tree {new_tree}")
+
+        # create commit object with parent = current HEAD
+        commit_msg = f'chore(release): v{new_version}'
+        commit_cmd = f'echo {sh_escape(commit_msg)} | git commit-tree {new_tree} -p {head}'
+        commit_hash = run(commit_cmd)
+        info(f"Created commit object {commit_hash}")
+
+        # create annotated tag pointing at commit object
+        run(f'git tag -a v{new_version} -m "v{new_version}" {commit_hash}')
+        info(f"Created annotated tag v{new_version} -> {commit_hash}")
+
+        if dry_run:
+            info("[dry-run] tag-only: did not push")
+        else:
+            if push:
+                run("git push")
+                run("git push --tags")
+                info("Pushed tags to remote")
+
+# ---------- small utility for shell-quoting in commit-tree echo path ----------
+def sh_escape(s: str) -> str:
+    # basic POSIX single-quote escaping
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+
+# ---------- main ----------
+def main():
+    p = argparse.ArgumentParser(description="Bump the version in CMakeLists.txt and tag a release.")
+    p.add_argument("target", help="major|minor|patch or explicit X.Y.Z")
+    p.add_argument("--mode", choices=["normal", "tag-only"], default="normal", help="normal = commit+tag (recommended). tag-only = create commit object + tag but leave branch history unchanged.")
+    p.add_argument("--push", action="store_true", help="push commit and/or tags to origin")
+    p.add_argument("--force", action="store_true", help="skip clean working tree check")
+    p.add_argument("--dry-run", action="store_true", help="show actions without performing them")
+    args = p.parse_args()
+
+    cmake_path = Path.cwd() / CMAKE_FILENAME
+    if not cmake_path.exists():
+        die(f"{CMAKE_FILENAME} not found in {Path.cwd()}")
+
+    ensure_git_available()
+    ensure_inside_repo()
+
+    if not working_tree_clean(force=args.force):
+        die("Working tree not clean. Commit or stash changes, or pass --force.")
+
+    found = read_cmake_version(cmake_path)
+    if not found:
+        die(f"Could not find project(... VERSION x.y.z ...) in {CMAKE_FILENAME}")
+
+    current = found["version"]
+    target = args.target
+
+    if target in ("major","minor","patch"):
+        new_version = bump_semver(current, target)
+    elif SEMVER_RE.match(target):
+        new_version = target
+    else:
+        die("Target must be major|minor|patch or X.Y.Z")
+
+    if new_version == current:
+        die("New version equals current version; nothing to do.")
+
+    if tag_exists(f"v{new_version}"):
+        die(f"Tag v{new_version} already exists")
+
+    info(f"Current version: {current}")
+    info(f"New version:     {new_version}")
+    if args.dry_run:
+        info("[dry-run] no changes will be written or pushed")
+
+    # Two modes:
+    try:
+        if args.mode == "normal":
+            if args.dry_run:
+                info("[dry-run] would write new CMakeLists.txt and create commit+tag")
+            else:
+                # write file and run normal flow
+                write_cmake_version(cmake_path, found["content"], current, new_version)
+            normal_mode_bump(cmake_path, current, new_version, dry_run=args.dry_run, push=args.push)
+        else:
+            # tag-only mode uses plumbing to create a commit object and tag without touching branch
+            tag_only_bump(cmake_path, current, new_version, dry_run=args.dry_run, push=args.push)
+
+        info(f"✔ Bumped to v{new_version}")
+    except Exception as exc:
+        die(f"Operation failed: {exc}")
+
+if __name__ == "__main__":
+    main()
+
