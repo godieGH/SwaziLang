@@ -383,6 +383,16 @@ void Lexer::scan_token(std::vector<Token>& out) {
       advance(); advance(); advance();
       return;
    }
+   if (c == '=' && peek_next() == '=' && peek(2) == '=') {
+        add_token(out, TokenType::STRICT_EQUALITY, "===", line, col, 3);
+        advance(); advance(); advance();
+        return;
+    }
+    if (c == '!' && peek_next() == '=' && peek(2) == '=') {
+        add_token(out, TokenType::STRICT_NOTEQUAL, "!==", line, col, 3);
+        advance(); advance(); advance();
+        return;
+    }
 
     // two-char operators
     if (c == '*' && peek_next() == '*') { add_token(out, TokenType::POWER, "**", line, col, 2); advance(); advance(); return; }

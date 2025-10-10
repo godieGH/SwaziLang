@@ -542,7 +542,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           std::isnan(num)
         };
       }
-      if (prop == "hainaMwyisho") {
+      if (prop == "inf") {
         return Value {
           !std::isfinite(num)
         };
@@ -695,24 +695,116 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       if (prop == "kipeuo") {
         auto native_impl = [this,
           num](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+
+          // default: sqrt
           if (args.empty()) {
-            if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha thamani hasi");
+            if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha pili cha thamani hasi");
             return Value {
               std::sqrt(num)
-            }; // sqrt default
+            };
           }
+
           double b = to_number(args[0]);
           if (b == 0) throw std::runtime_error("Huwezi kugawa kwa sifuri kwenye kipeuo");
-          // nth root: num^(1/b)
+          if (!std::isfinite(b)) throw std::runtime_error("Kiwango cha kipeuo si sahihi(inf)");
+
+          // guard: negative base with negative root degree -> division by zero if num==0
+          if (num == 0.0 && b < 0.0) throw std::runtime_error("Haiwezekani kupata kipeuo hasi cha sifuri");
+
+          // helper: decide if b is (almost) an integer
+          auto is_integer = [](double x) {
+            return std::isfinite(x) && std::fabs(x - std::round(x)) < 1e-12;
+          };
+
+          if (is_integer(b)) {
+            // safe integer conversion with magnitude check
+            double rb = std::round(b);
+            if (rb > static_cast<double > (LLONG_MAX) || rb < static_cast<double > (LLONG_MIN)) {
+              throw std::runtime_error("Kiwango cha kipeuo kimezidi mipaka");
+            }
+            long long ib = static_cast<long long > (rb);
+
+            // handle special small integer cases for numeric stability
+            if (ib == 1) return Value {
+              num
+            }; // 1st root => itself
+            if (ib == -1) {
+              // -1 => reciprocal
+              if (num == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
+              return Value {
+                1.0 / num
+              };
+            }
+            if (ib == 2) {
+              // square root
+              if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha thamani hasi");
+              return Value {
+                std::sqrt(num)
+              };
+            }
+            if (ib == -2) {
+              if (num == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
+              if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha thamani hasi");
+              return Value {
+                1.0 / std::sqrt(num)
+              };
+            }
+            if (ib == 3 || ib == -3) {
+              // cube root
+              double root = std::cbrt(std::fabs(num));
+              if (ib < 0) {
+                if (num == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
+                root = 1.0 / root;
+              }
+              // cube root of negative is negative
+              if (num < 0) root = -root;
+              return Value {
+                root
+              };
+            }
+
+            // For other integer ib:
+            bool ib_is_odd = (std::llabs(ib) % 2 == 1);
+            long long abs_ib = llabs(ib);
+
+            if (!ib_is_odd && num < 0) {
+              // even root of negative -> non-real
+              throw std::runtime_error("You can not calculate nth root(kipeuo cha nth cha namba) of a -ve number, when 'n' is even ");
+            }
+
+            // compute nth root: sign handling for odd roots
+            double result = std::pow(std::fabs(num), 1.0 / static_cast<double > (abs_ib));
+            if (num < 0) result = -result; // odd ib => negative result allowed
+
+            if (ib < 0) {
+              // negative ib => reciprocal
+              if (result == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
+              result = 1.0 / result;
+            }
+
+            return Value {
+              result
+            };
+          }
+
+          // b is non-integer (fractional root). For real results, base must be >= 0.
+          if (num < 0) {
+            throw std::runtime_error("You can not calculate nth root(kipeuo cha nth cha namba) of -ve number(namba hasi) with a non integer(n) (that will produce a complex number — a + bi)");
+          }
+
+          // general fractional root: num^(1/b)
+          double res = std::pow(num, 1.0 / b);
           return Value {
-            std::pow(num, 1.0 / b)
+            res
           };
         };
+
         auto fn = std::make_shared < FunctionValue > (std::string("native:number.kipeuo"), native_impl, env, mem->token);
         return Value {
           fn
         };
       }
+
 
       // n.kubwa / n.ndogo -> compare n to args; single-arg returns number, multi-arg returns new array
       if (prop == "kubwa" || prop == "ndogo") {
@@ -1593,6 +1685,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       std::pow(to_number(left), to_number(right))
     };
 
+    if (op == "===") {
+      return Value(to_bool(Value(is_strict_equal(left, right))));
+    }
+    if (op == "!==") {
+      return Value(!is_strict_equal(left, right));
+    }
     if (op == "==" || op == "sawa") {
       return Value {
         is_equal(left, right)

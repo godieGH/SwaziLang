@@ -141,6 +141,8 @@ enum class TokenType {
     LESSOREQUALTHAN,
     EQUALITY,
     NOTEQUAL,
+    STRICT_EQUALITY,
+    STRICT_NOTEQUAL,
 
     // -----------------------
     // Indentation-based blocks / newlines (for indent-sensitive grammars)

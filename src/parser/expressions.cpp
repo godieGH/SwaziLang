@@ -80,12 +80,21 @@ std::unique_ptr < ExpressionNode > Parser::parse_logical_and() {
 
 std::unique_ptr < ExpressionNode > Parser::parse_equality() {
    auto left = parse_comparison();
-   while (peek().type == TokenType::EQUALITY || peek().type == TokenType::NOTEQUAL) {
+   while (peek().type == TokenType::EQUALITY ||
+          peek().type == TokenType::NOTEQUAL ||
+          peek().type == TokenType::STRICT_EQUALITY ||
+          peek().type == TokenType::STRICT_NOTEQUAL) {
       Token op = consume();
       auto right = parse_comparison();
       auto node = std::make_unique < BinaryExpressionNode > ();
       if (!op.value.empty()) node->op = op.value;
-      else node->op = (op.type == TokenType::EQUALITY) ? "==": "!=";
+      else {
+         // assign textual operator string based on token type
+         if (op.type == TokenType::EQUALITY) node->op = "==";
+         else if (op.type == TokenType::NOTEQUAL) node->op = "!=";
+         else if (op.type == TokenType::STRICT_EQUALITY) node->op = "===";
+         else /* STRICT_NOTEQUAL */ node->op = "!==";
+      }
       node->left = std::move(left);
       node->right = std::move(right);
       node->token = op;

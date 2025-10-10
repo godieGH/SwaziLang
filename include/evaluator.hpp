@@ -206,7 +206,8 @@ class Evaluator {
 
   // value equality helper (deep for arrays, tolerant for mixed number/string)
   bool is_equal(const Value& a, const Value& b);
-
+  // strict equality: no coercion — types must match and values compared directly
+  bool is_strict_equal(const Value& a, const Value& b);
 
   Value get_object_property(ObjectPtr obj, const std::string &key, EnvPtr env);
   void set_object_property(ObjectPtr obj, const std::string &key, const Value &val, EnvPtr env, const Token &assignToken);

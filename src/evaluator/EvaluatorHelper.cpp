@@ -185,6 +185,46 @@ bool Evaluator::is_equal(const Value& a, const Value& b) {
    // fallback: compare stringified values
    return to_string_value(a) == to_string_value(b);
 }
+bool Evaluator::is_strict_equal(const Value& a, const Value& b) {
+    // Fast path: identical variant index -> compare by contained type without coercion
+    if (a.index() != b.index()) return false;
+
+    // monostate == monostate
+    if (std::holds_alternative<std::monostate>(a)) return true;
+
+    if (auto pa = std::get_if<double>(&a)) {
+        auto pb = std::get_if<double>(&b);
+        return pb && (*pa == *pb);
+    }
+    if (auto sa = std::get_if<std::string>(&a)) {
+        auto sb = std::get_if<std::string>(&b);
+        return sb && (*sa == *sb);
+    }
+    if (auto ba = std::get_if<bool>(&a)) {
+        auto bb = std::get_if<bool>(&b);
+        return bb && (*ba == *bb);
+    }
+    if (auto fa = std::get_if<FunctionPtr>(&a)) {
+        auto fb = std::get_if<FunctionPtr>(&b);
+        // strict equality for function values: compare shared_ptr identity
+        return fb && (fa->get() == fb->get());
+    }
+    if (auto aa = std::get_if<ArrayPtr>(&a)) {
+        auto ab = std::get_if<ArrayPtr>(&b);
+        return ab && (aa->get() == ab->get()); // identity (same array object)
+    }
+    if (auto oa = std::get_if<ObjectPtr>(&a)) {
+        auto ob = std::get_if<ObjectPtr>(&b);
+        return ob && (oa->get() == ob->get()); // object identity
+    }
+    if (auto ca = std::get_if<ClassPtr>(&a)) {
+        auto cb = std::get_if<ClassPtr>(&b);
+        return cb && (ca->get() == cb->get());
+    }
+
+    // fallback false for unknown combinations
+    return false;
+}
 
 
 bool Evaluator::is_private_access_allowed(ObjectPtr obj, EnvPtr env) {
