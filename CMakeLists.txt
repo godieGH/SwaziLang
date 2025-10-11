@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(SwaziLang VERSION 1.12.0 LANGUAGES CXX)
+project(SwaziLang VERSION 1.12.0 LANGUAGES C CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 23)
@@ -8,9 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Source files
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 
+add_library(linenoise thirdparty/linenoise/linenoise.c)
+target_include_directories(linenoise PUBLIC thirdparty/linenoise/)
+
 # Create executable target
 add_executable(swazi ${SOURCES})
-
 # Include headers for this target
 target_include_directories(swazi PRIVATE include)
 
@@ -37,3 +39,5 @@ endif()
 
 # Optional: link external libraries
 # target_link_libraries(swazi PRIVATE <lib>)
+
+target_link_libraries(swazi PRIVATE linenoise)

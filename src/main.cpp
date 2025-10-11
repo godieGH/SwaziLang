@@ -3,172 +3,19 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <optional>
+#include <cstdlib>
 
 #include "lexer.hpp"
 #include "parser.hpp"
 #include "evaluator.hpp"
+#include "repl.hpp"
 
 #include "print_debug.hpp"
 
 #include <filesystem>
+
 namespace fs = std::filesystem;
-
-
-static bool is_likely_incomplete_input(const std::string &err) {
-  // Treat parser expectations that mean "unterminated input" as incomplete so REPL continues.
-  // Removed "Expected ':'" because the REPL now proactively handles ':'-started blocks.
-  return err.find("Expected dedent") != std::string::npos ||
-  err.find("Expected '}'") != std::string::npos ||
-  err.find("Expected ')'") != std::string::npos ||
-  err.find("Expected ']'") != std::string::npos;
-}
-
-// --- Helpers for REPL indentation and block detection ---
-
-static int count_leading_indent_spaces(const std::string &line) {
-  // Tabs are treated as 4 spaces here. Adjust if you want different behavior.
-  int count = 0;
-  for (char c: line) {
-    if (c == ' ') count += 1;
-    else if (c == '\t') count += 4;
-    else break;
-  }
-  return count;
-}
-
-static bool is_blank_or_spaces(const std::string &s) {
-  for (unsigned char c: s) if (!std::isspace(c)) return false;
-  return true;
-}
-
-static char last_non_ws_char(const std::string &line) {
-  for (int i = (int)line.size() - 1; i >= 0; --i) {
-    unsigned char ch = static_cast<unsigned char > (line[i]);
-    if (!std::isspace(ch)) return static_cast<char > (ch);
-  }
-  return '\0';
-}
-
-static bool ends_with_colon(const std::string &line) {
-  return last_non_ws_char(line) == ':';
-}
-
-static bool ends_with_open_brace(const std::string &line) {
-  return last_non_ws_char(line) == '{';
-}
-
-// --- REPL: colon-block tracking + brace continuation ---
-// Behavior:
-//  - If a line ends with ':'    -> push indent level and continue reading (colon block).
-//  - If a line ends with '{'    -> continue reading (brace block) but DO NOT push indent level.
-//  - If inside colon blocks: typing a line with indent <= top-of-stack dedents and triggers parse+exec.
-//  - Parser-driven incomplete input (unclosed paren, expected '}', etc.) still handled by exception check.
-
-static void run_repl_mode() {
-  std::string buffer;
-  Evaluator evaluator; // reuse evaluator across inputs if desired
-  std::vector < int > colon_indent_stack; // record indentation bases only for ':' blocks
-  std::cout << "❯❯ swazi v" << SWAZI_VERSION << "\n";
-  std::cout << "Swazi REPL — type 'exit' or Ctrl-D to quit\n";
-
-  while (true) {
-    // Prompt
-    std::cout << (buffer.empty() ? "swazi❯ ": "...❯ ");
-    std::cout.flush();
-
-    std::string line;
-    if (!std::getline(std::cin, line)) {
-      // EOF (Ctrl-D)
-      std::cout << "\n";
-      break;
-    }
-    if (line == "exit" || line == "quit") break;
-
-    // Append line to buffer with newline
-    buffer += line;
-    buffer.push_back('\n');
-
-    // ---- Proactive continuation decisions ----
-    // 1) If line ends with ':' -> colon-block: push indent and continue reading.
-    if (ends_with_colon(line)) {
-      int base_indent = count_leading_indent_spaces(line);
-      colon_indent_stack.push_back(base_indent);
-      continue; // show continuation prompt; do not parse yet
-    }
-
-    // 2) If line ends with '{' -> brace-block continuation: continue reading but don't record indent
-    if (ends_with_open_brace(line)) {
-      continue; // rely on parser to decide when brace block is complete
-    }
-
-    // 3) If we are inside colon blocks, use indentation to decide whether to keep reading
-    if (!colon_indent_stack.empty()) {
-      // If user typed a blank line, we keep reading inside the block (no dedent).
-      if (is_blank_or_spaces(line)) {
-        continue;
-      }
-
-      int leading = count_leading_indent_spaces(line);
-      if (leading > colon_indent_stack.back()) {
-        // still inside the most recent colon block
-        continue;
-      } else {
-        // dedent observed (typed a line at indent <= base of last colon block)
-        // pop any colon blocks that are closed by this dedent
-        while (!colon_indent_stack.empty() && leading <= colon_indent_stack.back()) {
-          colon_indent_stack.pop_back();
-        }
-        // fall through -> attempt parse+evaluate
-      }
-    }
-
-    // ---- Try lex/parse/evaluate the accumulated buffer ----
-    try {
-      if (buffer.empty() || buffer.back() != '\n') buffer.push_back('\n');
-
-      Lexer lexer(buffer, "<repl>");
-      std::vector < Token > tokens = lexer.tokenize();
-
-      Parser parser(tokens);
-      std::unique_ptr < ProgramNode > ast = parser.parse();
-
-      // Auto-print single-expression ASTs (like Python/Node REPLs)
-      bool did_auto_print = false;
-      if (ast->body.size() == 1) {
-        if (auto exprStmt = dynamic_cast<ExpressionStatementNode*>(ast->body[0].get())) {
-          Value v = evaluator.evaluate_expression(exprStmt->expression.get());
-          if (!evaluator.is_void(v)) {
-            std::cout << evaluator.value_to_string(v) << "\n";
-          }
-          did_auto_print = true;
-        }
-      }
-
-      if (!did_auto_print) {
-        evaluator.evaluate(ast.get());
-      }
-
-      // Success: clear buffer and colon-indent stack (brace blocks are handled by parser)
-      buffer.clear();
-      colon_indent_stack.clear();
-    } catch (const std::exception &e) {
-      std::string msg = e.what();
-      if (is_likely_incomplete_input(msg)) {
-        // Parser says input is incomplete (e.g. unclosed paren/expected '}'), so keep reading.
-        // Do NOT clear buffer or colon_indent_stack here.
-        continue;
-      }
-      // Real error: show message and reset buffer and indent stack.
-      std::cerr << "Error: " << msg << std::endl;
-      buffer.clear();
-      colon_indent_stack.clear();
-    } catch (...) {
-      std::cerr << "Unknown fatal error\n";
-      buffer.clear();
-      colon_indent_stack.clear();
-    }
-  }
-}
 
 static void run_file_mode(const std::string &filename) {
   std::ifstream file(filename);
@@ -220,8 +67,6 @@ static std::optional < fs::path > find_file_with_extensions(const fs::path &base
   }
   return std::nullopt;
 }
-
-
 
 int main(int argc, char* argv[]) {
   if (argc == 1) {
