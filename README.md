@@ -45,7 +45,7 @@ conan --version
 ```bash
 mkdir build
 cd build
-conan install .. --build=missing
+conan install .. --build=missing --output-folder=.
 ```
 
 ---
