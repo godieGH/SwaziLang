@@ -903,7 +903,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       const std::string &prop = mem->property;
 
       // Recognized array method names
-      if (prop == "indexOf" || prop == "tafutaIndex" || prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
+      if (prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" || prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
         prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
         prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
         prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
@@ -1056,7 +1056,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
           // indexOf: indexOf(value) -> returns index or -1
           // indexOf with optional start and backward-search sentinel: indexOf(value, start?)
-          if (prop == "indexOf") {
+          if (prop == "indexOf" || prop == "indexYa") {
             if (args.empty()) throw std::runtime_error("arr.indexOf needs one argument at " + token.loc.to_string());
 
             const Value& target = args[0];
