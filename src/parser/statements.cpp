@@ -317,6 +317,12 @@ std::unique_ptr < StatementNode > Parser::parse_class_declaration() {
   nameNode->token = idTok;
 
   std::unique_ptr < IdentifierNode > superNode = nullptr;
+
+  // NEW: accept either:
+  //   muundo Name rithi Super
+  // or
+  //   muundo Name(Super)
+  // The parenthesized form is a shorthand (python-style) and works with either ':' (indent) or '{' body forms.
   if (peek().type == TokenType::RITHI) {
     consume(); // consume 'rithi'
     expect(TokenType::IDENTIFIER, "Expected base class name after 'rithi'.");
@@ -324,6 +330,22 @@ std::unique_ptr < StatementNode > Parser::parse_class_declaration() {
     superNode = std::make_unique < IdentifierNode > ();
     superNode->name = superTok.value;
     superNode->token = superTok;
+  } else if (peek().type == TokenType::OPENPARENTHESIS) {
+    // parenthesized shorthand: (Super)
+    consume(); // consume '('
+
+    // allow optional formatting inside parentheses (follow other parser tolerant patterns)
+    while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+
+    expect(TokenType::IDENTIFIER, "Expected base class name inside parentheses after class name");
+    Token superTok = tokens[position - 1];
+    superNode = std::make_unique < IdentifierNode > ();
+    superNode->name = superTok.value;
+    superNode->token = superTok;
+
+    // allow optional formatting before closing ')'
+    while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after base class name");
   }
 
   std::unique_ptr < ClassBodyNode > body = nullptr;
@@ -455,7 +477,6 @@ std::unique_ptr < StatementNode > Parser::parse_class_declaration() {
 
   return std::unique_ptr < StatementNode > (std::move(classNode));
 }
-
 std::unique_ptr < StatementNode > Parser::parse_print_statement(bool newline) {
   // capture the keyword token (CHAPISHA / ANDIKA) which was consumed by caller
   Token kwTok = tokens[position - 1];
