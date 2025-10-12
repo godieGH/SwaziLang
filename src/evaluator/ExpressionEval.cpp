@@ -335,7 +335,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // anzaNa(prefix) -> startsWith
       if (prop == "huanzaNa") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.anzaNa inahitaji hoja 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.anzaNa needs 1 arg at " + token.loc.to_string());
           std::string pref = to_string_value(args[0]);
           if (pref.size() > s_val.size()) return Value {
             false
@@ -349,7 +349,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // ishaNa(suffix) -> endsWith
       if (prop == "huishaNa") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.ishaNa inahitaji hoja 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.ishaNa needs 1 arg at " + token.loc.to_string());
           std::string suf = to_string_value(args[0]);
           if (suf.size() > s_val.size()) return Value {
             false
@@ -363,7 +363,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // kuna(sub) -> includes
       if (prop == "kuna") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.kuna inahitaji hoja 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.kuna needs 1 arg at " + token.loc.to_string());
           std::string sub = to_string_value(args[0]);
           return Value {
             s_val.find(sub) != std::string::npos
@@ -374,7 +374,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // tafuta(sub, fromIndex?) -> indexOf
       if (prop == "tafuta") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.tafuta inahitaji hoja 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.tafuta needs 1 argument at " + token.loc.to_string());
           std::string sub = to_string_value(args[0]);
           size_t from = 0;
           if (args.size() >= 2) from = static_cast<size_t > (std::max(0LL, static_cast<long long > (to_number(args[1]))));
@@ -409,7 +409,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // badilisha(old, neu) -> replace first occurrence
       if (prop == "badilisha") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.size() < 2) throw std::runtime_error("str.badilisha inahitaji hoja 2 at " + token.loc.to_string());
+          if (args.size() < 2) throw std::runtime_error("str.badilisha needs 2 args at " + token.loc.to_string());
           std::string oldv = to_string_value(args[0]);
           std::string newv = to_string_value(args[1]);
           std::string out = s_val;
@@ -424,7 +424,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // badilishaZote(old, neu) -> replace all occurrences
       if (prop == "badilishaZote") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.size() < 2) throw std::runtime_error("str.badilishaZote inahitaji hoja 2 at " + token.loc.to_string());
+          if (args.size() < 2) throw std::runtime_error("str.badilishaZote needs 2 args at " + token.loc.to_string());
           std::string oldv = to_string_value(args[0]);
           std::string newv = to_string_value(args[1]);
           if (oldv.empty()) return Value {
@@ -488,7 +488,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // unganisha(other) -> concat and return new string
       if (prop == "unganisha") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.unganisha inahitaji arg atleast 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.unganisha needs atleast one arg at " + token.loc.to_string());
           return Value {
             s_val + to_string_value(args[0])
           };
@@ -498,7 +498,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // rudia(n) -> repeat string n times
       if (prop == "rudia") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.rudia inahitaji hoja 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.rudia needs 1 args at " + token.loc.to_string());
           long long n = static_cast<long long > (to_number(args[0]));
           if (n <= 0) return Value {
             std::string()
@@ -515,7 +515,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       // herufiYa(index) -> charAt (single-char string or empty)
       if (prop == "herufiYa") {
         return make_fn([this, s_val](const std::vector < Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-          if (args.empty()) throw std::runtime_error("str.herufiKwa inahitaji hoja 1 at " + token.loc.to_string());
+          if (args.empty()) throw std::runtime_error("str.herufiKwa needs 1 arg at " + token.loc.to_string());
           long long idx = static_cast<long long > (to_number(args[0]));
           if (idx < 0 || (size_t)idx >= s_val.size()) return Value {
             std::string()
@@ -903,7 +903,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
       const std::string &prop = mem->property;
 
       // Recognized array method names
-      if (prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
+      if (prop == "indexOf" || prop == "tafutaIndex" || prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
         prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
         prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
         prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
@@ -915,7 +915,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
           // push: ongeza(value...)
           if (prop == "ongeza") {
-            if (args.empty()) throw std::runtime_error("arr.ongeza inahitaji angalau 1 hoja at " + token.loc.to_string());
+            if (args.empty()) throw std::runtime_error("arr.ongeza needs atleast 1 arg at " + token.loc.to_string());
             arr->elements.insert(arr->elements.end(), args.begin(), args.end());
             return Value {
               static_cast<double > (arr->elements.size())
@@ -973,7 +973,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
           // unshift: ongezaMwanzo(...)
           if (prop == "ongezaMwanzo") {
-            if (args.empty()) throw std::runtime_error("arr.ongezaMwanzo inahitaji angalau 1 hoja at " + token.loc.to_string());
+            if (args.empty()) throw std::runtime_error("arr.ongezaMwanzo needs atleast 1 arg at " + token.loc.to_string());
             arr->elements.insert(arr->elements.begin(), args.begin(), args.end());
             return Value {
               static_cast<double > (arr->elements.size())
@@ -1002,7 +1002,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           // extend: panua(otherArray)
           if (prop == "panua") {
             if (args.empty() || !std::holds_alternative < ArrayPtr > (args[0])) {
-              throw std::runtime_error("arr.panua inahitaji safu kama hoja at " + token.loc.to_string());
+              throw std::runtime_error("arr.panua needs an array as an argument at " + token.loc.to_string());
             }
 
             ArrayPtr other = std::get < ArrayPtr > (args[0]);
@@ -1054,10 +1054,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             };
           }
 
-          // indexOf: tafuta(value) -> returns index or -1
-          // indexOf with optional start and backward-search sentinel: tafuta(value, start?)
-          if (prop == "tafuta") {
-            if (args.empty()) throw std::runtime_error("arr.tafuta inahitaji hoja 1 at " + token.loc.to_string());
+          // indexOf: indexOf(value) -> returns index or -1
+          // indexOf with optional start and backward-search sentinel: indexOf(value, start?)
+          if (prop == "indexOf") {
+            if (args.empty()) throw std::runtime_error("arr.indexOf needs one argument at " + token.loc.to_string());
 
             const Value& target = args[0];
             long long n = static_cast<long long > (arr->elements.size());
@@ -1115,9 +1115,60 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           }
 
 
+          // find: tafuta(fn) -> returns first element matching fn(elem, index, arr)
+          if (prop == "tafuta") {
+            if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
+            throw std::runtime_error("arr.tafuta needs a function as an argument at " + token.loc.to_string());
+            FunctionPtr predicate = std::get < FunctionPtr > (args[0]);
+
+            for (size_t i = 0; i < arr->elements.size(); ++i) {
+              Value res = call_function(predicate, {
+                arr->elements[i],
+                Value {
+                  static_cast<double > (i)
+                },
+                Value {
+                  arr
+                }
+              }, token);
+
+              if (to_bool(res))
+              return arr->elements[i]; // return first matching element
+            }
+            return std::monostate {}; // like JS undefined when no match
+          }
+
+          // findIndex: tafutaKwanza(fn) -> returns index of first match or -1
+          if (prop == "tafutaIndex") {
+            if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
+            throw std::runtime_error("arr.tafutaIndex needs a function as argument at " + token.loc.to_string());
+            FunctionPtr predicate = std::get < FunctionPtr > (args[0]);
+
+            for (size_t i = 0; i < arr->elements.size(); ++i) {
+              Value res = call_function(predicate, {
+                arr->elements[i],
+                Value {
+                  static_cast<double > (i)
+                },
+                Value {
+                  arr
+                }
+              }, token);
+
+              if (to_bool(res))
+              return Value {
+                static_cast<double > (i)
+              };
+            }
+            return Value {
+              static_cast<double > (-1)
+            };
+          }
+
+
           // includes: kuna(value)
           if (prop == "kuna") {
-            if (args.empty()) throw std::runtime_error("arr.kuna inahitaji hoja 1 at " + token.loc.to_string());
+            if (args.empty()) throw std::runtime_error("arr.kuna needs 1 args at " + token.loc.to_string());
             for (const auto& e: arr->elements) if (is_equal(e, args[0])) return Value {
               true
             };
@@ -1179,7 +1230,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
           // map: badili(fn)
           if (prop == "badili") {
-            if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0])) throw std::runtime_error("arr.badili inahitaji kazi kama hoja at " + token.loc.to_string());
+            if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0])) throw std::runtime_error("arr.badili needs a function as an argument at " + token.loc.to_string());
             FunctionPtr mapper = std::get < FunctionPtr > (args[0]);
             auto out = std::make_shared < ArrayValue > ();
             for (size_t i = 0; i < arr->elements.size(); ++i) {
@@ -1222,7 +1273,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           // reduce: punguza(fn, initial?) -> reduce array to single value
           if (prop == "punguza") {
             if (args.empty() || !std::holds_alternative < FunctionPtr > (args[0]))
-            throw std::runtime_error("arr.punguza inahitaji kazi kama hoja at " + token.loc.to_string());
+            throw std::runtime_error("arr.punguza needs a function as an argument at " + token.loc.to_string());
             FunctionPtr reducer = std::get < FunctionPtr > (args[0]);
 
             size_t startIndex = 0;
@@ -1274,6 +1325,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
           fn
         };
       }
+
     }
 
 
@@ -1796,11 +1848,15 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     }
 
     if (ln->isBlock) {
-      fnDecl->body = std::move(ln->blockBody); // block-lambda
+      // Clone each statement so we do not mutate the original AST node (ln)
+      fnDecl->body.reserve(ln->blockBody.size());
+      for (const auto &sptr: ln->blockBody) {
+        fnDecl->body.push_back(sptr ? sptr->clone(): nullptr);
+      }
     } else {
       // expression-lambda: wrap exprBody into a ReturnStatementNode for consistent execution
       auto retStmt = std::make_unique < ReturnStatementNode > ();
-      retStmt->value = std::move(ln->exprBody);
+      retStmt->value = ln->exprBody ? ln->exprBody->clone(): nullptr;
       fnDecl->body.push_back(std::move(retStmt));
     }
 

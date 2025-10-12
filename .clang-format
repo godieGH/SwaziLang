@@ -1,0 +1,11 @@
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 0                  # optional, 0 = no automatic wrapping
+BreakBeforeBraces: Attach       # ← opening brace stays on same line
+AllowShortFunctionsOnASingleLine: false
+BinPackArguments: false         # keep args readable
+BinPackParameters: false
+AlignAfterOpenBracket: DontAlign
+AlignOperands: false
+DerivePointerAlignment: false
+PointerAlignment: Left

@@ -358,7 +358,10 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     }
 
     // Move or clone the body into persisted (we can move here since fd is ephemeral)
-    persisted->body = std::move(fd->body);
+    persisted->body.reserve(fd->body.size());
+ for (const auto &s : fd->body) {
+     persisted->body.push_back(s ? s->clone() : nullptr);
+ }
 
     // Construct FunctionValue from persisted declaration (FunctionValue ctor will
     // clone the parameter descriptors into its own storage as required).

@@ -1,49 +1,51 @@
 
 #include "builtins.hpp"
-#include "evaluator.hpp"
 
-#include <regex>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#include <iostream>
-#include <iomanip>
-#include <thread>
 #include <chrono>
-#include <ctime>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <regex>
+#include <sstream>
+#include <thread>
+
+#include "evaluator.hpp"
 
 #ifdef __has_include
-# if __has_include(<curl/curl.h>)
-#  include <curl/curl.h>
-#  define HAVE_LIBCURL 1
-# endif
+#if __has_include(<curl/curl.h>)
+#include <curl/curl.h>
+#define HAVE_LIBCURL 1
+#endif
 #endif
 
 #ifndef _WIN32
-# include <unistd.h>
+#include <unistd.h>
 #else
-# include <windows.h>
-# include <processthreadsapi.h>
+#include <processthreadsapi.h>
+#include <windows.h>
 #endif
 
 namespace fs = std::filesystem;
 
-
 // small helper to coerce Value -> string (same idea as earlier)
-static std::string value_to_string_simple(const Value &v) {
+static std::string value_to_string_simple(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
     if (std::holds_alternative<double>(v)) {
-        std::ostringstream ss; ss << std::get<double>(v); return ss.str();
+        std::ostringstream ss;
+        ss << std::get<double>(v);
+        return ss.str();
     }
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
     return std::string();
 }
 
 // Helper: create a native FunctionValue from a lambda
-template<typename F>
-static FunctionPtr make_native_fn(const std::string &name, F impl, EnvPtr env) {
+template <typename F>
+static FunctionPtr make_native_fn(const std::string& name, F impl, EnvPtr env) {
     auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
         return impl(args, callEnv, token);
     };
@@ -55,7 +57,9 @@ static FunctionPtr make_native_fn(const std::string &name, F impl, EnvPtr env) {
 // When libcurl is available we need a plain function pointer for the C callback.
 // Define the context struct and callback at file scope so they can be referenced
 // from the native lambda without needing captures.
-struct CurlWriteCtx { std::string buf; };
+struct CurlWriteCtx {
+    std::string buf;
+};
 
 static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t total = size * nmemb;
@@ -66,9 +70,9 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
 #endif
 
 // ----------------- REGEX module (extended with optional flags & test) -----------------
-static std::regex_constants::syntax_option_type parse_regex_flags(const std::string &flags) {
+static std::regex_constants::syntax_option_type parse_regex_flags(const std::string& flags) {
     using opt = std::regex_constants::syntax_option_type;
-    opt opts = std::regex_constants::ECMAScript; // default
+    opt opts = std::regex_constants::ECMAScript;  // default
     if (!flags.empty()) {
         if (flags.find('i') != std::string::npos) opts = static_cast<opt>(opts | std::regex_constants::icase);
         // future flags could be mapped here
@@ -80,7 +84,7 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
     // Helper to compile regex with optional flags argument
-     auto compile_re = [](const std::string &pat, const std::string &flags) -> std::regex {
+    auto compile_re = [](const std::string& pat, const std::string& flags) -> std::regex {
         // std::regex doesn't have 'g' or 'm' compile-time flags.
         // Strip semantic-only flags before mapping to std::regex options.
         std::string compileFlags = flags;
@@ -175,9 +179,8 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
                 }
             } catch (const std::regex_error &e) {
                 throw std::runtime_error(std::string("regex error at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["match"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["match"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // test(str, pattern [, flags]) -> bool ( supports m)
@@ -210,9 +213,8 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
                 }
             } catch (const std::regex_error &e) {
                 throw std::runtime_error(std::string("regex error at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["test"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["test"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // fullMatch(str, pattern [, flags]) -> bool
@@ -228,9 +230,8 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
                 return Value{ res };
             } catch (const std::regex_error &e) {
                 throw std::runtime_error(std::string("regex error at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["fullMatch"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["fullMatch"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // search(str, pattern [, flags]) -> number (first match position) or -1; supports m
@@ -271,12 +272,11 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
                 }
             } catch (const std::regex_error &e) {
                 throw std::runtime_error(std::string("regex error at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["search"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["search"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-        // replace(str, pattern, replacement [, flags]) -> string
+    // replace(str, pattern, replacement [, flags]) -> string
     // Behavior: by default replaces only the first match unless flags contains 'g' (global).
     // 'm' causes ^/$ to behave as line anchors by running replacements per-line.
     {
@@ -351,9 +351,8 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
                 }
             } catch (const std::regex_error &e) {
                 throw std::runtime_error(std::string("regex error at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["replace"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["replace"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // split(str, pattern [, flags]) -> Array
@@ -375,9 +374,8 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
                 return Value{ arr };
             } catch (const std::regex_error &e) {
                 throw std::runtime_error(std::string("regex error at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["split"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["split"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
@@ -395,9 +393,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             std::ifstream in(path, std::ios::binary);
             if (!in.is_open()) return Value{ std::monostate{} };
             std::ostringstream ss; ss << in.rdbuf();
-            return Value{ ss.str() };
-        }, env);
-        obj->properties["readFile"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ ss.str() }; }, env);
+        obj->properties["readFile"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // writeFile(path, content, [binary=false]) -> bool
@@ -413,9 +410,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             else out.open(path);
             if (!out.is_open()) return Value{ false };
             out << content;
-            return Value{ true };
-        }, env);
-        obj->properties["writeFile"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ true }; }, env);
+        obj->properties["writeFile"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // exists(path) -> bool
@@ -423,9 +419,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         auto fn = make_native_fn("fs.exists", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
             if (args.empty()) return Value{ false };
             std::string path = value_to_string_simple(args[0]);
-            return Value{ std::filesystem::exists(path) };
-        }, env);
-        obj->properties["exists"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ std::filesystem::exists(path) }; }, env);
+        obj->properties["exists"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // listDir(path) -> array of entries (strings)
@@ -441,9 +436,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             } catch (...) {
                 // return empty array on error
             }
-            return Value{ arr };
-        }, env);
-        obj->properties["listDir"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ arr }; }, env);
+        obj->properties["listDir"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // copy(src, dest, [overwrite=false]) -> bool
@@ -461,9 +455,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 return Value{ true };
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.copy failed at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["copy"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["copy"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // move(src, dest, [overwrite=false]) -> bool
@@ -490,9 +483,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 } catch (const std::filesystem::filesystem_error &e2) {
                     throw std::runtime_error(std::string("fs.move failed at ") + token.loc.to_string() + ": " + e.what() + " / " + e2.what());
                 }
-            }
-        }, env);
-        obj->properties["move"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["move"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // remove(path) -> bool  (files or directories; directories removed recursively)
@@ -506,9 +498,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 return Value{ removed > 0 };
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.remove failed at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["remove"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["remove"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // makeDir(path, [recursive=true]) -> bool (does not error if dir already exists)
@@ -524,9 +515,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 return Value{ ok };
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.makeDir failed at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["makeDir"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["makeDir"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // stat(path) -> object { exists, isFile, isDir, size, modifiedAt (ISO8601), permissions }
@@ -581,9 +571,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 return Value{ obj };
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.stat failed at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["stat"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["stat"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
@@ -631,9 +620,8 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             if (res != CURLE_OK) {
                 throw std::runtime_error(std::string("http.get failed: ") + curl_easy_strerror(res) + " at " + token.loc.to_string());
             }
-            return Value{ ctx.buf };
-        }, env);
-        obj->properties["get"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ ctx.buf }; }, env);
+        obj->properties["get"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // http.post(url, body, [contentType="application/json"], [headers_array]) -> string body
@@ -681,35 +669,26 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             if (res != CURLE_OK) {
                 throw std::runtime_error(std::string("http.post failed: ") + curl_easy_strerror(res) + " at " + token.loc.to_string());
             }
-            return Value{ ctx.buf };
-        }, env);
-        obj->properties["post"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ ctx.buf }; }, env);
+        obj->properties["post"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // http.createServer(handler) -> throws (not implemented in builtin). We provide a clear error.
     {
-        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            throw std::runtime_error("http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar). Called at " + token.loc.to_string());
-        }, env);
-        obj->properties["createServer"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar). Called at " + token.loc.to_string()); }, env);
+        obj->properties["createServer"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
 #else
     // Stubs when libcurl is not available
-    auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        throw std::runtime_error("http.get native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")");
-    }, env);
-    obj->properties["get"] = PropertyDescriptor{ fn_get, false, false, false, Token() };
+    auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.get native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")"); }, env);
+    obj->properties["get"] = PropertyDescriptor{fn_get, false, false, false, Token()};
 
-    auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        throw std::runtime_error("http.post native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")");
-    }, env);
-    obj->properties["post"] = PropertyDescriptor{ fn_post, false, false, false, Token() };
+    auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.post native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")"); }, env);
+    obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
 
-    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        throw std::runtime_error("http.createServer is not available in builtin without a server backend. Called at " + token.loc.to_string());
-    }, env);
-    obj->properties["createServer"] = PropertyDescriptor{ fn_server, false, false, false, Token() };
+    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.createServer is not available in builtin without a server backend. Called at " + token.loc.to_string()); }, env);
+    obj->properties["createServer"] = PropertyDescriptor{fn_server, false, false, false, Token()};
 #endif
 
     return obj;
@@ -717,187 +696,241 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 
 // ----------------- JSON module (parse & stringify) -----------------
 namespace {
-    // Minimal JSON parser / stringify routines
-    struct JsonParser {
-        const std::string &s;
-        size_t i = 0;
-        JsonParser(const std::string &str): s(str), i(0) {}
+// Minimal JSON parser / stringify routines
+struct JsonParser {
+    const std::string& s;
+    size_t i = 0;
+    JsonParser(const std::string& str) : s(str), i(0) {
+    }
 
-        void skip() {
-            while (i < s.size() && std::isspace((unsigned char)s[i])) ++i;
-        }
+    void skip() {
+        while (i < s.size() && std::isspace((unsigned char)s[i])) ++i;
+    }
 
-        bool match(char c) {
-            skip();
-            if (i < s.size() && s[i] == c) { ++i; return true; }
-            return false;
-        }
-
-        Value parseValue() {
-            skip();
-            if (i >= s.size()) return Value{ std::monostate{} };
-            char c = s[i];
-            if (c == '{') return parseObject();
-            if (c == '[') return parseArray();
-            if (c == '"') return Value{ parseString() };
-            if (c == 'n' && s.compare(i, 4, "null") == 0) { i += 4; return Value{ std::monostate{} }; }
-            if (c == 't' && s.compare(i, 4, "true") == 0) { i += 4; return Value{ true }; }
-            if (c == 'f' && s.compare(i, 5, "false") == 0) { i += 5; return Value{ false }; }
-            // number
-            return parseNumber();
-        }
-
-        std::string parseString() {
-            // assumes starting quote is at s[i]
-            ++i; // skip "
-            std::ostringstream out;
-            while (i < s.size()) {
-                char c = s[i++];
-                if (c == '"') break;
-                if (c == '\\' && i < s.size()) {
-                    char esc = s[i++];
-                    switch (esc) {
-                        case '"': out << '"'; break;
-                        case '\\': out << '\\'; break;
-                        case '/': out << '/'; break;
-                        case 'b': out << '\b'; break;
-                        case 'f': out << '\f'; break;
-                        case 'n': out << '\n'; break;
-                        case 'r': out << '\r'; break;
-                        case 't': out << '\t'; break;
-                        // Unicode escapes \uXXXX are ignored/naively handled
-                        default: out << esc; break;
-                    }
-                } else {
-                    out << c;
-                }
-            }
-            return out.str();
-        }
-
-        Value parseNumber() {
-            skip();
-            size_t start = i;
-            if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
-            while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
-            if (i < s.size() && s[i] == '.') {
-                ++i;
-                while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
-            }
-            if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
-                ++i;
-                if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
-                while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
-            }
-            double val = 0.0;
-            try {
-                val = std::stod(s.substr(start, i - start));
-            } catch (...) { val = 0.0; }
-            return Value{ val };
-        }
-
-        Value parseArray() {
-            // assume '['
+    bool match(char c) {
+        skip();
+        if (i < s.size() && s[i] == c) {
             ++i;
-            auto arr = std::make_shared<ArrayValue>();
-            skip();
-            if (match(']')) return Value{ arr };
-            while (i < s.size()) {
-                Value v = parseValue();
-                arr->elements.push_back(v);
-                skip();
-                if (match(',')) continue;
-                if (match(']')) break;
-            }
-            return Value{ arr };
+            return true;
         }
+        return false;
+    }
 
-        Value parseObject() {
-            ++i; // skip {
-            auto obj = std::make_shared<ObjectValue>();
-            skip();
-            if (match('}')) return Value{ obj };
-            while (i < s.size()) {
-                skip();
-                if (i >= s.size() || s[i] != '"') break;
-                std::string key = parseString();
-                skip();
-                match(':');
-                Value val = parseValue();
-                PropertyDescriptor pd;
-                pd.value = val;
-                pd.is_private = false;
-                pd.is_readonly = false;
-                pd.is_locked = false;
-                obj->properties[key] = pd;
-                skip();
-                if (match(',')) continue;
-                if (match('}')) break;
-            }
-            return Value{ obj };
+    Value parseValue() {
+        skip();
+        if (i >= s.size()) return Value{std::monostate{}};
+        char c = s[i];
+        if (c == '{') return parseObject();
+        if (c == '[') return parseArray();
+        if (c == '"') return Value{parseString()};
+        if (c == 'n' && s.compare(i, 4, "null") == 0) {
+            i += 4;
+            return Value{std::monostate{}};
         }
-    };
+        if (c == 't' && s.compare(i, 4, "true") == 0) {
+            i += 4;
+            return Value{true};
+        }
+        if (c == 'f' && s.compare(i, 5, "false") == 0) {
+            i += 5;
+            return Value{false};
+        }
+        // number
+        return parseNumber();
+    }
 
-    // stringify Value back to JSON
-    static std::string json_stringify_value(const Value &v);
-
-    static std::string json_stringify_string(const std::string &s) {
+    std::string parseString() {
+        // assumes starting quote is at s[i]
+        ++i;  // skip "
         std::ostringstream out;
-        out << '"';
-        for (unsigned char c : s) {
-            switch (c) {
-                case '"': out << "\\\""; break;
-                case '\\': out << "\\\\"; break;
-                case '\b': out << "\\b"; break;
-                case '\f': out << "\\f"; break;
-                case '\n': out << "\\n"; break;
-                case '\r': out << "\\r"; break;
-                case '\t': out << "\\t"; break;
-                default:
-                    if (c < 0x20) {
-                        out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << (int)c << std::dec;
-                    } else out << c;
+        while (i < s.size()) {
+            char c = s[i++];
+            if (c == '"') break;
+            if (c == '\\' && i < s.size()) {
+                char esc = s[i++];
+                switch (esc) {
+                    case '"':
+                        out << '"';
+                        break;
+                    case '\\':
+                        out << '\\';
+                        break;
+                    case '/':
+                        out << '/';
+                        break;
+                    case 'b':
+                        out << '\b';
+                        break;
+                    case 'f':
+                        out << '\f';
+                        break;
+                    case 'n':
+                        out << '\n';
+                        break;
+                    case 'r':
+                        out << '\r';
+                        break;
+                    case 't':
+                        out << '\t';
+                        break;
+                    // Unicode escapes \uXXXX are ignored/naively handled
+                    default:
+                        out << esc;
+                        break;
+                }
+            } else {
+                out << c;
             }
         }
-        out << '"';
         return out.str();
     }
 
-    static std::string json_stringify_value(const Value &v) {
-        if (std::holds_alternative<std::monostate>(v)) return "null";
-        if (std::holds_alternative<double>(v)) {
-            std::ostringstream ss; ss << std::get<double>(v); return ss.str();
+    Value parseNumber() {
+        skip();
+        size_t start = i;
+        if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
+        while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
+        if (i < s.size() && s[i] == '.') {
+            ++i;
+            while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
         }
-        if (std::holds_alternative<std::string>(v)) {
-            return json_stringify_string(std::get<std::string>(v));
+        if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+            ++i;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+            while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
         }
-        if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
-        if (std::holds_alternative<ArrayPtr>(v)) {
-            ArrayPtr a = std::get<ArrayPtr>(v);
-            std::ostringstream ss; ss << '[';
-            bool first = true;
-            for (auto &el : a->elements) {
-                if (!first) ss << ','; first = false;
-                ss << json_stringify_value(el);
-            }
-            ss << ']';
-            return ss.str();
+        double val = 0.0;
+        try {
+            val = std::stod(s.substr(start, i - start));
+        } catch (...) {
+            val = 0.0;
         }
-        if (std::holds_alternative<ObjectPtr>(v)) {
-            ObjectPtr o = std::get<ObjectPtr>(v);
-            std::ostringstream ss; ss << '{';
-            bool first = true;
-            for (auto &kv : o->properties) {
-                if (!first) ss << ','; first = false;
-                ss << json_stringify_string(kv.first) << ':' << json_stringify_value(kv.second.value);
-            }
-            ss << '}';
-            return ss.str();
-        }
-        // functions / classes -> null
-        return "null";
+        return Value{val};
     }
-} // namespace
+
+    Value parseArray() {
+        // assume '['
+        ++i;
+        auto arr = std::make_shared<ArrayValue>();
+        skip();
+        if (match(']')) return Value{arr};
+        while (i < s.size()) {
+            Value v = parseValue();
+            arr->elements.push_back(v);
+            skip();
+            if (match(',')) continue;
+            if (match(']')) break;
+        }
+        return Value{arr};
+    }
+
+    Value parseObject() {
+        ++i;  // skip {
+        auto obj = std::make_shared<ObjectValue>();
+        skip();
+        if (match('}')) return Value{obj};
+        while (i < s.size()) {
+            skip();
+            if (i >= s.size() || s[i] != '"') break;
+            std::string key = parseString();
+            skip();
+            match(':');
+            Value val = parseValue();
+            PropertyDescriptor pd;
+            pd.value = val;
+            pd.is_private = false;
+            pd.is_readonly = false;
+            pd.is_locked = false;
+            obj->properties[key] = pd;
+            skip();
+            if (match(',')) continue;
+            if (match('}')) break;
+        }
+        return Value{obj};
+    }
+};
+
+// stringify Value back to JSON
+static std::string json_stringify_value(const Value& v);
+
+static std::string json_stringify_string(const std::string& s) {
+    std::ostringstream out;
+    out << '"';
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':
+                out << "\\\"";
+                break;
+            case '\\':
+                out << "\\\\";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << (int)c << std::dec;
+                } else
+                    out << c;
+        }
+    }
+    out << '"';
+    return out.str();
+}
+
+static std::string json_stringify_value(const Value& v) {
+    if (std::holds_alternative<std::monostate>(v)) return "null";
+    if (std::holds_alternative<double>(v)) {
+        std::ostringstream ss;
+        ss << std::get<double>(v);
+        return ss.str();
+    }
+    if (std::holds_alternative<std::string>(v)) {
+        return json_stringify_string(std::get<std::string>(v));
+    }
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
+    if (std::holds_alternative<ArrayPtr>(v)) {
+        ArrayPtr a = std::get<ArrayPtr>(v);
+        std::ostringstream ss;
+        ss << '[';
+        bool first = true;
+        for (auto& el : a->elements) {
+            if (!first) ss << ',';
+            first = false;
+            ss << json_stringify_value(el);
+        }
+        ss << ']';
+        return ss.str();
+    }
+    if (std::holds_alternative<ObjectPtr>(v)) {
+        ObjectPtr o = std::get<ObjectPtr>(v);
+        std::ostringstream ss;
+        ss << '{';
+        bool first = true;
+        for (auto& kv : o->properties) {
+            if (!first) ss << ',';
+            first = false;
+            ss << json_stringify_string(kv.first) << ':' << json_stringify_value(kv.second.value);
+        }
+        ss << '}';
+        return ss.str();
+    }
+    // functions / classes -> null
+    return "null";
+}
+}  // namespace
 
 std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
@@ -913,23 +946,20 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env) {
                 return v;
             } catch (const std::exception &e) {
                 throw std::runtime_error(std::string("json.parse failed at ") + token.loc.to_string() + ": " + e.what());
-            }
-        }, env);
-        obj->properties["parse"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["parse"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // json.stringify(val) -> string
     {
         auto fn = make_native_fn("json.stringify", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
             if (args.empty()) return Value{ std::string("null") };
-            return Value{ json_stringify_value(args[0]) };
-        }, env);
-        obj->properties["stringify"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ json_stringify_value(args[0]) }; }, env);
+        obj->properties["stringify"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
 }
-
 
 // ----------------- PATH module -----------------
 std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
@@ -943,36 +973,32 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
             for (const auto &a : args) {
                 p /= value_to_string_simple(a);
             }
-            return Value{ p.lexically_normal().string() };
-        }, env);
-        obj->properties["join"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ p.lexically_normal().string() }; }, env);
+        obj->properties["join"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
     // basename(path)
     {
         auto fn = make_native_fn("path.basename", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
             if (args.empty()) return Value{ std::string() };
             fs::path p = value_to_string_simple(args[0]);
-            return Value{ p.filename().string() };
-        }, env);
-        obj->properties["basename"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ p.filename().string() }; }, env);
+        obj->properties["basename"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
     // dirname(path)
     {
         auto fn = make_native_fn("path.dirname", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
             if (args.empty()) return Value{ std::string() };
             fs::path p = value_to_string_simple(args[0]);
-            return Value{ p.parent_path().string() };
-        }, env);
-        obj->properties["dirname"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ p.parent_path().string() }; }, env);
+        obj->properties["dirname"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
     // extname(path)
     {
         auto fn = make_native_fn("path.extname", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
             if (args.empty()) return Value{ std::string() };
             fs::path p = value_to_string_simple(args[0]);
-            return Value{ p.extension().string() };
-        }, env);
-        obj->properties["extname"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ p.extension().string() }; }, env);
+        obj->properties["extname"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
     // resolve(...segments)
     {
@@ -987,14 +1013,12 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
                 return Value{ p.string() };
             } catch (...) {
                 return Value{ p.lexically_normal().string() };
-            }
-        }, env);
-        obj->properties["resolve"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            } }, env);
+        obj->properties["resolve"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
 }
-
 
 // ----------------- OS module -----------------
 std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
@@ -1004,24 +1028,23 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
     {
         auto fn = make_native_fn("os.platform", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
 #ifdef _WIN32
-            return Value{ std::string("windows") };
+            return Value{std::string("windows")};
 #elif __APPLE__
-            return Value{ std::string("macos") };
+            return Value{std::string("macos")};
 #elif __linux__
-            return Value{ std::string("linux") };
+            return Value{std::string("linux")};
 #else
-            return Value{ std::string("unknown") };
+            return Value{std::string("unknown")};
 #endif
-        }, env);
-        obj->properties["platform"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        },
+            env);
+        obj->properties["platform"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // os.cwd() -> string
     {
-        auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            return Value{ fs::current_path().string() };
-        }, env);
-        obj->properties["cwd"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
+        obj->properties["cwd"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // os.hostname() -> string
@@ -1034,9 +1057,8 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
 #else
             if (gethostname(buf, sizeof(buf)) == 0) return Value{ std::string(buf) };
 #endif
-            return Value{ std::string() };
-        }, env);
-        obj->properties["hostname"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ std::string() }; }, env);
+        obj->properties["hostname"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // os.tmpdir() -> string
@@ -1045,14 +1067,15 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
             const char* tmp = std::getenv("TMPDIR");
             if (!tmp) tmp = std::getenv("TMP");
             if (!tmp) tmp = std::getenv("TEMP");
-            if (tmp) return Value{ std::string(tmp) };
+            if (tmp) return Value{std::string(tmp)};
 #ifdef _WIN32
-            return Value{ std::string("C:\\Windows\\Temp") };
+            return Value{std::string("C:\\Windows\\Temp")};
 #else
-            return Value{ std::string("/tmp") };
+            return Value{std::string("/tmp")};
 #endif
-        }, env);
-        obj->properties["tmpdir"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        },
+            env);
+        obj->properties["tmpdir"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // os.cpus() -> number (count)
@@ -1060,15 +1083,12 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
         auto fn = make_native_fn("os.cpus", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
             unsigned int n = std::thread::hardware_concurrency();
             if (n == 0) n = 1;
-            return Value{ static_cast<double>(n) };
-        }, env);
-        obj->properties["cpus"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ static_cast<double>(n) }; }, env);
+        obj->properties["cpus"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
 }
-
-
 
 // ----------------- PROCESS module -----------------
 std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
@@ -1081,56 +1101,58 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
             std::string name = value_to_string_simple(args[0]);
             const char* v = std::getenv(name.c_str());
             if (!v) return Value{ std::monostate{} };
-            return Value{ std::string(v) };
-        }, env);
-        obj->properties["getEnv"] = PropertyDescriptor{ fn, false, false, false, Token() };
+            return Value{ std::string(v) }; }, env);
+        obj->properties["getEnv"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // process.setEnv(name, value) -> bool
     {
         auto fn = make_native_fn("process.setEnv", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.size() < 2) return Value{ false };
+            if (args.size() < 2) return Value{false};
             std::string name = value_to_string_simple(args[0]);
             std::string val = value_to_string_simple(args[1]);
 #ifdef _WIN32
             std::string setting = name + "=" + val;
             int res = _putenv(setting.c_str());
-            return Value{ res == 0 };
+            return Value{res == 0};
 #else
             int res = setenv(name.c_str(), val.c_str(), 1);
-            return Value{ res == 0 };
+            return Value{res == 0};
 #endif
-        }, env);
-        obj->properties["setEnv"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        },
+            env);
+        obj->properties["setEnv"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // process.unsetEnv(name) -> bool
     {
         auto fn = make_native_fn("process.unsetEnv", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ false };
+            if (args.empty()) return Value{false};
             std::string name = value_to_string_simple(args[0]);
 #ifdef _WIN32
             std::string setting = name + "=";
             int res = _putenv(setting.c_str());
-            return Value{ res == 0 };
+            return Value{res == 0};
 #else
             int res = unsetenv(name.c_str());
-            return Value{ res == 0 };
+            return Value{res == 0};
 #endif
-        }, env);
-        obj->properties["unsetEnv"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        },
+            env);
+        obj->properties["unsetEnv"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // process.pid() -> number
     {
         auto fn = make_native_fn("process.pid", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
 #ifdef _WIN32
-            return Value{ static_cast<double>(GetCurrentProcessId()) };
+            return Value{static_cast<double>(GetCurrentProcessId())};
 #else
-            return Value{ static_cast<double>(getpid()) };
+            return Value{static_cast<double>(getpid())};
 #endif
-        }, env);
-        obj->properties["pid"] = PropertyDescriptor{ fn, false, false, false, Token() };
+        },
+            env);
+        obj->properties["pid"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
