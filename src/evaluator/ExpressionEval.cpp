@@ -221,6 +221,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
   if (auto mem = dynamic_cast<MemberExpressionNode*>(expr)) {
 
     Value objVal = evaluate_expression(mem->object.get(), env);
+    
+    if (mem->is_optional && is_nullish(objVal)) {
+      return std::monostate {};
+    }
+    
     if (std::holds_alternative < ClassPtr > (objVal)) {
       ClassPtr cls = std::get < ClassPtr > (objVal);
       if (!cls || !cls->static_table) return std::monostate {};
@@ -1338,32 +1343,56 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
   }
 
   // Indexing: obj[index]
-  if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
-    Value objVal = evaluate_expression(idx->object.get(), env);
-    Value indexVal = evaluate_expression(idx->index.get(), env);
+if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
+  // Evaluate receiver first.
+  Value objVal = evaluate_expression(idx->object.get(), env);
 
-    // Array indexing uses numeric interpretation of indexVal
-    if (std::holds_alternative < ArrayPtr > (objVal)) {
-      ArrayPtr arr = std::get < ArrayPtr > (objVal);
-      if (!arr) return std::monostate {};
-
-      long long rawIndex = static_cast<long long > (to_number(indexVal));
-      if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
-        return std::monostate {};
-      }
-      return arr->elements[(size_t)rawIndex];
-    }
-
-    // Objects: use stringified index as key, go through unified getter (privacy/getter enforced)
-    if (std::holds_alternative < ObjectPtr > (objVal)) {
-      ObjectPtr op = std::get < ObjectPtr > (objVal);
-      if (!op) return std::monostate {};
-      std::string key = to_string_value(indexVal);
-      return get_object_property(op, key, env);
-    }
-
-    throw std::runtime_error("Attempted to index non-array value at " + idx->token.loc.to_string());
+  // Optional chaining: if receiver is nullish and this is an optional index,
+  // short-circuit and return undefined without evaluating the index expression.
+  if (idx->is_optional && is_nullish(objVal)) {
+    return std::monostate {};
   }
+
+  // Ensure index expression exists
+  if (!idx->index) {
+    throw std::runtime_error("Index expression missing at " + idx->token.loc.to_string());
+  }
+
+  // Now safe to evaluate the index expression.
+  Value indexVal = evaluate_expression(idx->index.get(), env);
+
+  // Array indexing uses numeric interpretation of indexVal
+  if (std::holds_alternative<ArrayPtr>(objVal)) {
+    ArrayPtr arr = std::get<ArrayPtr>(objVal);
+    if (!arr) return std::monostate {};
+
+    long long rawIndex = static_cast<long long>(to_number(indexVal));
+    if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
+      return std::monostate {};
+    }
+    return arr->elements[(size_t)rawIndex];
+  }
+
+  // String indexing: return single-char string (optional)
+  if (std::holds_alternative<std::string>(objVal)) {
+    std::string s = std::get<std::string>(objVal);
+    long long rawIndex = static_cast<long long>(to_number(indexVal));
+    if (rawIndex < 0 || (size_t)rawIndex >= s.size()) {
+      return std::monostate {};
+    }
+    return Value{ std::string(1, s[(size_t)rawIndex]) };
+  }
+
+  // Objects: use stringified index as key, go through unified getter (privacy/getter enforced)
+  if (std::holds_alternative<ObjectPtr>(objVal)) {
+    ObjectPtr op = std::get<ObjectPtr>(objVal);
+    if (!op) return std::monostate {};
+    std::string key = to_string_value(indexVal);
+    return get_object_property(op, key, env);
+  }
+
+  throw std::runtime_error("Attempted to index non-array value at " + idx->token.loc.to_string());
+}
 
   if (auto u = dynamic_cast<UnaryExpressionNode*>(expr)) {
     Value operand = evaluate_expression(u->operand.get(), env);
@@ -1776,52 +1805,62 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
   }
 
   if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
-    Value calleeVal = evaluate_expression(call->callee.get(), env);
-    std::vector < Value > args;
-    for (auto &argPtr: call->arguments) {
-      if (!argPtr) {
-        args.push_back(std::monostate {});
-        continue;
-      }
-
-      if (auto spread = dynamic_cast<SpreadElementNode*>(argPtr.get())) {
-        if (!spread->argument) {
-          throw std::runtime_error("Spread argument missing expression at " + spread->token.loc.to_string());
+    auto eval_args = [&](std::vector < Value > &out) {
+      out.clear();
+      out.reserve(call->arguments.size());
+      for (auto &argPtr: call->arguments) {
+        if (!argPtr) {
+          out.push_back(std::monostate {});
+          continue;
         }
-        Value v = evaluate_expression(spread->argument.get(), env);
 
-        // Expand arrays into positional args
-        if (std::holds_alternative < ArrayPtr > (v)) {
-          ArrayPtr src = std::get < ArrayPtr > (v);
-          if (src) {
-            for (auto &e: src->elements) {
-              args.push_back(e);
-            }
+        if (auto spread = dynamic_cast<SpreadElementNode*>(argPtr.get())) {
+          if (!spread->argument) {
+            throw std::runtime_error("Spread argument missing expression at " + spread->token.loc.to_string());
           }
-          continue;
+          Value v = evaluate_expression(spread->argument.get(), env);
+
+          if (std::holds_alternative < ArrayPtr > (v)) {
+            ArrayPtr src = std::get < ArrayPtr > (v);
+            if (src) {
+              for (auto &e: src->elements) out.push_back(e);
+            }
+            continue;
+          }
+
+          if (std::holds_alternative < std::string > (v)) {
+            std::string s = std::get < std::string > (v);
+            for (char c: s) out.push_back(Value {
+              std::string(1, c)
+            });
+            continue;
+          }
+
+          throw std::runtime_error("Spread in call expects array or string at " + spread->token.loc.to_string());
         }
 
-        // optionally allow strings -> each char push as string of length 1
-        if (std::holds_alternative < std::string > (v)) {
-          std::string s = std::get < std::string > (v);
-          for (char c: s) args.push_back(Value {
-            std::string(1, c)
-          });
-          continue;
-        }
-
-        throw std::runtime_error("Spread in call expects array or string at " + spread->token.loc.to_string());
+        out.push_back(evaluate_expression(argPtr.get(), env));
       }
+    };
 
-      // normal argument
-      args.push_back(evaluate_expression(argPtr.get(), env));
+    // Evaluate callee first (receiver/computed parts inside callee are handled
+    // by their own node logic; those nodes must also short-circuit when optional).
+    Value calleeVal = evaluate_expression(call->callee.get(), env);
+
+    // If this was an optional call and the callee is nullish, short-circuit without
+    // evaluating call arguments.
+    if (call->is_optional && is_nullish(calleeVal)) {
+      return std::monostate {};
     }
 
     if (std::holds_alternative < FunctionPtr > (calleeVal)) {
+      std::vector < Value > args;
+      eval_args(args);
       return call_function(std::get < FunctionPtr > (calleeVal), args, call->token);
     }
     throw std::runtime_error("Attempted to call a non-function value at " + call->token.loc.to_string());
   }
+
 
 
   if (auto t = dynamic_cast<TernaryExpressionNode*>(expr)) {
