@@ -422,6 +422,12 @@ void Lexer::scan_token(std::vector<Token>& out) {
       advance(); advance(); advance();
       return;
    }
+   if (c == '?' && peek_next() == '.') {
+      add_token(out, TokenType::QUESTION_DOT, "?.", line, col, 2);
+      advance(); // consume '?'
+      advance(); // consume '.'
+      return;
+   }
    if (c == '=' && peek_next() == '=' && peek(2) == '=') {
         add_token(out, TokenType::STRICT_EQUALITY, "===", line, col, 3);
         advance(); advance(); advance();
