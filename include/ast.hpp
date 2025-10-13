@@ -119,63 +119,72 @@ struct BinaryExpressionNode : public ExpressionNode {
 struct CallExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> callee;
     std::vector<std::unique_ptr<ExpressionNode>> arguments;
+    bool is_optional = false; // NEW: fn?.(...) or obj?.method(...)
+
     std::string to_string() const override {
         std::string c = callee ? callee->to_string() : "<null>";
-        std::string s = c + "(";
+        std::string args;
         for (size_t i = 0; i < arguments.size(); ++i) {
-            if (i) s += ", ";
-            s += arguments[i] ? arguments[i]->to_string() : "<null>";
+            if (i) args += ", ";
+            args += arguments[i] ? arguments[i]->to_string() : "<null>";
         }
-        s += ")";
-        return s;
+        return c + (is_optional ? "?(" : "(") + args + ")";
     }
+
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<CallExpressionNode>();
         n->token = token;
-        if (callee) n->callee = callee->clone();
+        n->is_optional = is_optional;
+        if (callee) n->callee = std::unique_ptr<ExpressionNode>(static_cast<ExpressionNode*>(callee->clone().release()));
         n->arguments.reserve(arguments.size());
-        for (const auto &arg : arguments) {
-            n->arguments.push_back(arg ? arg->clone() : nullptr);
+        for (const auto &a : arguments) {
+            if (a) n->arguments.push_back(std::unique_ptr<ExpressionNode>(static_cast<ExpressionNode*>(a->clone().release())));
+            else n->arguments.push_back(nullptr);
         }
         return n;
     }
 };
-
 // Member expression: obj.prop (e.g., arr.idadi, str.herufi, arr.ongeza)
 struct MemberExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> object;
     std::string property; // property name (identifier part)
+    bool is_optional = false;
+
     std::string to_string() const override {
         std::string o = object ? object->to_string() : "<null>";
-        return o + "." + property;
+        return o + (is_optional ? "?." : ".") + property;
     }
+
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<MemberExpressionNode>();
         n->token = token;
         n->property = property;
-        if (object) n->object = object->clone();
+        n->is_optional = is_optional;
+        if (object) n->object = std::unique_ptr<ExpressionNode>(static_cast<ExpressionNode*>(object->clone().release()));
         return n;
     }
 };
-
 // Index expression: obj[expr] (e.g., arr[0], arr[i+1])
 struct IndexExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> object;
     std::unique_ptr<ExpressionNode> index;
+    bool is_optional = false; // NEW flag for obj?.[expr] semantics
+
     std::string to_string() const override {
         std::string o = object ? object->to_string() : "<null>";
-        std::string idx = index ? index->to_string() : "";
-        return o + "[" + idx + "]";
+        std::string idx = index ? index->to_string() : "<null>";
+        return o + (is_optional ? "?[" : "[") + idx + "]";
     }
+
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<IndexExpressionNode>();
         n->token = token;
-        if (object) n->object = object->clone();
-        if (index) n->index = index->clone();
+        n->is_optional = is_optional;
+        if (object) n->object = std::unique_ptr<ExpressionNode>(static_cast<ExpressionNode*>(object->clone().release()));
+        if (index) n->index = std::unique_ptr<ExpressionNode>(static_cast<ExpressionNode*>(index->clone().release()));
         return n;
     }
 };
-
 // TernaryExpressionNode
 struct TernaryExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> condition;

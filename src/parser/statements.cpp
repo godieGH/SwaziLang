@@ -549,6 +549,62 @@ std::unique_ptr < StatementNode > Parser::parse_assignment_or_expression_stateme
         nodeExpr = std::move(mem);
         continue;
       }
+
+      if (peek().type == TokenType::QUESTION_DOT) {
+        Token qdotTok = consume(); // '?.'
+
+        // optional call: ident?.(...)
+        if (peek().type == TokenType::OPENPARENTHESIS) {
+          nodeExpr = parse_call(std::move(nodeExpr));
+          if (auto c = dynamic_cast<CallExpressionNode*>(nodeExpr.get())) {
+            c->is_optional = true;
+            c->token = qdotTok;
+          }
+          continue;
+        }
+
+        // optional member: ident?.prop
+        if (peek().type == TokenType::IDENTIFIER) {
+          Token propTok = consume();
+          auto mem = std::make_unique < MemberExpressionNode > ();
+          mem->object = std::move(nodeExpr);
+          mem->property = propTok.value;
+          mem->token = qdotTok;
+          mem->is_optional = true;
+
+          // if call follows immediately, make the call optional too
+          if (peek().type == TokenType::OPENPARENTHESIS) {
+            auto callNode = parse_call(std::move(mem));
+            if (auto cptr = dynamic_cast<CallExpressionNode*>(callNode.get())) {
+              cptr->is_optional = true;
+              cptr->token = qdotTok;
+            }
+            nodeExpr = std::move(callNode);
+          } else {
+            nodeExpr = std::move(mem);
+          }
+          continue;
+        }
+
+        // optional computed index: ident?.[expr]
+        if (peek().type == TokenType::OPENBRACKET) {
+          Token openIdx = consume(); // '['
+          auto idxExpr = parse_expression();
+          expect(TokenType::CLOSEBRACKET, "Expected ']' after index expression");
+          auto idxNode = std::make_unique < IndexExpressionNode > ();
+          idxNode->object = std::move(nodeExpr);
+          idxNode->index = std::move(idxExpr);
+          idxNode->token = qdotTok;
+          idxNode->is_optional = true;
+          nodeExpr = std::move(idxNode);
+          continue;
+        }
+
+        // otherwise syntax error
+        Token bad = peek();
+        throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": unexpected token after '?.'");
+      }
+
       if (peek().type == TokenType::OPENBRACKET) {
         Token openIdx = consume(); // consume '['
         auto idxExpr = parse_expression();
