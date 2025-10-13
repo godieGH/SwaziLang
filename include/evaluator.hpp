@@ -209,6 +209,11 @@ class Evaluator {
   // strict equality: no coercion — types must match and values compared directly
   bool is_strict_equal(const Value& a, const Value& b);
 
+ inline bool is_nullish(const Value &v) const {
+  return std::holds_alternative<std::monostate>(v);
+ }
+
+
   Value get_object_property(ObjectPtr obj, const std::string &key, EnvPtr env);
   void set_object_property(ObjectPtr obj, const std::string &key, const Value &val, EnvPtr env, const Token &assignToken);
 
