@@ -2127,6 +2127,14 @@ if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
     if (!std::holds_alternative < ObjectPtr > (v)) return std::monostate {};
     ObjectPtr obj = std::get < ObjectPtr > (v);
 
+    // collect evaluated args
+    std::vector<Value> args;
+    args.reserve(de->arguments.size());
+    for (auto &aexpr : de->arguments) {
+       if (!aexpr) args.push_back(std::monostate {});
+       else args.push_back(evaluate_expression(aexpr.get(), env));
+    }
+
     // call destructor if class link exists
     auto it = obj->properties.find("__class__");
     if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
@@ -2151,9 +2159,7 @@ if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
             EnvPtr dtorClosure = cls->defining_env ? cls->defining_env: env;
             auto dtorFn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, dtorClosure, persisted->token);
 
-            // No args supported for delete-expression destructor call in current AST.
-            std::vector < Value > args; // empty
-
+            // forward evaluated args into destructor call
             Value res = call_function_with_receiver(dtorFn, obj, args, m->token);
             obj->properties.clear();
             return res;
@@ -2165,7 +2171,6 @@ if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
     obj->properties.clear();
     return std::monostate {};
   }
-
 
   throw std::runtime_error("Unhandled expression node in evaluator");
 }

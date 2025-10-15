@@ -476,6 +476,15 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
        return;
     }
     ObjectPtr obj = std::get < ObjectPtr > (v);
+
+    // evaluate destructor args (if any)
+    std::vector<Value> args;
+    args.reserve(ds->expr->arguments.size());
+    for (auto &aexpr : ds->expr->arguments) {
+       if (!aexpr) args.push_back(std::monostate {});
+       else args.push_back(evaluate_expression(aexpr.get(), env));
+    }
+
     // try to find class meta on object: __class__ property
     auto it = obj->properties.find("__class__");
     if (it != obj->properties.end() && std::holds_alternative < ClassPtr > (it->second.value)) {
@@ -484,7 +493,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
        if (cls->body) {
           for (auto &m: cls->body->methods) {
              if (m && m->is_destructor) {
-                // create FunctionPtr and call it with receiver and no args
+                // create FunctionPtr and call it with receiver and args
                 auto persisted = std::make_shared<FunctionDeclarationNode>();
                 persisted->name = m->name;
                 persisted->token = m->token;
@@ -501,8 +510,8 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 auto fn = std::make_shared < FunctionValue > (persisted->name, persisted->parameters, persisted, env, persisted->token);
 
-                // call with receiver bound
-                call_function_with_receiver(fn, obj, {}, m->token);
+                // call with receiver bound and forward args
+                call_function_with_receiver(fn, obj, args, m->token);
                 break;
              }
           }
@@ -512,7 +521,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     obj->properties.clear();
     return;
 }
-
 
 
    if (auto rs = dynamic_cast<ReturnStatementNode*>(stmt)) {
