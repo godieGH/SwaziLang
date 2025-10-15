@@ -427,30 +427,33 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
    if (p.type == TokenType::FUTA) {
       Token futaTok = consume(); // consume 'futa'
 
-      // if followed by '(' treat as expression form, else treat as bare-target form
+      // if followed by '(' treat as expression form with optional args, else treat as bare-target form
       if (peek().type == TokenType::OPENPARENTHESIS) {
          // parse futa(...) then wrap as expression-statement
-         // reuse parse_primary() behavior OR repeat parsing here
          expect(TokenType::OPENPARENTHESIS, "Expected '(' after 'futa'");
          std::unique_ptr < ExpressionNode > target;
-         if (peek().type != TokenType::CLOSEPARENTHESIS) {
-            target = parse_expression();
-         }
-         expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after futa(...)");
-         auto delExpr = std::make_unique < DeleteExpressionNode > (std::move(target));
+         auto delExpr = std::make_unique<DeleteExpressionNode>();
          delExpr->token = futaTok;
-         // Option A: wrap in generic ExpressionStatementNode
+
+         if (peek().type != TokenType::CLOSEPARENTHESIS) {
+            // first expression is the target
+            delExpr->target = parse_expression();
+
+            // optional additional arguments (destructor args)
+            while (match(TokenType::COMMA)) {
+               delExpr->arguments.push_back(parse_expression());
+            }
+         }
+
+         expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after futa(...)");
+
          auto exprStmt = std::make_unique < ExpressionStatementNode > ();
          exprStmt->token = futaTok;
          exprStmt->expression = std::move(delExpr);
          return exprStmt;
 
-         // Option B (if you prefer a dedicated wrapper):
-         // auto delStmt = std::make_unique<DeleteStatementNode>(std::move(delExpr));
-         // delStmt->token = futaTok;
-         // return delStmt;
       } else {
-         // Bare-form: futa <expression>   (no parentheses)
+         // Bare-form: futa <expression>   (no parentheses, no args)
          // parse the target as an expression (typically an IDENTIFIER, member, or call result)
          auto target = parse_expression(); // parse expression grammar to consume the target correctly
          auto delExpr = std::make_unique < DeleteExpressionNode > (std::move(target));

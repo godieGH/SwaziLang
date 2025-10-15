@@ -3,7 +3,7 @@
 #include <vector>
 #include <memory>
 #include <sstream>
-#include <stdexcept> // used by clone checks
+#include <stdexcept>
 #include "token.hpp"  
 
 // Base class for all AST nodes
@@ -1112,18 +1112,27 @@ struct NewExpressionNode : public ExpressionNode {
 struct DeleteExpressionNode : public ExpressionNode {
     // the object to delete (Identifier, MemberExpression, NewExpression result, etc.)
     std::unique_ptr<ExpressionNode> target;
-
+    
+    std::vector<std::unique_ptr<ExpressionNode>> arguments;
+    
     DeleteExpressionNode() = default;
     explicit DeleteExpressionNode(std::unique_ptr<ExpressionNode> t) : target(std::move(t)) {}
 
     std::string to_string() const override {
-        return "futa(" + (target ? target->to_string() : "<null>") + ")";
+        std::string s = "futa(" + (target ? target->to_string() : "<null>");
+        for (const auto &a : arguments) {
+            s += ", " + (a ? a->to_string() : "<null>");
+        }
+        s += ")";
+        return s;
     }
 
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<DeleteExpressionNode>();
         n->token = token;
         n->target = target ? target->clone() : nullptr;
+        n->arguments.reserve(arguments.size());
+        for (const auto &a : arguments) n->arguments.push_back(a ? a->clone() : nullptr);
         return n;
     }
 };

@@ -988,19 +988,27 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
 
   if (t.type == TokenType::FUTA) {
     Token futaTok = consume(); // consume 'futa'
-    auto node = std::make_unique < DeleteExpressionNode > ();
+    auto node = std::make_unique<DeleteExpressionNode>();
     node->token = futaTok;
 
     // require parenthesized argument list for expression form
     expect(TokenType::OPENPARENTHESIS, "Expected '(' after 'futa' for expression form");
-    // single-arg or allow comma-separated but we expect a single primary/expression as the target
+
+    // parse at least the target (first expression) if not empty
     if (peek().type != TokenType::CLOSEPARENTHESIS) {
-      node->target = parse_expression();
-      // if you allow multiple args for some reason, you can parse more
+        // First expression is the target
+        node->target = parse_expression();
+
+        // Additional expressions (if present) are destructor arguments
+        while (match(TokenType::COMMA)) {
+            // allow trailing formatting tokens before the next arg
+            node->arguments.push_back(parse_expression());
+        }
     }
+
     expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after futa(...)");
     return node;
-  }
+}
 
 
   if (t.type == TokenType::SELF) {
