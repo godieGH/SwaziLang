@@ -1,5 +1,8 @@
 # SwaziLang([latest stable version](https://github.com/godieGH/SwaziLang/releases/tag/v1.15.0))
 
+
+[![Release](https://img.shields.io/github/v/release/godieGH/SwaziLang?style=flat-square)](https://github.com/godieGH/SwaziLang/releases)
+
 SwaziLang is a scripting language written in C++ that lets you program using natural Swahili keywords and syntax.
 
 Do you want to learn SwaziLang?
