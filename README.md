@@ -1,4 +1,4 @@
-# SwaziLang
+# SwaziLang([latest stable version](https://github.com/godieGH/SwaziLang/releases/tag/v1.15.0))
 
 SwaziLang is a scripting language written in C++ that lets you program using natural Swahili keywords and syntax.
 
