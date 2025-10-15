@@ -1,15 +1,17 @@
 #include "muda_class.hpp"
-#include "muda_time_utils.hpp"
-#include "ClassRuntime.hpp"
-#include <iomanip>
+
+#include <algorithm>
 #include <ctime>
+#include <functional>
+#include <iomanip>
 #include <memory>
 #include <sstream>
-#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <algorithm>
+
+#include "ClassRuntime.hpp"
+#include "muda_time_utils.hpp"
 
 // NOTE: This file implements the Muda runtime class and native helpers.
 // The design goal:
@@ -40,9 +42,9 @@ static ObjectPtr instantiate_muda_from_class(ClassPtr cls, double ms, EnvPtr env
     for (ClassPtr walk = cls; walk; walk = walk->super) chain.push_back(walk);
     std::reverse(chain.begin(), chain.end());
 
-    for (auto &c: chain) {
+    for (auto& c : chain) {
         if (!c || !c->body) continue;
-        for (auto &m: c->body->methods) {
+        for (auto& m : c->body->methods) {
             if (!m) continue;
             if (m->is_static) continue;
 
@@ -50,15 +52,19 @@ static ObjectPtr instantiate_muda_from_class(ClassPtr cls, double ms, EnvPtr env
             persisted->name = m->name;
             persisted->token = m->token;
             persisted->parameters.reserve(m->params.size());
-            for (const auto &pp : m->params) {
-                if (pp) persisted->parameters.push_back(pp->clone());
-                else persisted->parameters.push_back(nullptr);
+            for (const auto& pp : m->params) {
+                if (pp)
+                    persisted->parameters.push_back(pp->clone());
+                else
+                    persisted->parameters.push_back(nullptr);
             }
             persisted->body.reserve(m->body.size());
-            for (const auto &s: m->body) persisted->body.push_back(s ? s->clone() : nullptr);
+            for (const auto& s : m->body) persisted->body.push_back(s ? s->clone() : nullptr);
 
             EnvPtr methodClosure = std::make_shared<Environment>(env);
-            Environment::Variable thisVar; thisVar.value = instance; thisVar.is_constant = true;
+            Environment::Variable thisVar;
+            thisVar.value = instance;
+            thisVar.is_constant = true;
             methodClosure->set("$", thisVar);
 
             auto fn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, methodClosure, persisted->token);
@@ -113,8 +119,16 @@ static Value native_muda_sikuYaJuma(const std::vector<Value>& args, EnvPtr, cons
     std::string fmt;
     if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) fmt = std::get<std::string>(args[1]);
     std::tm t = tm_from_ms(ms);
-    if (fmt == "ddd") { std::ostringstream s; s << std::put_time(&t, "%a"); return s.str(); }
-    if (fmt == "dddd") { std::ostringstream s; s << std::put_time(&t, "%A"); return s.str(); }
+    if (fmt == "ddd") {
+        std::ostringstream s;
+        s << std::put_time(&t, "%a");
+        return s.str();
+    }
+    if (fmt == "dddd") {
+        std::ostringstream s;
+        s << std::put_time(&t, "%A");
+        return s.str();
+    }
     return static_cast<double>(t.tm_wday);
 }
 static Value native_muda_saa(const std::vector<Value>& args, EnvPtr, const Token& tok) {
@@ -122,10 +136,24 @@ static Value native_muda_saa(const std::vector<Value>& args, EnvPtr, const Token
     std::string fmt;
     if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) fmt = std::get<std::string>(args[1]);
     std::tm t = tm_from_ms(ms);
-    if (fmt == "h") { int h = t.tm_hour % 12; if (h == 0) h = 12; return std::to_string(h); }
-    if (fmt == "hh") { int h = t.tm_hour % 12; if (h == 0) h = 12; std::ostringstream s; s << std::setw(2) << std::setfill('0') << h; return s.str(); }
+    if (fmt == "h") {
+        int h = t.tm_hour % 12;
+        if (h == 0) h = 12;
+        return std::to_string(h);
+    }
+    if (fmt == "hh") {
+        int h = t.tm_hour % 12;
+        if (h == 0) h = 12;
+        std::ostringstream s;
+        s << std::setw(2) << std::setfill('0') << h;
+        return s.str();
+    }
     if (fmt == "H") return static_cast<double>(t.tm_hour);
-    if (fmt == "HH") { std::ostringstream s; s << std::setw(2) << std::setfill('0') << t.tm_hour; return s.str(); }
+    if (fmt == "HH") {
+        std::ostringstream s;
+        s << std::setw(2) << std::setfill('0') << t.tm_hour;
+        return s.str();
+    }
     return static_cast<double>(t.tm_hour);
 }
 static Value native_muda_dakika(const std::vector<Value>& args, EnvPtr, const Token& tok) {
@@ -168,7 +196,11 @@ static Value native_muda_object(const std::vector<Value>& args, EnvPtr, const To
     std::tm t = tm_from_ms(ms);
     auto obj = std::make_shared<ObjectValue>();
     auto add_number = [&](const std::string& k, double v) {
-        PropertyDescriptor pd; pd.value = v; pd.is_private = false; pd.is_readonly = false; obj->properties[k] = pd;
+        PropertyDescriptor pd;
+        pd.value = v;
+        pd.is_private = false;
+        pd.is_readonly = false;
+        obj->properties[k] = pd;
     };
     add_number("mwaka", static_cast<double>(1900 + t.tm_year));
     add_number("mwezi", static_cast<double>(t.tm_mon + 1));
@@ -177,7 +209,8 @@ static Value native_muda_object(const std::vector<Value>& args, EnvPtr, const To
     add_number("saa", static_cast<double>(t.tm_hour));
     add_number("dakika", static_cast<double>(t.tm_min));
     add_number("sekunde", static_cast<double>(t.tm_sec));
-    long long msll = static_cast<long long>(std::llround(ms)); add_number("millis", static_cast<double>(msll % 1000));
+    long long msll = static_cast<long long>(std::llround(ms));
+    add_number("millis", static_cast<double>(msll % 1000));
     return obj;
 }
 static Value native_muda_eq(const std::vector<Value>& args, EnvPtr, const Token& tok) {
@@ -205,9 +238,10 @@ static Value native_muda_diff(const std::vector<Value>& args, EnvPtr, const Toke
     if (args.size() >= 3 && std::holds_alternative<std::string>(args[2])) {
         std::string unit = std::get<std::string>(args[2]);
         double diff = a - b;
-        if (unit == "days" || unit == "siku") return diff / (1000.0*60.0*60.0*24.0);
-        if (unit == "hours" || unit == "masaa") return diff / (1000.0*60.0*60.0);
-        if (unit == "minutes" || unit == "dakika") return diff / (1000.0*60.0);
+        if (unit == "days" || unit == "siku") return diff / (1000.0 * 60.0 * 60.0 * 24.0);
+        if (unit == "hours" || unit == "masaa") return diff / (1000.0 * 60.0 * 60.0);
+        if (unit == "minutes" || unit == "dakika") return diff / (1000.0 * 60.0);
+        if (unit == "seconds" || unit == "sekunde") return diff / (1000.0);
     }
     return a - b;
 }
@@ -219,22 +253,33 @@ static Value native_muda_ongeza(const std::vector<Value>& args, EnvPtr env, cons
     if (!std::holds_alternative<std::string>(args[1])) throw std::runtime_error("unit must be string");
     std::string unit = std::get<std::string>(args[1]);
     double amt = 0.0;
-    if (std::holds_alternative<double>(args[2])) amt = std::get<double>(args[2]);
-    else if (std::holds_alternative<std::string>(args[2])) amt = std::stod(std::get<std::string>(args[2]));
-    else throw std::runtime_error("amount must be numeric");
+    if (std::holds_alternative<double>(args[2]))
+        amt = std::get<double>(args[2]);
+    else if (std::holds_alternative<std::string>(args[2]))
+        amt = std::stod(std::get<std::string>(args[2]));
+    else
+        throw std::runtime_error("amount must be numeric");
 
     double new_ms = orig;
-    if (unit == "sekunde" || unit == "s") new_ms += amt * 1000.0;
-    else if (unit == "dakika" || unit == "dk" || unit == "m") new_ms += amt * 60.0 * 1000.0;
-    else if (unit == "saa" || unit == "masaa" || unit == "h") new_ms += amt * 60.0 * 60.0 * 1000.0;
-    else if (unit == "siku" || unit == "d") new_ms += amt * 24.0 * 60.0 * 60.0 * 1000.0;
-    else if (unit == "wiki") new_ms += amt * 7.0 * 24.0 * 60.0 * 60.0 * 1000.0;
+    if (unit == "sekunde" || unit == "s")
+        new_ms += amt * 1000.0;
+    else if (unit == "dakika" || unit == "dk" || unit == "m")
+        new_ms += amt * 60.0 * 1000.0;
+    else if (unit == "saa" || unit == "masaa" || unit == "h")
+        new_ms += amt * 60.0 * 60.0 * 1000.0;
+    else if (unit == "siku" || unit == "d")
+        new_ms += amt * 24.0 * 60.0 * 60.0 * 1000.0;
+    else if (unit == "wiki")
+        new_ms += amt * 7.0 * 24.0 * 60.0 * 60.0 * 1000.0;
     else if (unit == "mwezi" || unit == "miezi" || unit == "M") {
         std::tm t = tm_from_ms(orig);
         int mon = t.tm_mon + static_cast<int>(std::llround(amt));
         int year_add = mon / 12;
         mon = mon % 12;
-        if (mon < 0) { mon += 12; year_add -= 1; }
+        if (mon < 0) {
+            mon += 12;
+            year_add -= 1;
+        }
         t.tm_mon = mon;
         t.tm_year += year_add;
 #if defined(_WIN32)
@@ -243,8 +288,7 @@ static Value native_muda_ongeza(const std::vector<Value>& args, EnvPtr env, cons
         time_t tt = timegm(&t);
 #endif
         new_ms = static_cast<double>(static_cast<long long>(tt) * 1000LL);
-    }
-    else if (unit == "mwaka" || unit == "miaka" || unit == "y") {
+    } else if (unit == "mwaka" || unit == "miaka" || unit == "y") {
         std::tm t = tm_from_ms(orig);
         t.tm_year += static_cast<int>(std::llround(amt));
 #if defined(_WIN32)
@@ -275,9 +319,12 @@ static Value native_muda_ongeza(const std::vector<Value>& args, EnvPtr env, cons
 static Value native_muda_punguza(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if (args.size() < 3) throw std::runtime_error("punguza expects (this, unit, amount)");
     std::vector<Value> n = args;
-    if (std::holds_alternative<double>(n[2])) n[2] = std::get<double>(n[2]) * -1.0;
-    else if (std::holds_alternative<std::string>(n[2])) n[2] = std::string(std::to_string(-std::stod(std::get<std::string>(n[2]))));
-    else throw std::runtime_error("amount must be numeric");
+    if (std::holds_alternative<double>(n[2]))
+        n[2] = std::get<double>(n[2]) * -1.0;
+    else if (std::holds_alternative<std::string>(n[2]))
+        n[2] = std::string(std::to_string(-std::stod(std::get<std::string>(n[2]))));
+    else
+        throw std::runtime_error("amount must be numeric");
     return native_muda_ongeza(n, env, tok);
 }
 
@@ -323,8 +370,11 @@ static Value native_Muda_ctor(const std::vector<Value>& args, EnvPtr /*env*/, co
     bool components = std::holds_alternative<double>(args[0]) && args.size() > 1;
     if (components) {
         std::vector<int> comp;
-        for (size_t i=0;i<args.size() && i<7;i++) {
-            if (!std::holds_alternative<double>(args[i])) { components = false; break; }
+        for (size_t i = 0; i < args.size() && i < 7; i++) {
+            if (!std::holds_alternative<double>(args[i])) {
+                components = false;
+                break;
+            }
             comp.push_back(static_cast<int>(std::llround(std::get<double>(args[i]))));
         }
         if (components && comp.size() >= 2) {
@@ -443,7 +493,7 @@ static Value native_muda_seti(const std::vector<Value>& args, EnvPtr env, const 
 void init_muda_class(EnvPtr env) {
     if (!env) return;
 
-    auto add_native = [&](const std::string &name, std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> fn) {
+    auto add_native = [&](const std::string& name, std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> fn) {
         auto fv = std::make_shared<FunctionValue>(name, fn, env, Token{});
         Environment::Variable v{fv, true};
         env->set(name, v);
@@ -462,7 +512,7 @@ void init_muda_class(EnvPtr env) {
     add_native("Muda_native_dakika", native_muda_dakika);
     add_native("Muda_native_sekunde", native_muda_sekunde);
     add_native("Muda_native_millis", native_muda_millis);
-    add_native("Muda_native_zone", [](const std::vector<Value>&, EnvPtr, const Token&){ return std::string("UTC"); });
+    add_native("Muda_native_zone", [](const std::vector<Value>&, EnvPtr, const Token&) { return std::string("UTC"); });
     add_native("Muda_native_ms", native_muda_ms);
     add_native("Muda_native_fmt", native_muda_fmt);
     add_native("Muda_native_iso", native_muda_iso);
@@ -530,13 +580,13 @@ void init_muda_class(EnvPtr env) {
     }
 
     // forwarder helpers
-    auto add_forwarder = [&](const std::string &name, const std::vector<std::string> &params = {}) {
+    auto add_forwarder = [&](const std::string& name, const std::vector<std::string>& params = {}) {
         auto m = std::make_unique<ClassMethodNode>();
         m->name = name;
         m->is_locked = true;
         m->is_private = false;
 
-        for (const auto &pn : params) {
+        for (const auto& pn : params) {
             auto pnode = std::make_unique<ParameterNode>();
             pnode->token = Token{};
             pnode->name = pn;
@@ -551,7 +601,7 @@ void init_muda_class(EnvPtr env) {
         static_cast<IdentifierNode*>(call->callee.get())->name = std::string("Muda_native_") + name;
 
         call->arguments.push_back(std::make_unique<ThisExpressionNode>());
-        for (const auto &p : params) {
+        for (const auto& p : params) {
             auto id = std::make_unique<IdentifierNode>();
             id->name = p;
             call->arguments.push_back(std::move(id));
@@ -566,66 +616,169 @@ void init_muda_class(EnvPtr env) {
     add_forwarder("mwaka");
     add_forwarder("mwezi");
     add_forwarder("tarehe");
-    add_forwarder("sikuYaJuma", {"fmt"});
-    add_forwarder("saa", {"fmt"});
+    {
+        auto m = std::make_unique<ClassMethodNode>();
+        m->name = "sikuYaJuma";
+        m->is_locked = true;
+        m->is_private = false;
+
+        auto p_fmt = std::make_unique<ParameterNode>();
+        p_fmt->token = Token{};
+        p_fmt->name = "fmt";
+        p_fmt->is_rest = false;
+        p_fmt->rest_required_count = 0;
+        auto defFmt = std::make_unique<StringLiteralNode>();
+        defFmt->value = "";
+        p_fmt->defaultValue = std::move(defFmt);
+        m->params.push_back(std::move(p_fmt));
+
+        auto call = std::make_unique<CallExpressionNode>();
+        call->callee = std::make_unique<IdentifierNode>();
+        static_cast<IdentifierNode*>(call->callee.get())->name = std::string("Muda_native_sikuYaJuma");
+
+        call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+        auto idfmt = std::make_unique<IdentifierNode>();
+        idfmt->name = "fmt";
+        call->arguments.push_back(std::move(idfmt));
+
+        auto ret = std::make_unique<ReturnStatementNode>();
+        ret->value = std::move(call);
+        m->body.push_back(std::move(ret));
+        classDesc->body->methods.push_back(std::move(m));
+    }
+    {
+        auto m = std::make_unique<ClassMethodNode>();
+        m->name = "saa";
+        m->is_locked = true;
+        m->is_private = false;
+
+        auto p_fmt = std::make_unique<ParameterNode>();
+        p_fmt->token = Token{};
+        p_fmt->name = "fmt";
+        p_fmt->is_rest = false;
+        p_fmt->rest_required_count = 0;
+        auto defFmt = std::make_unique<StringLiteralNode>();
+        defFmt->value = "";      // default -> optional
+        p_fmt->defaultValue = std::move(defFmt);
+        m->params.push_back(std::move(p_fmt));
+
+        auto call = std::make_unique<CallExpressionNode>();
+        call->callee = std::make_unique<IdentifierNode>();
+        static_cast<IdentifierNode*>(call->callee.get())->name = std::string("Muda_native_saa");
+
+        call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+        auto idfmt = std::make_unique<IdentifierNode>();
+        idfmt->name = "fmt";
+        call->arguments.push_back(std::move(idfmt));
+
+        auto ret = std::make_unique<ReturnStatementNode>();
+        ret->value = std::move(call);
+        m->body.push_back(std::move(ret));
+        classDesc->body->methods.push_back(std::move(m));
+    }
     add_forwarder("dakika");
     add_forwarder("sekunde");
     add_forwarder("millis");
     add_forwarder("zone");
     // custom forwarder for fmt with default zone = "UTC"
-{
-    auto m = std::make_unique<ClassMethodNode>();
-    m->name = "fmt";
-    m->is_locked = true;
-    m->is_private = false;
+    {
+        auto m = std::make_unique<ClassMethodNode>();
+        m->name = "fmt";
+        m->is_locked = true;
+        m->is_private = false;
 
-    // fmt parameter (required)
-    auto p_fmt = std::make_unique<ParameterNode>();
-    p_fmt->token = Token{};
-    p_fmt->name = "fmt";
-    p_fmt->is_rest = false;
-    p_fmt->rest_required_count = 0;
-    p_fmt->defaultValue = nullptr;
-    m->params.push_back(std::move(p_fmt));
+        // fmt parameter (required)
+        auto p_fmt = std::make_unique<ParameterNode>();
+        p_fmt->token = Token{};
+        p_fmt->name = "fmt";
+        p_fmt->is_rest = false;
+        p_fmt->rest_required_count = 0;
+        p_fmt->defaultValue = nullptr;
+        m->params.push_back(std::move(p_fmt));
 
-    // zone parameter (optional, default "UTC")
-    auto p_zone = std::make_unique<ParameterNode>();
-    p_zone->token = Token{};
-    p_zone->name = "zone";
-    p_zone->is_rest = false;
-    p_zone->rest_required_count = 0;
-    auto defZone = std::make_unique<StringLiteralNode>();
-    defZone->value = "UTC";
-    p_zone->defaultValue = std::move(defZone);
-    m->params.push_back(std::move(p_zone));
+        // zone parameter (optional, default "UTC")
+        auto p_zone = std::make_unique<ParameterNode>();
+        p_zone->token = Token{};
+        p_zone->name = "zone";
+        p_zone->is_rest = false;
+        p_zone->rest_required_count = 0;
+        auto defZone = std::make_unique<StringLiteralNode>();
+        defZone->value = "UTC";
+        p_zone->defaultValue = std::move(defZone);
+        m->params.push_back(std::move(p_zone));
 
-    // call Muda_native_fmt(this, fmt, zone)
-    auto call = std::make_unique<CallExpressionNode>();
-    call->callee = std::make_unique<IdentifierNode>();
-    static_cast<IdentifierNode*>(call->callee.get())->name = std::string("Muda_native_fmt");
+        // call Muda_native_fmt(this, fmt, zone)
+        auto call = std::make_unique<CallExpressionNode>();
+        call->callee = std::make_unique<IdentifierNode>();
+        static_cast<IdentifierNode*>(call->callee.get())->name = std::string("Muda_native_fmt");
 
-    call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+        call->arguments.push_back(std::make_unique<ThisExpressionNode>());
 
-    auto idfmt = std::make_unique<IdentifierNode>();
-    idfmt->name = "fmt";
-    call->arguments.push_back(std::move(idfmt));
+        auto idfmt = std::make_unique<IdentifierNode>();
+        idfmt->name = "fmt";
+        call->arguments.push_back(std::move(idfmt));
 
-    auto idzone = std::make_unique<IdentifierNode>();
-    idzone->name = "zone";
-    call->arguments.push_back(std::move(idzone));
+        auto idzone = std::make_unique<IdentifierNode>();
+        idzone->name = "zone";
+        call->arguments.push_back(std::move(idzone));
 
-    auto ret = std::make_unique<ReturnStatementNode>();
-    ret->value = std::move(call);
-    m->body.push_back(std::move(ret));
-    classDesc->body->methods.push_back(std::move(m));
-}
+        auto ret = std::make_unique<ReturnStatementNode>();
+        ret->value = std::move(call);
+        m->body.push_back(std::move(ret));
+        classDesc->body->methods.push_back(std::move(m));
+    }
     add_forwarder("ms");
     add_forwarder("iso");
     add_forwarder("object");
     add_forwarder("eq", {"other"});
     add_forwarder("gt", {"other"});
     add_forwarder("lt", {"other"});
-    add_forwarder("diff", {"other", "unit"});
+    {
+        auto m = std::make_unique<ClassMethodNode>();
+        m->name = "diff";
+        m->is_locked = true;
+        m->is_private = false;
+
+        // other parameter (required)
+        auto p_other = std::make_unique<ParameterNode>();
+        p_other->token = Token{};
+        p_other->name = "other";
+        p_other->is_rest = false;
+        p_other->rest_required_count = 0;
+        p_other->defaultValue = nullptr;
+        m->params.push_back(std::move(p_other));
+
+        // unit parameter (optional, default "ms")
+        auto p_unit = std::make_unique<ParameterNode>();
+        p_unit->token = Token{};
+        p_unit->name = "unit";
+        p_unit->is_rest = false;
+        p_unit->rest_required_count = 0;
+        auto defUnit = std::make_unique<StringLiteralNode>();
+        defUnit->value = "ms";
+        p_unit->defaultValue = std::move(defUnit);
+        m->params.push_back(std::move(p_unit));
+
+        // call Muda_native_diff(this, other, unit)
+        auto call = std::make_unique<CallExpressionNode>();
+        call->callee = std::make_unique<IdentifierNode>();
+        static_cast<IdentifierNode*>(call->callee.get())->name = "Muda_native_diff";
+
+        call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+
+        auto idother = std::make_unique<IdentifierNode>();
+        idother->name = "other";
+        call->arguments.push_back(std::move(idother));
+
+        auto idunit = std::make_unique<IdentifierNode>();
+        idunit->name = "unit";
+        call->arguments.push_back(std::move(idunit));
+
+        auto ret = std::make_unique<ReturnStatementNode>();
+        ret->value = std::move(call);
+        m->body.push_back(std::move(ret));
+        classDesc->body->methods.push_back(std::move(m));
+    }
     add_forwarder("ongeza", {"unit", "amount"});
     add_forwarder("punguza", {"unit", "amount"});
     add_forwarder("setiMuda", {"field", "value"});

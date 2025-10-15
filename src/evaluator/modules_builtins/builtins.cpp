@@ -588,19 +588,13 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
         auto fn = make_native_fn("http.get", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) return Value{ std::monostate{} };
             std::string url = value_to_string_simple(args[0]);
-            struct CurlWriteCtx { std::string buf; };
-            auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-                size_t total = size * nmemb;
-                CurlWriteCtx* ctx = static_cast<CurlWriteCtx*>(userdata);
-                if (ctx) ctx->buf.append(ptr, total);
-                return total;
-            };
 
             CURL* c = curl_easy_init();
-            if (!c) throw std::runtime_error("curl:init failed");
-            CurlWriteCtx ctx;
+            if (!c) throw std::runtime_error("curl_easy_init failed");
+            
+            CurlWriteCtx ctx;  // Use the struct defined at file scope
             curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);  // Use global function
             curl_easy_setopt(c, CURLOPT_WRITEDATA, &ctx);
 
             // optional headers array (array of strings)
@@ -617,10 +611,12 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             CURLcode res = curl_easy_perform(c);
             if (headers) curl_slist_free_all(headers);
             curl_easy_cleanup(c);
+            
             if (res != CURLE_OK) {
                 throw std::runtime_error(std::string("http.get failed: ") + curl_easy_strerror(res) + " at " + token.loc.to_string());
             }
-            return Value{ ctx.buf }; }, env);
+            return Value{ ctx.buf };
+        }, env);
         obj->properties["get"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
@@ -633,22 +629,15 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             std::string contentType = "application/json";
             if (args.size() >= 3) contentType = value_to_string_simple(args[2]);
 
-            struct CurlWriteCtx { std::string buf; };
-            auto write_cb = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-                size_t total = size * nmemb;
-                CurlWriteCtx* ctx = static_cast<CurlWriteCtx*>(userdata);
-                if (ctx) ctx->buf.append(ptr, total);
-                return total;
-            };
-
             CURL* c = curl_easy_init();
-            if (!c) throw std::runtime_error("curl:init failed");
-            CurlWriteCtx ctx;
+            if (!c) throw std::runtime_error("curl_easy_init failed");
+            
+            CurlWriteCtx ctx;  // Use the struct defined at file scope
             curl_easy_setopt(c, CURLOPT_URL, url.c_str());
             curl_easy_setopt(c, CURLOPT_POST, 1L);
             curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
             curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);  // Use global function
             curl_easy_setopt(c, CURLOPT_WRITEDATA, &ctx);
 
             struct curl_slist *headers = nullptr;
@@ -666,34 +655,43 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             CURLcode res = curl_easy_perform(c);
             if (headers) curl_slist_free_all(headers);
             curl_easy_cleanup(c);
+            
             if (res != CURLE_OK) {
                 throw std::runtime_error(std::string("http.post failed: ") + curl_easy_strerror(res) + " at " + token.loc.to_string());
             }
-            return Value{ ctx.buf }; }, env);
+            return Value{ ctx.buf };
+        }, env);
         obj->properties["post"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // http.createServer(handler) -> throws (not implemented in builtin). We provide a clear error.
     {
-        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar). Called at " + token.loc.to_string()); }, env);
+        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            throw std::runtime_error("http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar). Called at " + token.loc.to_string());
+        }, env);
         obj->properties["createServer"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
 #else
     // Stubs when libcurl is not available
-    auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.get native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")"); }, env);
+    auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        throw std::runtime_error("http.get native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")");
+    }, env);
     obj->properties["get"] = PropertyDescriptor{fn_get, false, false, false, Token()};
 
-    auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.post native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")"); }, env);
+    auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        throw std::runtime_error("http.post native module requires libcurl support. Build with libcurl or provide an external http module. (called at " + token.loc.to_string() + ")");
+    }, env);
     obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
 
-    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw std::runtime_error("http.createServer is not available in builtin without a server backend. Called at " + token.loc.to_string()); }, env);
+    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        throw std::runtime_error("http.createServer is not available in builtin without a server backend. Called at " + token.loc.to_string());
+    }, env);
     obj->properties["createServer"] = PropertyDescriptor{fn_server, false, false, false, Token()};
 #endif
 
     return obj;
 }
-
 // ----------------- JSON module (parse & stringify) -----------------
 namespace {
 // Minimal JSON parser / stringify routines
