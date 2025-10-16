@@ -77,8 +77,8 @@ int main(int argc, char* argv[]) {
     << "  -h, --help       Show this help message\n"
     << "\n"
     << "If a filename starts with '-', either use `--` to end options\n"
-    << "or prefix the filename with a path (for example `./-weird.sl`):\n"
-    << "  swazi -- -weird.sl\n";
+    << "or prefix the filename with a path (for example `./-file.sl`):\n"
+    << "  swazi -- -file.sl\n";
   };
 
 
