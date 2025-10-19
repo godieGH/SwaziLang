@@ -1956,8 +1956,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 args.reserve(se->arguments.size());
                 for (auto& a : se->arguments) args.push_back(evaluate_expression(a.get(), env));
 
-                // call parent constructor with receiver bound (do NOT change current_class_context here)
-                return call_function_with_receiver(parentCtor, receiver, args, m->token);
+                // IMPORTANT: ensure nested super(...) calls inside the parent constructor
+                // resolve to the parent's super. Temporarily set current_class_context to parent.
+                ClassPtr saved_ctx = current_class_context;
+                current_class_context = parent;
+                try {
+                    Value res = call_function_with_receiver(parentCtor, receiver, args, m->token);
+                    current_class_context = saved_ctx;
+                    return res;
+                } catch (...) {
+                    current_class_context = saved_ctx;
+                    throw;
+                }
             }
         }
         return std::monostate{};
