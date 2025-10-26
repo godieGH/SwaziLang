@@ -245,7 +245,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // --- Universal properties ---
         const std::string& prop = mem->property;
 
-        // ainaya -> type name
+        // aina -> type name
         if (prop == "aina") {
             std::string t = "unknown";  // default
             if (std::holds_alternative<std::monostate>(objVal)) t = "null";
@@ -292,10 +292,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             const std::string& prop = mem->property;
 
             // helper to create native function values (captures s_val and this)
-            auto make_fn = [this,
-                               s_val,
-                               env,
-                               mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
+            auto make_fn = [this,s_val,env,mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
                 auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     return impl(args, callEnv, token);
                 };
@@ -506,7 +503,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         std::string(1, s_val[(size_t)idx])};
                 });
             }
-
+            
+            // urefu() -> returns string length (same as .herufi property)
+            if (prop == "urefu") {
+                return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+                    return Value{static_cast<double>(s_val.size())};
+                });
+            }
+            
             // No matching string property -> fall through to unknown property error below
         }
 
@@ -833,15 +837,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             const std::string& prop = mem->property;
 
             // Recognized array method names
-            if (prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" || prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
+            if (prop == "urefu" || prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" || prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
                 prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
                 prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
                 prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
-                auto native_impl = [this,
-                                       arr,
-                                       prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                auto native_impl = [this,arr,prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
-
+                    
+                    // urefu() -> returns array length (same as .idadi property)
+                    if (prop == "urefu") {
+                        return Value{static_cast<double>(arr->elements.size())};
+                    }
+                    
                     // push: ongeza(value...)
                     if (prop == "ongeza") {
                         if (args.empty()) throw std::runtime_error("arr.ongeza needs atleast 1 arg at " + token.loc.to_string());
@@ -1108,8 +1115,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             arr->elements.insert(arr->elements.begin() + start, args.begin() + 2, args.end());
                         }
 
-                        return Value{
-                            out};  // return deleted elements
+                        return Value{out};  // return deleted elements
                     }
 
                     // map: badili(fn)
