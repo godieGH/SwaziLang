@@ -1,0 +1,24 @@
+name="AST"
+version="v1.3.7"
+[deps]
+libs = [tomlv4, fmt]
+
+[[deps.pakages]]
+name = "tomlv4"
+version = "^4.5.7"
+
+[[deps.pakages]]
+name = fmt
+version = "^6.0.1"
+
+[database]
+host = "http://db.hh:3600"
+port = 3600
+password = "gjw66A!@yAs"
+
+[fff]
+fkff = 66
+dfff = 7
+ffhf = 667
+fff = 67
+fflf = true
