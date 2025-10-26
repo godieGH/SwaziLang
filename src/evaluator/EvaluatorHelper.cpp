@@ -99,7 +99,7 @@ std::string Evaluator::to_string_value(const Value& v) {
       std::string out = "[ ";
       for (size_t i = 0; i < arr->elements.size(); ++i) {
          if (i) out += ", ";
-         out += to_string_value(arr->elements[i]);
+         out += print_value(arr->elements[i]);
       }
       out += " ]";
       return out;
@@ -476,31 +476,30 @@ static std::optional < std::string > try_render_inline_object(ObjectPtr o,
 static std::string quote_and_color(const std::string &s, bool use_color) {
    if (!use_color) {
       std::ostringstream ss;
-      ss << "\"";
+      ss << "'";
       for (char c: s) {
          if (c == '\\') ss << "\\\\";
-         else if (c == '\"') ss << "\\\"";
+         else if (c == '\'') ss << "\\'";
          else if (c == '\n') ss << "\\n";
          else ss << c;
       }
-      ss << "\"";
+      ss << "'";  // ← Changed
       return ss.str();
    }
    // with color: color the inner string green, keep quotes white
    std::ostringstream ss;
-   ss << Color::white << "\"" << Color::reset;
+   ss << Color::white << "'" << Color::reset;  // ← Changed
    ss << Color::green;
    for (char c: s) {
       if (c == '\\') ss << "\\\\";
-      else if (c == '\"') ss << "\\\"";
+      else if (c == '\'') ss << "\\'";  // ← Changed to escape single quotes
       else if (c == '\n') ss << "\\n";
       else ss << c;
    }
    ss << Color::reset;
-   ss << Color::white << "\"" << Color::reset;
+   ss << Color::white << "'" << Color::reset;  // ← Changed
    return ss.str();
 }
-
 std::string Evaluator::print_value(
    const Value &v,
    int depth,
