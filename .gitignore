@@ -42,3 +42,6 @@
 
 build
 *.diff
+
+CMakeUserPresets.json
+conanfile.txt.lock
