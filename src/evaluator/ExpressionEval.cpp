@@ -1646,14 +1646,27 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return Value{
                 !is_equal(left, right)};
         }
-        if (op == ">") return Value{
-            to_number(left) > to_number(right)};
-        if (op == "<") return Value{
-            to_number(left) < to_number(right)};
-        if (op == ">=") return Value{
-            to_number(left) >= to_number(right)};
-        if (op == "<=") return Value{
-            to_number(left) <= to_number(right)};
+        
+        bool bothStrings = std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right);
+        if (bothStrings) {
+            const std::string &ls = std::get<std::string>(left);
+            const std::string &rs = std::get<std::string>(right);
+        
+            if (op == ">")  return Value{ ls > rs };
+            if (op == "<")  return Value{ ls < rs };
+            if (op == ">=") return Value{ ls >= rs };
+            if (op == "<=") return Value{ ls <= rs };
+        } else {
+            // Numeric fallback (preserve existing behavior for mixed or non-string values).
+            double ln = to_number(left);
+            double rn = to_number(right);
+        
+            if (op == ">")  return Value{ ln > rn };
+            if (op == "<")  return Value{ ln < rn };
+            if (op == ">=") return Value{ ln >= rn };
+            if (op == "<=") return Value{ ln <= rn };
+        }
+        
         if (op == "&&" || op == "na") return Value{
             to_bool(left) && to_bool(right)};
         if (op == "||" || op == "au") return Value{
