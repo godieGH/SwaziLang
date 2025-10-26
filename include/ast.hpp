@@ -888,12 +888,65 @@ struct NullNode : public ExpressionNode {
 struct CaseNode : StatementNode {
     std::unique_ptr<ExpressionNode> test;  // null → kaida (default)
     std::vector<std::unique_ptr<StatementNode>> body;
+
+    // Deep clone so switch/case survive function-body persistence
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<CaseNode>();
+        n->token = token;
+        n->test = test ? test->clone() : nullptr;
+        n->body.reserve(body.size());
+        for (const auto &s : body) n->body.push_back(s ? s->clone() : nullptr);
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        if (test) ss << "ikiwa " << test->to_string();
+        else ss << "kaida";
+        ss << " { ";
+        for (size_t i = 0; i < body.size(); ++i) {
+            if (i) ss << "; ";
+            ss << (body[i] ? body[i]->to_string() : "<null>");
+        }
+        ss << " }";
+        return ss.str();
+    }
 };
+
 struct SwitchNode : StatementNode {
     std::unique_ptr<ExpressionNode> discriminant;  
     std::vector<std::unique_ptr<CaseNode>> cases;  
-};
 
+    // Deep clone so switch statements are preserved when functions are persisted
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<SwitchNode>();
+        n->token = token;
+        n->discriminant = discriminant ? discriminant->clone() : nullptr;
+        n->cases.reserve(cases.size());
+        for (const auto &cptr : cases) {
+            if (!cptr) { n->cases.push_back(nullptr); continue; }
+            // Use CaseNode::clone() to produce a StatementNode then downcast and transfer ownership
+            auto cloned_stmt = cptr->clone(); // unique_ptr<StatementNode>
+            auto cloned_case = dynamic_cast<CaseNode*>(cloned_stmt.get());
+            if (!cloned_case) {
+                throw std::runtime_error("SwitchNode::clone(): expected CaseNode from clone()");
+            }
+            n->cases.push_back(std::unique_ptr<CaseNode>(static_cast<CaseNode*>(cloned_stmt.release())));
+        }
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "chagua " << (discriminant ? discriminant->to_string() : "<null>") << " { ";
+        for (size_t i = 0; i < cases.size(); ++i) {
+            if (i) ss << " ; ";
+            ss << (cases[i] ? cases[i]->to_string() : "<null-case>");
+        }
+        ss << " }";
+        return ss.str();
+    }
+};
 
 
 
