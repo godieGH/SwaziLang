@@ -182,6 +182,16 @@ std::unique_ptr < ExpressionNode > Parser::parse_unary() {
     node->token = op;
     return node;
   }
+  
+  if (peek().type == TokenType::AINA && peek_next().type != TokenType::OPENPARENTHESIS) {
+    Token opTok = consume(); // consume 'ainaya' keyword
+    auto operand = parse_unary(); // unary binds tightly
+    auto node = std::make_unique<UnaryExpressionNode>();
+    node->op = "aina"; // normalized op name used by evaluator
+    node->operand = std::move(operand);
+    node->token = opTok;
+    return node;
+  }
 
   // parse primary expression first
   auto node = parse_primary();
@@ -973,14 +983,14 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
     node->token = b;
     return node;
   }
-  if (t.type == TokenType::IDENTIFIER) {
+  if (t.type == TokenType::IDENTIFIER || t.type == TokenType::AINA) {
     if (peek_next().type == TokenType::LAMBDA) {
       return parse_lambda(); // single-param without parentheses
     }
 
-    // normal identifier
+    // normal identifier (or keyword used as callable name)
     Token id = consume();
-    auto ident = std::make_unique < IdentifierNode > ();
+    auto ident = std::make_unique<IdentifierNode>();
     ident->name = id.value;
     ident->token = id;
     return ident;

@@ -131,6 +131,7 @@ enum class TokenType {
     AND,
     OR,
     NOT,
+    AINA,
 
     // -----------------------
     // Comparison

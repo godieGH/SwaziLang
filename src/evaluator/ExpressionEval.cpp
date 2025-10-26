@@ -1262,6 +1262,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             !to_bool(operand)};
         if (u->op == "-") return Value{
             -to_number(operand)};
+
+        // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
+        if (u->op == "aina") {
+            std::string t = "unknown";
+            if (std::holds_alternative<std::monostate>(operand)) t = "null";
+            else if (std::holds_alternative<double>(operand)) t = "namba";
+            else if (std::holds_alternative<std::string>(operand)) t = "neno";
+            else if (std::holds_alternative<bool>(operand)) t = "bool";
+            else if (std::holds_alternative<ArrayPtr>(operand)) t = "orodha";
+            else if (std::holds_alternative<FunctionPtr>(operand)) t = "kazi";
+            else if (std::holds_alternative<ObjectPtr>(operand)) t = "object";
+            else if (std::holds_alternative<ClassPtr>(operand)) t = "muundo";
+            return Value{ t };
+        }
+
         throw std::runtime_error("Unknown unary operator '" + u->op + "' at " + u->token.loc.to_string());
     }
 

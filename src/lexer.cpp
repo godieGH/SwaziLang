@@ -251,6 +251,8 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"si", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
+        
+        {"ainaya", TokenType::AINA},
 
         // module / import / export
         {"tumia", TokenType::TUMIA},   // import
