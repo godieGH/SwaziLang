@@ -884,6 +884,29 @@ struct NullNode : public ExpressionNode {
     }
 };
 
+struct NaNNode : public ExpressionNode {
+    explicit NaNNode(const Token& t) { token = t; }
+
+    std::string to_string() const override {
+        return "nan";
+    }
+    
+    std::unique_ptr<ExpressionNode> clone() const override {
+        return std::make_unique<NaNNode>(*this);
+    }
+};
+struct InfNode : public ExpressionNode {
+    explicit InfNode(const Token& t) { token = t; }
+
+    std::string to_string() const override {
+        return "inf";
+    }
+    
+    std::unique_ptr<ExpressionNode> clone() const override {
+        return std::make_unique<InfNode>(*this);
+    }
+};
+
 
 struct CaseNode : StatementNode {
     std::unique_ptr<ExpressionNode> test;  // null → kaida (default)

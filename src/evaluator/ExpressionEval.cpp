@@ -20,6 +20,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto nn = dynamic_cast<NullNode*>(expr)) {
         return Value(std::monostate{});
     }
+    if (auto NaN = dynamic_cast<NaNNode*>(expr)) {
+        return Value(std::numeric_limits < double > ::quiet_NaN());
+    }
+    
+    if (auto inf = dynamic_cast<InfNode*>(expr)) {
+        return Value(std::numeric_limits < double > ::infinity());
+    }
 
     // Template literal evaluation: concatenate quasis and evaluated expressions.
     if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {

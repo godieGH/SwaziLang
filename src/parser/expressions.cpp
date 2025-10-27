@@ -969,6 +969,14 @@ std::unique_ptr < ExpressionNode > Parser::parse_primary() {
   if(t.type == TokenType::NULL_LITERAL) {
     return std::make_unique < NullNode > (consume());
   }
+  
+  if(t.type == TokenType::NAN_LITERAL) {
+    return std::make_unique < NaNNode > (consume());
+  }
+  
+  if(t.type == TokenType::INF_LITERAL) {
+    return std::make_unique < InfNode > (consume());
+  }
 
   // template literals: either a single TEMPLATE_STRING token (no interpolation)
   // or interpolation-aware sequence starting with TEMPLATE_CHUNK

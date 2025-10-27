@@ -283,7 +283,9 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"simama", TokenType::SIMAMA},
         {"endelea", TokenType::ENDELEA},
 
-        {"null", TokenType::NULL_LITERAL}       // null token
+        {"null", TokenType::NULL_LITERAL},      // null token
+        {"nan", TokenType::NAN_LITERAL},
+        {"inf", TokenType::INF_LITERAL}
     };
 
     auto it = keywords.find(id);

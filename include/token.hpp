@@ -77,6 +77,8 @@ enum class TokenType {
     TEMPLATE_END,          // closing backtick (optional)
     BOOLEAN,
     NULL_LITERAL,
+    NAN_LITERAL,
+    INF_LITERAL,
 
     // -----------------------
     // Punctuation & operators (single-character / structural)
