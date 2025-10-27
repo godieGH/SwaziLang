@@ -120,7 +120,7 @@ std::string Evaluator::to_string_value(const Value& v) {
 
 bool Evaluator::to_bool(const Value& v) {
    if (std::holds_alternative < bool > (v)) return std::get < bool > (v);
-   if (std::holds_alternative < double > (v)) return !std::isnan(std::get<double>(v)) || std::get < double > (v) == 0.0;
+   if (std::holds_alternative < double > (v)) return !std::isnan(std::get<double>(v)) && std::get < double > (v) != 0.0;
    if (std::holds_alternative < std::string > (v)) return !std::get < std::string > (v).empty();
    if (std::holds_alternative < std::monostate > (v)) return false;
    if (std::holds_alternative < FunctionPtr > (v)) return true;
