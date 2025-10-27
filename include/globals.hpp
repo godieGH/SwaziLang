@@ -11,14 +11,21 @@ void init_globals(EnvPtr env);
 
 
 inline bool value_to_bool(const Value& v) {
-    if (std::holds_alternative<std::monostate>(v)) return false;
-    if (std::holds_alternative<double>(v)) return std::get<double>(v) != 0.0;
-    if (std::holds_alternative<bool>(v)) return std::get<bool>(v);
-    if (std::holds_alternative<std::string>(v)) return !std::get<std::string>(v).empty();
-    if (std::holds_alternative<ArrayPtr>(v)) return true;  // arrays always truthy
-    if (std::holds_alternative<ObjectPtr>(v)) return true; // objects always truthy
-    if (std::holds_alternative<FunctionPtr>(v)) return true;
-    return false;
+   if (std::holds_alternative < bool > (v)) return std::get < bool > (v);
+   if (std::holds_alternative < double > (v)) return !std::isnan(std::get<double>(v)) || std::get < double > (v) == 0.0;
+   if (std::holds_alternative < std::string > (v)) return !std::get < std::string > (v).empty();
+   if (std::holds_alternative < std::monostate > (v)) return false;
+   if (std::holds_alternative < FunctionPtr > (v)) return true;
+   if (std::holds_alternative < ArrayPtr > (v)) {
+      auto arr = std::get < ArrayPtr > (v);
+      return arr && !arr->elements.empty();
+   }
+   if (std::holds_alternative<ObjectPtr>(v)) {
+      auto obj = std::get < ObjectPtr > (v);
+      return obj && !obj->properties.empty();
+   };
+   if (std::holds_alternative<ClassPtr>(v)) return true; // classes always return true as they appear
+   return false;
 }
 
 // Convert Value -> number
@@ -53,6 +60,7 @@ inline std::string value_to_string(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
     if (std::holds_alternative<ArrayPtr>(v)) return "[orodha]";
     if (std::holds_alternative<ObjectPtr>(v)) return "{object}";
-    if (std::holds_alternative<FunctionPtr>(v)) return "<kazi>";
+    if (std::holds_alternative<FunctionPtr>(v)) return "[kazi]";
+    if (std::holds_alternative<ClassPtr>(v)) return "<muundo>";
     return "unknown";
 }

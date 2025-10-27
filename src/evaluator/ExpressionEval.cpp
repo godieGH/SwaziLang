@@ -278,6 +278,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             std::holds_alternative<ArrayPtr>(objVal)};
         if (prop == "nikazi") return Value{
             std::holds_alternative<FunctionPtr>(objVal)};
+        if (prop == "niobject") return Value{
+            std::holds_alternative<ObjectPtr>(objVal)};
 
         // String property 'herufi' (length)
         if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {
@@ -520,32 +522,32 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             const std::string& prop = mem->property;
 
             // ---------- Properties ----------
-            if (prop == "siSahihi") {
+            if (prop == "siSahihi" || prop == "isNaN") {
                 return Value{
                     std::isnan(num)};
             }
-            if (prop == "inf") {
+            if (prop == "isInf") {
                 return Value{
                     !std::isfinite(num)};
             }
-            if (prop == "nzima") {
+            if (prop == "niInt" || prop == "isInt") {
                 return Value{
                     std::isfinite(num) && std::floor(num) == num};
             }
-            if (prop == "desimali") {
+            if (prop == "niDesimali" || prop == "isDecimal") {
                 return Value{
                     std::isfinite(num) && std::floor(num) != num};
             }
-            if (prop == "chanya") {
+            if (prop == "niChanya") {
                 return Value{
                     num > 0};
             }
-            if (prop == "hasi") {
+            if (prop == "niHasi") {
                 return Value{
                     num < 0};
             }
             // boolean "is" properties: odd, even, prime
-            if (prop == "witiri" || prop == "shufwa" || prop == "tasa") {
+            if (prop == "niWitiri" || prop == "niShufwa" || prop == "niTasa") {
                 // quick guards: must be finite and integer
                 if (!std::isfinite(num) || std::floor(num) != num) {
                     return Value{
@@ -560,20 +562,20 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                 long long n = static_cast<long long>(std::llround(num));  // safe now
 
-                if (prop == "witiri") {
+                if (prop == "niWitiri") {
                     // odd
                     return Value{
                         (n % 2) != 0};
                 }
 
-                if (prop == "shufwa") {
+                if (prop == "niShufwa") {
                     // even
                     return Value{
                         (n % 2) == 0};
                 }
 
                 // niTasa -> primality (simple trial division)
-                if (prop == "tasa") {
+                if (prop == "niTasa") {
                     if (n < 2) return Value{
                         false};
                     if (n % 2 == 0) return Value{

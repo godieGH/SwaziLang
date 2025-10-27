@@ -113,14 +113,14 @@ std::string Evaluator::to_string_value(const Value& v) {
    if (std::holds_alternative < ClassPtr > (v)) {
       ClassPtr cp = std::get < ClassPtr > (v);
       std::string nm = cp ? cp->name: "<anon>";
-      return use_color ? (Color::bright_blue + std::string("[muundo: ") + nm + "]" + Color::reset): std::string("[muudo: " + nm+ "]");
+      return use_color ? (Color::bright_blue + std::string("<muundo: ") + nm + ">" + Color::reset): std::string("<muudo: " + nm+ ">");
    }
    return "";
 }
 
 bool Evaluator::to_bool(const Value& v) {
    if (std::holds_alternative < bool > (v)) return std::get < bool > (v);
-   if (std::holds_alternative < double > (v)) return std::get < double > (v) != 0.0;
+   if (std::holds_alternative < double > (v)) return !std::isnan(std::get<double>(v)) || std::get < double > (v) == 0.0;
    if (std::holds_alternative < std::string > (v)) return !std::get < std::string > (v).empty();
    if (std::holds_alternative < std::monostate > (v)) return false;
    if (std::holds_alternative < FunctionPtr > (v)) return true;
@@ -128,6 +128,11 @@ bool Evaluator::to_bool(const Value& v) {
       auto arr = std::get < ArrayPtr > (v);
       return arr && !arr->elements.empty();
    }
+   if (std::holds_alternative<ObjectPtr>(v)) {
+      auto obj = std::get < ObjectPtr > (v);
+      return obj && !obj->properties.empty();
+   };
+   if (std::holds_alternative<ClassPtr>(v)) return true; // classes always return true as they appear
    return false;
 }
 
@@ -580,7 +585,7 @@ std::string Evaluator::print_value(
    if (std::holds_alternative < ClassPtr > (v)) {
       ClassPtr cp = std::get < ClassPtr > (v);
       std::ostringstream ss;
-      ss << "[muundo " << (cp ? cp->name: "<anon>") << "]";
+      ss << "<muundo " << (cp ? cp->name: "<anon>") << ">";
       return use_color ? (Color::bright_blue + ss.str() + Color::reset): ss.str();
    }
    return "<?>"; // fallback
