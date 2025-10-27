@@ -1,4 +1,5 @@
 #include "globals.hpp"
+#include "set_class.hpp"
 #include "evaluator.hpp"
 #include "time.hpp"
 #include "muda_class.hpp"
@@ -323,6 +324,225 @@ static Value builtin_toka(const std::vector < Value>& args, EnvPtr env, const To
 }
 
 
+
+
+// --------------------
+// Ordered map factory: Object.map([plainObject])
+// --------------------
+// Add this after builtin_object_entry in this file.
+static Value builtin_object_map(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+  // internal ordered store
+  auto store = std::make_shared<std::vector<std::pair<std::string, Value>>>();
+
+  // helper: canonicalize a Value -> property key string (reuse simple rules)
+  auto key_to_string = [](const Value &v) -> std::string {
+    if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
+    if (std::holds_alternative<double>(v)) {
+      double d = std::get<double>(v);
+      if (!std::isfinite(d)) throw std::runtime_error("Invalid number for property key");
+      double floor_d = std::floor(d);
+      if (d == floor_d) return std::to_string(static_cast<long long>(d));
+      return std::to_string(d);
+    }
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
+    throw std::runtime_error("Cannot convert value to property key");
+  };
+
+  // If caller provided a plain object as first argument, copy its properties into store
+  if (!args.empty() && std::holds_alternative<ObjectPtr>(args[0])) {
+    ObjectPtr src = std::get<ObjectPtr>(args[0]);
+    if (src) {
+      // copy properties in the map's iteration order (note: plain object iteration order is
+      // whatever the runtime's map yields; this merely constructs an ordered snapshot)
+      for (const auto &kv : src->properties) {
+        store->emplace_back(kv.first, kv.second.value);
+      }
+    }
+  }
+
+  // Create the returned object that exposes methods which operate on 'store'
+  auto ret = std::make_shared<ObjectValue>();
+
+  // Helper to create native methods easily (each method uses env as closure)
+  auto make_native_fn = [&](const std::string &name,
+                            std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
+    auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
+    return Value{ fn };
+  };
+
+  // set(key, value)
+  {
+    auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
+      if (a.empty()) throw std::runtime_error("map.set needs (key, value) at " + callTok.loc.to_string());
+      std::string k = key_to_string(a[0]);
+      Value val = (a.size() >= 2) ? a[1] : std::monostate{};
+      for (auto &p : *store) {
+        if (p.first == k) { p.second = val; return val; }
+      }
+      store->emplace_back(k, val);
+      return val;
+    };
+    ret->properties["set"] = {
+      std::get<FunctionPtr>(make_native_fn("map.set", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // get(key)
+  {
+    auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
+      if (a.empty()) throw std::runtime_error("map.get needs (key) at " + callTok.loc.to_string());
+      std::string k = key_to_string(a[0]);
+      for (auto &p : *store) if (p.first == k) return p.second;
+      return std::monostate{};
+    };
+    ret->properties["get"] = {
+      std::get<FunctionPtr>(make_native_fn("map.get", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // has(key)
+  {
+    auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
+      if (a.empty()) throw std::runtime_error("map.has needs (key) at " + callTok.loc.to_string());
+      std::string k = key_to_string(a[0]);
+      for (auto &p : *store) if (p.first == k) return true;
+      return false;
+    };
+    ret->properties["has"] = {
+      std::get<FunctionPtr>(make_native_fn("map.has", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // delete(key) -> bool
+  {
+    auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
+      if (a.empty()) throw std::runtime_error("map.delete needs (key) at " + callTok.loc.to_string());
+      std::string k = key_to_string(a[0]);
+      for (size_t i = 0; i < store->size(); ++i) {
+        if ((*store)[i].first == k) {
+          store->erase(store->begin() + static_cast<long long>(i));
+          return true;
+        }
+      }
+      return false;
+    };
+    ret->properties["delete"] = {
+      std::get<FunctionPtr>(make_native_fn("map.delete", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // keys() -> Array of strings in insertion order
+  {
+    auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+      auto arr = std::make_shared<ArrayValue>();
+      for (auto &p : *store) arr->elements.push_back(p.first);
+      return arr;
+    };
+    ret->properties["keys"] = {
+      std::get<FunctionPtr>(make_native_fn("map.keys", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // values() -> Array of Values in insertion order
+  {
+    auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+      auto arr = std::make_shared<ArrayValue>();
+      for (auto &p : *store) arr->elements.push_back(p.second);
+      return arr;
+    };
+    ret->properties["values"] = {
+      std::get<FunctionPtr>(make_native_fn("map.values", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // entries() -> Array of [key, value] arrays
+  {
+    auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+      auto arr = std::make_shared<ArrayValue>();
+      for (auto &p : *store) {
+        auto pairArr = std::make_shared<ArrayValue>();
+        pairArr->elements.push_back(p.first);
+        pairArr->elements.push_back(p.second);
+        arr->elements.push_back(pairArr);
+      }
+      return arr;
+    };
+    ret->properties["entries"] = {
+      std::get<FunctionPtr>(make_native_fn("map.entries", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // size() -> number
+  {
+    auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+      return static_cast<double>(store->size());
+    };
+    ret->properties["size"] = {
+      std::get<FunctionPtr>(make_native_fn("map.size", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  // toPlain() -> convert to a normal ObjectValue snapshot (unordered map of the current entries)
+  {
+    auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+      auto out = std::make_shared<ObjectValue>();
+      for (auto &p : *store) {
+        PropertyDescriptor pd;
+        pd.value = p.second;
+        pd.is_private = false;
+        pd.is_readonly = false;
+        pd.is_locked = false;
+        pd.token = Token{};
+        out->properties[p.first] = std::move(pd);
+      }
+      return out;
+    };
+    ret->properties["toPlain"] = {
+      std::get<FunctionPtr>(make_native_fn("map.toPlain", impl)),
+      false,
+      false,
+      true,
+      Token {}
+    };
+  }
+
+  return ret;
+}
+
+
+
 void init_globals(EnvPtr env) {
   if (!env) return;
 
@@ -379,6 +599,16 @@ void init_globals(EnvPtr env) {
       Token {}
     };
   }
+  {
+  auto fn = std::make_shared<FunctionValue>("map", builtin_object_map, env, Token{});
+  objectVal->properties["map"] = {
+    fn,
+    false,
+    false,
+    true,
+    Token {}
+  };
+}
 
 
   Environment::Variable objectVar;
@@ -457,6 +687,7 @@ void init_globals(EnvPtr env) {
 
   init_time(env);
   init_muda_class(env);
+  init_set_class(env);
 
 
   {
