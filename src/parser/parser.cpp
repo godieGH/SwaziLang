@@ -407,9 +407,8 @@ std::unique_ptr < ProgramNode > Parser::parse() {
 
 // ---------- statements ----------
 std::unique_ptr < StatementNode > Parser::parse_statement() {
-   // skip leading newlines and any leading INDENT tokens before a statement
-   while (peek().type == TokenType::NEWLINE ||
-      peek().type == TokenType::INDENT) {
+   // skip leading newlines before a statement
+   while (peek().type == TokenType::NEWLINE) {
       consume();
    }
 
@@ -422,7 +421,7 @@ std::unique_ptr < StatementNode > Parser::parse_statement() {
       return nullptr;
    }
 
-   Token p = peek(); // now capture the first non-newline/non-indent token
+   Token p = peek(); // now capture the first non-newline token
 
    if (p.type == TokenType::FUTA) {
       Token futaTok = consume(); // consume 'futa'

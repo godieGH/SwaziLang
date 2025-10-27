@@ -337,38 +337,75 @@ void Lexer::handle_newline(std::vector<Token>& out) {
     add_token(out, TokenType::NEWLINE, "", newline_line, newline_col, 1);
 
     // Scan forward to find the first non-blank, non-comment line.
+    // We must treat lines that contain only whitespace or only comments (even if
+    // the comment is preceded by indentation) as blank and keep scanning.
     size_t scan = i;
     bool only_blank = true;
     int newIndent = 0;
     size_t first_code_pos = scan;
 
     while (scan < src.size()) {
-        char c = src[scan];
+        // handle CRLF / LF boundaries: if the candidate line is empty, skip it
+        if (src[scan] == '\r') { scan++; continue; }
+        if (src[scan] == '\n') { scan++; continue; }
 
-        if (c == '\r') { scan++; continue; }
-        if (c == '\n') { scan++; continue; }
-
-        // Skip line comments
-        if (c == '#') {
-            while (scan < src.size() && src[scan] != '\n') scan++;
-            continue;
-        }
-        if (c == '/' && (scan + 1) < src.size() && src[scan + 1] == '/') {
-            scan += 2;
-            while (scan < src.size() && src[scan] != '\n') scan++;
-            continue;
-        }
-
-        // Found code
-        only_blank = false;
-        size_t j = scan;
-        newIndent = 0;
-        while (j < src.size()) {
-            if (src[j] == ' ') { newIndent++; j++; }
-            else if (src[j] == '\t') { newIndent += 4; j++; }
+        // For this candidate line, skip its leading spaces/tabs and compute indent.
+        size_t pos = scan;
+        int indentCount = 0;
+        while (pos < src.size()) {
+            if (src[pos] == ' ') { indentCount++; pos++; }
+            else if (src[pos] == '\t') { indentCount += 4; pos++; }
             else break;
         }
-        first_code_pos = j;
+
+        // If the rest of the line is empty (newline or EOF) -> blank line: skip it
+        if (pos >= src.size()) {
+            scan = pos;
+            continue;
+        }
+        if (src[pos] == '\r' || src[pos] == '\n') {
+            // a line of only whitespace
+            scan = pos;
+            continue;
+        }
+
+        // If after indentation we have a line comment start '#', or '//' -> skip entire line
+        if (src[pos] == '#') {
+            // skip to end of line
+            while (scan < src.size() && src[scan] != '\n') scan++;
+            continue;
+        }
+        if (src[pos] == '/' && (pos + 1) < src.size() && src[pos + 1] == '/') {
+            // skip to end of line
+            while (scan < src.size() && src[scan] != '\n') scan++;
+            continue;
+        }
+
+        // If after indentation we have a block comment '/*', skip until closing '*/'
+        if (src[pos] == '/' && (pos + 1) < src.size() && src[pos + 1] == '*') {
+            // find closing '*/' — if not found, advance to EOF and stop
+            size_t b = pos + 2;
+            bool closed = false;
+            while (b + 1 < src.size()) {
+                if (src[b] == '*' && src[b + 1] == '/') { b += 2; closed = true; break; }
+                b++;
+            }
+            // set scan to after the block comment; if closed, continue scanning from there,
+            // otherwise set scan to EOF and break the loop.
+            if (closed) {
+                scan = b;
+                continue;
+            } else {
+                scan = src.size();
+                break;
+            }
+        }
+
+        // Otherwise this line contains code: record its indentation (the number of
+        // spaces/tabs we skipped) and the position of the first non-space char.
+        only_blank = false;
+        newIndent = indentCount;
+        first_code_pos = pos;
         break;
     }
 
@@ -391,7 +428,7 @@ void Lexer::handle_newline(std::vector<Token>& out) {
             }
         }
 
-        // Advance to first non-space code char
+        // Advance the lexer's current index to the first non-space code char we found.
         while (!eof() && i < first_code_pos) advance();
     }
 }
