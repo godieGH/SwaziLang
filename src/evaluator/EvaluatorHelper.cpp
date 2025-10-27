@@ -42,11 +42,11 @@ namespace Color {
 // ----------------- Evaluator helpers -----------------
 
 static std::string value_type_name(const Value& v) {
-   if (std::holds_alternative < std::monostate > (v)) return "void";
+   if (std::holds_alternative < std::monostate > (v)) return "null";
    if (std::holds_alternative < double > (v)) return "namba";
    if (std::holds_alternative < std::string > (v)) return "neno";
    if (std::holds_alternative < bool > (v)) return "bool";
-   if (std::holds_alternative < FunctionPtr > (v)) return "function";
+   if (std::holds_alternative < FunctionPtr > (v)) return "kazi";
    if (std::holds_alternative < ArrayPtr > (v)) return "orodha";
    if (std::holds_alternative < ObjectPtr > (v)) return "object";
    if (std::holds_alternative < ClassPtr > (v)) return "muundo";
