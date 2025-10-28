@@ -1,3 +1,7 @@
+#pragma once
+#include "ast.hpp"
+#include <memory>
+#include <string>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
