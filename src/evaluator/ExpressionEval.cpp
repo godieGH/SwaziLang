@@ -1587,10 +1587,28 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string());
             }
         }
-        // --- Normal binary evaluation path ---
+        // --- Normal binary evaluation path (short-circuit logicals returning operands) ---
         Value left = evaluate_expression(b->left.get(), env);
-        Value right = evaluate_expression(b->right.get(), env);
         const std::string& op = b->op;
+
+        // Logical AND: short-circuit; return operand (left or right) instead of boolean.
+        if (op == "&&" || op == "na") {
+            // If left is falsy -> return left (no RHS evaluation).
+            if (!to_bool(left)) return left;
+            // Otherwise evaluate RHS and return the RHS value (preserve identity).
+            return evaluate_expression(b->right.get(), env);
+        }
+
+        // Logical OR: short-circuit; return operand (left or right).
+        if (op == "||" || op == "au") {
+            // If left is truthy -> return left (no RHS evaluation).
+            if (to_bool(left)) return left;
+            // Otherwise evaluate RHS and return it.
+            return evaluate_expression(b->right.get(), env);
+        }
+
+        // For all other binary operators evaluate RHS now (both operands required)
+        Value right = evaluate_expression(b->right.get(), env);
 
         if (op == "+") {
             // --- string concatenation if either is string ---
@@ -1676,11 +1694,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (op == "<=") return Value{ ln <= rn };
         }
         
-        if (op == "&&" || op == "na") return Value{
-            to_bool(left) && to_bool(right)};
-        if (op == "||" || op == "au") return Value{
-            to_bool(left) || to_bool(right)};
-
         throw std::runtime_error("Unknown binary operator '" + op + "' at " + b->token.loc.to_string());
     }
 
