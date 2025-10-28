@@ -253,7 +253,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         const std::string& prop = mem->property;
 
         // aina -> type name
-        if (prop == "aina") {
+        if (prop == "aina" || prop == "type") {
             std::string t = "unknown";  // default
             if (std::holds_alternative<std::monostate>(objVal)) t = "null";
             if (std::holds_alternative<double>(objVal))
