@@ -375,7 +375,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     // create runtime class descriptor
     auto classDesc = std::make_shared < ClassValue > ();
     classDesc->token = cd->token;
-    classDesc->name = cd->name ? cd->name->name: "<anon>";
+    classDesc->name = cd->name ? cd->name->name: "<lamda>";
     if (cd->body) {
        classDesc->body = cd->body->clone();
     }

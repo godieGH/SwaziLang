@@ -1780,7 +1780,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         // Construct FunctionValue from the persisted declaration. FunctionValue ctor clones again as needed.
         auto fn = std::make_shared<FunctionValue>(
-            std::string("<anon>"),
+            std::string("<lambda>"),
             fnDecl->parameters,
             fnDecl,
             env,

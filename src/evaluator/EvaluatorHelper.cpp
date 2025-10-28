@@ -89,7 +89,7 @@ std::string Evaluator::to_string_value(const Value& v) {
    if (std::holds_alternative < std::string > (v)) return std::get < std::string > (v);
    if (std::holds_alternative < FunctionPtr > (v)) {
       FunctionPtr fn = std::get < FunctionPtr > (v);
-      std::string name = fn->name.empty() ? "<anon>": fn->name;
+      std::string name = fn->name.empty() ? "<lambda>": fn->name;
       std::string s = "[" + (use_color ? (Color::bright_cyan + "kazi: " + Color::reset): "kazi: ") + name + "]";
       return s;
    }
@@ -112,7 +112,7 @@ std::string Evaluator::to_string_value(const Value& v) {
    }
    if (std::holds_alternative < ClassPtr > (v)) {
       ClassPtr cp = std::get < ClassPtr > (v);
-      std::string nm = cp ? cp->name: "<anon>";
+      std::string nm = cp ? cp->name: "<lambda>";
       return use_color ? (Color::bright_blue + std::string("<muundo: ") + nm + ">" + Color::reset): std::string("<muudo: " + nm+ ">");
    }
    return "";
@@ -536,9 +536,9 @@ std::string Evaluator::print_value(
 
    if (std::holds_alternative < FunctionPtr > (v)) {
       FunctionPtr fn = std::get < FunctionPtr > (v);
-      std::string nm = fn->name.empty() ? "<anon>": fn->name;
+      std::string nm = fn->name.empty() ? "<lambda>": fn->name;
       std::ostringstream ss;
-      ss << "[fn " << nm << "]";
+      ss << "[kazi " << nm << "]";
       return use_color ? (Color::bright_cyan + ss.str() + Color::reset): ss.str();
    }
 
@@ -585,7 +585,7 @@ std::string Evaluator::print_value(
    if (std::holds_alternative < ClassPtr > (v)) {
       ClassPtr cp = std::get < ClassPtr > (v);
       std::ostringstream ss;
-      ss << "<muundo " << (cp ? cp->name: "<anon>") << ">";
+      ss << "<muundo " << (cp ? cp->name: "<lambda>") << ">";
       return use_color ? (Color::bright_blue + ss.str() + Color::reset): ss.str();
    }
    return "<?>"; // fallback
@@ -693,7 +693,7 @@ std::string Evaluator::print_object(
          // Functions as short label
          if (std::holds_alternative < FunctionPtr > (desc.value)) {
             FunctionPtr f = std::get < FunctionPtr > (desc.value);
-            std::string nm = f->name.empty() ? "<anon>": f->name;
+            std::string nm = f->name.empty() ? "<lambda>": f->name;
 
             std::ostringstream label;
 
