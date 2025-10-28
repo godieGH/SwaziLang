@@ -722,77 +722,159 @@ std::unique_ptr < StatementNode > Parser::parse_function_declaration() {
   funcNode->token = idTok;
 
   // Parse parameters
+  // Parse parameters: support either a parenthesized parameter list (`kazi name(...)`)
+  // or the existing bare identifier form (`kazi name a b ...`). Both are accepted.
   bool rest_seen = false;
-  while (true) {
-    // support rest param: ...name[<number>]
-    if (peek().type == TokenType::ELLIPSIS) {
-      Token ellTok = consume(); // consume '...'
+  if (match(TokenType::OPENPARENTHESIS)) {
+    // Parenthesized params: ( ... )
+    if (peek().type != TokenType::CLOSEPARENTHESIS) {
+      while (true) {
+        // rest param: ...name[<number>]
+        if (peek().type == TokenType::ELLIPSIS) {
+          Token ellTok = consume();
+          if (rest_seen) {
+            throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
+          }
+          expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
+          Token nameTok = tokens[position - 1];
 
-      if (rest_seen) {
-        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
-      }
+          auto p = std::make_unique<ParameterNode>();
+          p->token = ellTok;
+          p->name = nameTok.value;
+          p->is_rest = true;
+          p->rest_required_count = 0;
 
-      expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
-      Token nameTok = tokens[position - 1];
+          if (peek().type == TokenType::OPENBRACKET) {
+            consume(); // '['
+            expect(TokenType::NUMBER, "Expected number inside rest count brackets");
+            Token numTok = tokens[position - 1];
+            try {
+              p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
+            } catch (...) {
+              throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+            }
+            expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
+          }
 
-      auto p = std::make_unique < ParameterNode > ();
-      p->token = ellTok;
-      p->name = nameTok.value;
-      p->is_rest = true;
-      p->rest_required_count = 0;
+          funcNode->parameters.push_back(std::move(p));
+          rest_seen = true;
 
-      // optional [NUMBER] to indicate required count for the rest array
-      if (peek().type == TokenType::OPENBRACKET) {
-        consume(); // '['
-        expect(TokenType::NUMBER, "Expected number inside rest count brackets");
-        Token numTok = tokens[position - 1];
-        try {
-          p->rest_required_count = static_cast<size_t > (std::stoul(numTok.value));
-        } catch (...) {
-          throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+          // rest must be last (allow trailing comma only if closing paren next)
+          if (peek().type == TokenType::COMMA) {
+            if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
+              Token bad = tokens[position];
+              throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string());
+            }
+            // allow trailing comma then break
+          }
+
+          break;
         }
-        expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
-      }
 
-      funcNode->parameters.push_back(std::move(p));
-      rest_seen = true;
+        // normal identifier param (with optional default)
+        expect(TokenType::IDENTIFIER, "Expected identifier in parameter list");
+        Token nameTok = tokens[position - 1];
+        auto pnode = std::make_unique<ParameterNode>();
+        pnode->token = nameTok;
+        pnode->name = nameTok.value;
+        pnode->is_rest = false;
+        pnode->rest_required_count = 0;
+        pnode->defaultValue = nullptr;
 
-      // rest must be last
-      if (peek().type == TokenType::COMMA) {
-        Token c = tokens[position]; // lookahead comma
-        throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string());
+        // optional default initializer: '=' expression
+        if (peek().type == TokenType::ASSIGN) {
+          consume(); // consume '='
+          pnode->defaultValue = parse_expression();
+          if (!pnode->defaultValue) {
+            throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position-1].loc.to_string());
+          }
+        }
+
+        funcNode->parameters.push_back(std::move(pnode));
+
+        if (match(TokenType::COMMA)) {
+          // allow trailing comma before ')'
+          if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+          continue;
+        }
+        break;
       }
     }
-    // normal identifier parameter (with optional default)
-    else if (peek().type == TokenType::IDENTIFIER) {
-      Token nameTok = consume();
-      auto p = std::make_unique < ParameterNode > ();
-      p->token = nameTok;
-      p->name = nameTok.value;
-      p->is_rest = false;
-      p->rest_required_count = 0;
-      p->defaultValue = nullptr;
+    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after parameters");
 
-      // optional default initializer: '=' expression
-      if (peek().type == TokenType::ASSIGN) {
-        consume(); // consume '='
-        p->defaultValue = parse_expression();
-        if (!p->defaultValue) {
-          throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position-1].loc.to_string());
+  } else {
+    // Legacy / bare form: zero or more identifiers / rest without surrounding parentheses.
+    // This preserves existing behaviour for scripts that use the bare form.
+    while (true) {
+      // rest param: ...name[<number>]
+      if (peek().type == TokenType::ELLIPSIS) {
+        Token ellTok = consume();
+        if (rest_seen) {
+          throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
         }
+        expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
+        Token nameTok = tokens[position - 1];
+
+        auto p = std::make_unique<ParameterNode>();
+        p->token = ellTok;
+        p->name = nameTok.value;
+        p->is_rest = true;
+        p->rest_required_count = 0;
+
+        if (peek().type == TokenType::OPENBRACKET) {
+          consume(); // '['
+          expect(TokenType::NUMBER, "Expected number inside rest count brackets");
+          Token numTok = tokens[position - 1];
+          try {
+            p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
+          } catch (...) {
+            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+          }
+          expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
+        }
+
+        funcNode->parameters.push_back(std::move(p));
+        rest_seen = true;
+
+        // rest must be last in bare form
+        if (peek().type == TokenType::COMMA) {
+          Token c = tokens[position]; // lookahead
+          throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string());
+        }
+        break;
       }
 
-      funcNode->parameters.push_back(std::move(p));
-    }
-    else {
-      // no more parameters
+      // normal identifier
+      if (peek().type == TokenType::IDENTIFIER) {
+        Token pTok = consume();
+        auto pnode = std::make_unique<ParameterNode>();
+        pnode->token = pTok;
+        pnode->name = pTok.value;
+        pnode->is_rest = false;
+        pnode->rest_required_count = 0;
+        pnode->defaultValue = nullptr;
+
+        // optional default initializer: '=' expression (allow in bare form for compatibility)
+        if (peek().type == TokenType::ASSIGN) {
+          consume(); // consume '='
+          pnode->defaultValue = parse_expression();
+          if (!pnode->defaultValue) {
+            throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position-1].loc.to_string());
+          }
+        }
+
+        funcNode->parameters.push_back(std::move(pnode));
+
+        if (match(TokenType::COMMA)) continue;
+        // no separator -> break to body parsing
+        continue;
+      }
+
+      // neither IDENTIFIER nor ELLIPSIS => end of param list (bare form)
       break;
     }
-
-    // if next token is a comma, consume and continue; otherwise parameter list ended
-    if (!match(TokenType::COMMA)) break;
   }
-
+  
   // Now, branch on the token that starts the function body
   if (match(TokenType::COLON)) {
     // --- Indentation-based body ---
