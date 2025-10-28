@@ -1,7 +1,7 @@
 #include "evaluator.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
-
+#include "builtin_sl.h"
 #include "builtins.hpp" // new: built-in module factories (regex, fs, http)
 #include <fstream>
 #include <sstream>
@@ -78,6 +78,76 @@ std::string Evaluator::resolve_module_path(const std::string &module_spec, const
 // in Loading state BEFORE evaluating the module so circular imports can receive a live
 // (possibly partially-initialized) exports object.
 ObjectPtr Evaluator::import_module(const std::string &module_spec, const Token &requesterTok, EnvPtr requesterEnv) {
+
+
+if (has_embedded_module(module_spec)) {
+    const std::string key = std::string("__embedded__:") + module_spec;
+    auto it_cache = module_cache.find(key);
+    if (it_cache != module_cache.end()) return it_cache->second->exports;
+
+    auto rec = std::make_shared<ModuleRecord>();
+    rec->state = ModuleRecord::State::Loading;
+    rec->exports = std::make_shared<ObjectValue>();
+    rec->path = key;
+    rec->module_env = std::make_shared<Environment>(global_env);
+    module_cache[key] = rec;
+
+    auto srcOpt = get_embedded_module_source(module_spec);
+    if (!srcOpt.has_value()) {
+        module_cache.erase(key);
+        throw std::runtime_error("Embedded module found but source missing for " + module_spec);
+    }
+
+    std::string src = srcOpt.value();
+    if (src.empty() || src.back() != '\n') src.push_back('\n');
+
+    Lexer lexer(src, std::string("<embedded:") + module_spec + ">");
+    std::vector<Token> tokens = lexer.tokenize();
+    Parser parser(tokens);
+    std::unique_ptr<ProgramNode> ast = parser.parse();
+
+    try {
+        for (auto &stmt: ast->body) {
+            if (!stmt) continue;
+            if (auto ed = dynamic_cast<ExportDeclarationNode*>(stmt.get())) {
+                // default export
+                if (ed->is_default) {
+                    if (ed->single_identifier.empty()) {
+                        rec->exports->properties["default"] = PropertyDescriptor{ std::monostate{}, false, false, false, ed->token };
+                    } else {
+                        if (!rec->module_env->has(ed->single_identifier)) {
+                            throw std::runtime_error("Export name '" + ed->single_identifier + "' not defined in embedded module " + module_spec);
+                        }
+                        Environment::Variable &v = rec->module_env->get(ed->single_identifier);
+                        PropertyDescriptor pd{ v.value, false, false, false, ed->token };
+                        rec->exports->properties["default"] = pd;
+                    }
+                } else {
+                    // named exports
+                    for (const auto &nm: ed->names) {
+                        if (!rec->module_env->has(nm)) {
+                            PropertyDescriptor pd; pd.value = std::monostate{}; pd.token = ed->token;
+                            rec->exports->properties[nm] = pd;
+                        } else {
+                            Environment::Variable &v = rec->module_env->get(nm);
+                            PropertyDescriptor pd{ v.value, false, false, false, ed->token };
+                            rec->exports->properties[nm] = pd;
+                        }
+                    }
+                }
+                break; // stop executing after 'ruhusu' as modules do
+            }
+            evaluate_statement(stmt.get(), rec->module_env);
+        }
+    } catch (...) {
+        module_cache.erase(key);
+        throw;
+    }
+
+    rec->state = ModuleRecord::State::Loaded;
+    return rec->exports;
+}
+
 
 
   // --- built-in modules short-circuit ---
