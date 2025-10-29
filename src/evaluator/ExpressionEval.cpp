@@ -20,10 +20,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto nn = dynamic_cast<NullNode*>(expr)) {
         return Value(std::monostate{});
     }
+    if (auto line = dynamic_cast<LineNode*>(expr)) {
+        return Value((double)line->token.line());
+    }
     if (auto NaN = dynamic_cast<NaNNode*>(expr)) {
         return Value(std::numeric_limits<double>::quiet_NaN());
     }
-
     if (auto inf = dynamic_cast<InfNode*>(expr)) {
         return Value(std::numeric_limits<double>::infinity());
     }

@@ -973,7 +973,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         node->token = s;
         return node;
     }
-
+    
     if (t.type == TokenType::NULL_LITERAL) {
         return std::make_unique<NullNode>(consume());
     }
@@ -984,6 +984,13 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
 
     if (t.type == TokenType::INF_LITERAL) {
         return std::make_unique<InfNode>(consume());
+    }
+    
+    if(t.type == TokenType::BLOCK_DU)  {
+        return std::make_unique<NullNode>(consume());
+    }
+    if(t.type == TokenType::LINE_DU)  {
+        return std::make_unique<LineNode>(consume());
     }
 
     // template literals: either a single TEMPLATE_STRING token (no interpolation)

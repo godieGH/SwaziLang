@@ -157,6 +157,8 @@ enum class TokenType {
     // -----------------------
     // Miscellaneous
     // -----------------------
+    BLOCK_DU,
+    LINE_DU,
     COMMENT,
     UNKNOWN
 };

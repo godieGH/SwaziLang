@@ -883,7 +883,6 @@ struct NullNode : public ExpressionNode {
         return std::make_unique<NullNode>(*this);
     }
 };
-
 struct NaNNode : public ExpressionNode {
     explicit NaNNode(const Token& t) { token = t; }
 
@@ -907,6 +906,17 @@ struct InfNode : public ExpressionNode {
     }
 };
 
+struct LineNode : public ExpressionNode {
+    explicit LineNode(const Token& t) { token = t; }
+
+    std::string to_string() const override {
+        return "__line__";
+    }
+    
+    std::unique_ptr<ExpressionNode> clone() const override {
+        return std::make_unique<LineNode>(*this);
+    }
+};
 
 struct CaseNode : StatementNode {
     std::unique_ptr<ExpressionNode> test;  // null → kaida (default)

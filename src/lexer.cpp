@@ -320,7 +320,12 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
 
         {"null", TokenType::NULL_LITERAL},  // null token
         {"nan", TokenType::NAN_LITERAL},
-        {"inf", TokenType::INF_LITERAL}};
+        {"inf", TokenType::INF_LITERAL},
+        
+        {"__block__", TokenType::BLOCK_DU},
+        {"__line__", TokenType::LINE_DU},
+      
+    };
 
     auto it = keywords.find(id);
     int tok_length = static_cast<int>(i - start_index);

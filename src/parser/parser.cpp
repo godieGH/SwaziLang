@@ -430,7 +430,7 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
     }
 
     Token p = peek();  // now capture the first non-newline token
-
+    
     if (p.type == TokenType::FUTA) {
         Token futaTok = consume();  // consume 'futa'
 
