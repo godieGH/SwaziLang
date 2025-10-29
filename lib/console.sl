@@ -1,3 +1,4 @@
+tumia regex kutoka "regex"
 
 kazi print(...txt):
   kama txt.urefu() === 1:
@@ -10,6 +11,22 @@ kazi print(...txt):
   andika "\n"
   rudisha;
 
+kazi printf(str, ...args):
+  # check if there is {} in the string if not return the string as is
+  kama str.nineno na !str.kuna("{}"):
+    chapisha str
+    rudisha;
+  
+  kama str.nineno:
+    data { replace } = regex;
+    kwa kila arg katika args:
+      str = replace(str, "\\{\\}", arg);
+  
+  chapisha str;
+  rudisha;
+
+# export tools
 ruhusu {
-  print
+  print,
+  printf
 }
