@@ -1,24 +1,38 @@
 #pragma once
-#include "ast.hpp"
-#include <memory>
-#include <string>
-#include <iostream>
 #include <iomanip>
+#include <iostream>
+#include <memory>
 #include <sstream>
+#include <string>
 
+#include "ast.hpp"
 
 // JSON escape helper
-static std::string json_escape(const std::string &s) {
+static std::string json_escape(const std::string& s) {
     std::ostringstream o;
     for (char c : s) {
         switch (c) {
-            case '\"': o << "\\\""; break;
-            case '\\': o << "\\\\"; break;
-            case '\b': o << "\\b";  break;
-            case '\f': o << "\\f";  break;
-            case '\n': o << "\\n";  break;
-            case '\r': o << "\\r";  break;
-            case '\t': o << "\\t";  break;
+            case '\"':
+                o << "\\\"";
+                break;
+            case '\\':
+                o << "\\\\";
+                break;
+            case '\b':
+                o << "\\b";
+                break;
+            case '\f':
+                o << "\\f";
+                break;
+            case '\n':
+                o << "\\n";
+                break;
+            case '\r':
+                o << "\\r";
+                break;
+            case '\t':
+                o << "\\t";
+                break;
             default:
                 if (static_cast<unsigned char>(c) < 0x20) {
                     o << "\\u"
@@ -107,5 +121,3 @@ std::string trycatch_to_json(const TryCatchNode& node, int indent) {
     out << ind << "}";
     return out.str();
 }
-
-

@@ -1,13 +1,14 @@
-#include "evaluator.hpp"
-#include "builtins.hpp"
-#include <mutex>
-#include <deque>
-#include <iostream>
-#include <thread>
-#include <condition_variable>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <iostream>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
+
+#include "builtins.hpp"
+#include "evaluator.hpp"
 
 // Lightweight async queue + timers for the "async" builtin.
 // - Async.subiri(cb, ...args) enqueues cb
@@ -28,7 +29,7 @@ struct TimerEntry {
     long long id;
     std::atomic<bool> cancelled;
     long long delay_ms;
-    long long interval_ms; // 0 for single-shot
+    long long interval_ms;  // 0 for single-shot
     FunctionPtr cb;
     std::vector<Value> args;
 };
@@ -81,14 +82,14 @@ void Evaluator::run_event_loop() {
                 // No callback right now (timers still active), continue waiting
                 continue;
             }
-        } // release queue lock before executing callback
+        }  // release queue lock before executing callback
 
         FunctionPtr cb = item.first;
         std::vector<Value> args = item.second;
 
         try {
             call_function(cb, args, cb->token);
-        } catch (const std::exception &e) {
+        } catch (const std::exception& e) {
             std::cerr << "Unhandled async callback exception: " << e.what() << std::endl;
         } catch (...) {
             std::cerr << "Unhandled async callback unknown exception" << std::endl;
@@ -102,7 +103,7 @@ static void spawn_timer_thread(std::shared_ptr<TimerEntry> te) {
         while (true) {
             if (te->cancelled.load()) break;
             if (te->cb) enqueue_callback(te->cb, te->args);
-            if (te->interval_ms <= 0) break; // single-shot done
+            if (te->interval_ms <= 0) break;  // single-shot done
             long long slept = 0;
             const long long slice = 50;
             while (slept < te->interval_ms) {
@@ -177,7 +178,7 @@ static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(c
         FunctionPtr cb = std::get<FunctionPtr>(args[1]);
         std::vector<Value> rest;
         for (size_t i = 2; i < args.size(); ++i) rest.push_back(args[i]);
-        return { ms, cb, rest };
+        return {ms, cb, rest};
     }
 
     // form B: first is function, second is number
@@ -186,7 +187,7 @@ static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(c
         long long ms = value_to_ms(args[1]);
         std::vector<Value> rest;
         for (size_t i = 2; i < args.size(); ++i) rest.push_back(args[i]);
-        return { ms, cb, rest };
+        return {ms, cb, rest};
     }
 
     // Not recognized
@@ -205,22 +206,28 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
         std::vector<Value> cb_args;
         for (size_t i = 1; i < args.size(); ++i) cb_args.push_back(args[i]);
         enqueue_callback(cb, cb_args);
-        return std::monostate {};
+        return std::monostate{};
     };
-    Token tsub; tsub.type = TokenType::IDENTIFIER; tsub.loc = TokenLocation("<async>",0,0,0);
+    Token tsub;
+    tsub.type = TokenType::IDENTIFIER;
+    tsub.loc = TokenLocation("<async>", 0, 0, 0);
     auto fn_sub = std::make_shared<FunctionValue>(std::string("native:async.subiri"), native_subiri, nullptr, tsub);
-    obj->properties["subiri"] = PropertyDescriptor{ fn_sub, false, false, false, tsub };
+    obj->properties["subiri"] = PropertyDescriptor{fn_sub, false, false, false, tsub};
 
     // Async.setTimeout(ms, cb) or (cb, ms)
     auto native_setTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        long long ms; FunctionPtr cb; std::vector<Value> rest;
+        long long ms;
+        FunctionPtr cb;
+        std::vector<Value> rest;
         std::tie(ms, cb, rest) = parse_timer_args(args, token);
         long long id = create_timer(ms, 0, cb, rest);
-        return Value { static_cast<double>(id) };
+        return Value{static_cast<double>(id)};
     };
-    Token tSet; tSet.type = TokenType::IDENTIFIER; tSet.loc = TokenLocation("<async>",0,0,0);
+    Token tSet;
+    tSet.type = TokenType::IDENTIFIER;
+    tSet.loc = TokenLocation("<async>", 0, 0, 0);
     auto fn_set = std::make_shared<FunctionValue>(std::string("native:async.setTimeout"), native_setTimeout, nullptr, tSet);
-    obj->properties["setTimeout"] = PropertyDescriptor{ fn_set, false, false, false, tSet };
+    obj->properties["setTimeout"] = PropertyDescriptor{fn_set, false, false, false, tSet};
 
     // Async.clearTimeout(id)
     auto native_clearTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -228,22 +235,28 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
         if (!std::holds_alternative<double>(args[0])) throw std::runtime_error("Async.clearTimeout id must be number at " + token.loc.to_string());
         long long id = static_cast<long long>(std::get<double>(args[0]));
         cancel_timer(id);
-        return std::monostate {};
+        return std::monostate{};
     };
-    Token tClear; tClear.type = TokenType::IDENTIFIER; tClear.loc = TokenLocation("<async>",0,0,0);
+    Token tClear;
+    tClear.type = TokenType::IDENTIFIER;
+    tClear.loc = TokenLocation("<async>", 0, 0, 0);
     auto fn_clear = std::make_shared<FunctionValue>(std::string("native:async.clearTimeout"), native_clearTimeout, nullptr, tClear);
-    obj->properties["clearTimeout"] = PropertyDescriptor{ fn_clear, false, false, false, tClear };
+    obj->properties["clearTimeout"] = PropertyDescriptor{fn_clear, false, false, false, tClear};
 
     // Async.setInterval(ms, cb) or (cb, ms)
     auto native_setInterval = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        long long ms; FunctionPtr cb; std::vector<Value> rest;
+        long long ms;
+        FunctionPtr cb;
+        std::vector<Value> rest;
         std::tie(ms, cb, rest) = parse_timer_args(args, token);
         long long id = create_timer(ms, ms, cb, rest);
-        return Value { static_cast<double>(id) };
+        return Value{static_cast<double>(id)};
     };
-    Token tInt; tInt.type = TokenType::IDENTIFIER; tInt.loc = TokenLocation("<async>",0,0,0);
+    Token tInt;
+    tInt.type = TokenType::IDENTIFIER;
+    tInt.loc = TokenLocation("<async>", 0, 0, 0);
     auto fn_int = std::make_shared<FunctionValue>(std::string("native:async.setInterval"), native_setInterval, nullptr, tInt);
-    obj->properties["setInterval"] = PropertyDescriptor{ fn_int, false, false, false, tInt };
+    obj->properties["setInterval"] = PropertyDescriptor{fn_int, false, false, false, tInt};
 
     // Async.clearInterval(id) -> same as clearTimeout
     obj->properties["clearInterval"] = obj->properties["clearTimeout"];
@@ -256,26 +269,30 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
         if (args.size() == 1 && std::holds_alternative<double>(args[0])) {
             long long ms = value_to_ms(args[0]);
             long long id = create_timer(ms, 0, nullptr, {});
-            return Value { static_cast<double>(id) };
+            return Value{static_cast<double>(id)};
         }
 
         // If two args in either order where one is number and other function -> schedule
         if (args.size() >= 2) {
             try {
-                long long ms; FunctionPtr cb; std::vector<Value> rest;
+                long long ms;
+                FunctionPtr cb;
+                std::vector<Value> rest;
                 std::tie(ms, cb, rest) = parse_timer_args(args, token);
                 long long id = create_timer(ms, 0, cb, rest);
-                return Value { static_cast<double>(id) };
-            } catch (const std::exception &e) {
+                return Value{static_cast<double>(id)};
+            } catch (const std::exception& e) {
                 throw;
             }
         }
 
         throw std::runtime_error("Async.nap invalid arguments at " + token.loc.to_string());
     };
-    Token tNap; tNap.type = TokenType::IDENTIFIER; tNap.loc = TokenLocation("<async>",0,0,0);
+    Token tNap;
+    tNap.type = TokenType::IDENTIFIER;
+    tNap.loc = TokenLocation("<async>", 0, 0, 0);
     auto fn_nap = std::make_shared<FunctionValue>(std::string("native:async.nap"), native_nap, nullptr, tNap);
-    obj->properties["nap"] = PropertyDescriptor{ fn_nap, false, false, false, tNap };
+    obj->properties["nap"] = PropertyDescriptor{fn_nap, false, false, false, tNap};
 
     return obj;
 }

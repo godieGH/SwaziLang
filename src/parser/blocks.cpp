@@ -1,40 +1,41 @@
 // src/parser/blocks.cpp
-#include "parser.hpp"
-#include <stdexcept>
 #include <cctype>
 #include <sstream>
+#include <stdexcept>
+
+#include "parser.hpp"
 
 // ---------- helper: parse block ----------
-std::vector < std::unique_ptr < StatementNode>> Parser::parse_block(bool accept_brace_style) {
-   std::vector < std::unique_ptr < StatementNode>> body;
+std::vector<std::unique_ptr<StatementNode>> Parser::parse_block(bool accept_brace_style) {
+    std::vector<std::unique_ptr<StatementNode>> body;
 
-   if (accept_brace_style && peek().type == TokenType::OPENBRACE) {
-      consume(); // consume '{'
-      // loop until closing brace
-      while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
-         // skip separators between statements
-         while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
-            consume();
-         }
-         if (peek().type == TokenType::CLOSEBRACE || peek().type == TokenType::EOF_TOKEN) break;
-         auto stmt = parse_statement();
-         if (!stmt) break;
-         body.push_back(std::move(stmt));
-      }
-      expect(TokenType::CLOSEBRACE, "Expected '}' to close block");
-   } else {
-      // INDENT-style block: caller should have consumed COLON and NEWLINE already,
-      // and we expect an INDENT token now.
-      expect(TokenType::INDENT, "Expected indented block");
-      while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
-         auto stmt = parse_statement();
-         if (!stmt) break;
-         body.push_back(std::move(stmt));
-      }
-      expect(TokenType::DEDENT, "Expected dedent to close indented block");
-   }
+    if (accept_brace_style && peek().type == TokenType::OPENBRACE) {
+        consume();  // consume '{'
+        // loop until closing brace
+        while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
+            // skip separators between statements
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
+                consume();
+            }
+            if (peek().type == TokenType::CLOSEBRACE || peek().type == TokenType::EOF_TOKEN) break;
+            auto stmt = parse_statement();
+            if (!stmt) break;
+            body.push_back(std::move(stmt));
+        }
+        expect(TokenType::CLOSEBRACE, "Expected '}' to close block");
+    } else {
+        // INDENT-style block: caller should have consumed COLON and NEWLINE already,
+        // and we expect an INDENT token now.
+        expect(TokenType::INDENT, "Expected indented block");
+        while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
+            auto stmt = parse_statement();
+            if (!stmt) break;
+            body.push_back(std::move(stmt));
+        }
+        expect(TokenType::DEDENT, "Expected dedent to close indented block");
+    }
 
-   return body;
+    return body;
 }
 
 std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& className, bool braceStyle) {
@@ -49,7 +50,10 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
         if (braceStyle && (t.type == TokenType::CLOSEBRACE || t.type == TokenType::EOF_TOKEN)) break;
 
         // skip separators / blank lines
-        if (t.type == TokenType::NEWLINE) { consume(); continue; }
+        if (t.type == TokenType::NEWLINE) {
+            consume();
+            continue;
+        }
 
         // collect modifiers for this single member
         bool is_static = false;
@@ -57,24 +61,29 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
         bool is_locked = false;
         while (peek().type == TokenType::STAR || peek().type == TokenType::AT_SIGN || peek().type == TokenType::AMPERSAND) {
             Token mod = consume();
-            if (mod.type == TokenType::STAR) is_static = true;
-            else if (mod.type == TokenType::AT_SIGN) is_private = true;
-            else if (mod.type == TokenType::AMPERSAND) is_locked = true;
+            if (mod.type == TokenType::STAR)
+                is_static = true;
+            else if (mod.type == TokenType::AT_SIGN)
+                is_private = true;
+            else if (mod.type == TokenType::AMPERSAND)
+                is_locked = true;
         }
 
         if (t.type == TokenType::NEWLINE ||
-    (braceStyle && (t.type == TokenType::INDENT || t.type == TokenType::DEDENT))) {
-    consume();
-    continue;
-}
+            (braceStyle && (t.type == TokenType::INDENT || t.type == TokenType::DEDENT))) {
+            consume();
+            continue;
+        }
 
         Token cur = peek();
 
         // METHOD: 'tabia' <method-name or thabiti or ...>
         if (cur.type == TokenType::TABIA) {
-            consume(); // consume 'tabia'
+            consume();  // consume 'tabia'
             auto method = parse_class_method(is_private, is_static, is_locked, className,
-                                            /*isCtor=*/false, /*isDtor=*/false, /*braceStyle=*/braceStyle);
+                /*isCtor=*/false,
+                /*isDtor=*/false,
+                /*braceStyle=*/braceStyle);
             if (method) body->methods.push_back(std::move(method));
 
             // optional separators
@@ -85,16 +94,18 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
 
         // DESTRUCTOR: '~' IDENTIFIER
         if (cur.type == TokenType::TILDE) {
-            consume(); // consume '~'
+            consume();  // consume '~'
             expect(TokenType::IDENTIFIER, "Expected class name after '~' for destructor");
             Token nameTok = tokens[position - 1];
             if (nameTok.value != className) {
                 throw std::runtime_error("Parse error at " + nameTok.loc.to_string() +
-                                         ": Destructor name must match class name '" + className + "'");
+                    ": Destructor name must match class name '" + className + "'");
             }
 
             auto method = parse_class_method(is_private, is_static, is_locked, className,
-                                            /*isCtor=*/false, /*isDtor=*/true, /*braceStyle=*/braceStyle);
+                /*isCtor=*/false,
+                /*isDtor=*/true,
+                /*braceStyle=*/braceStyle);
             if (method) body->methods.push_back(std::move(method));
 
             if (peek().type == TokenType::SEMICOLON) consume();
@@ -121,7 +132,9 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
             if (cur.value == className) {
                 // do NOT pre-consume name; let parse_class_method handle it
                 auto ctor = parse_class_method(is_private, is_static, is_locked, className,
-                                               /*isCtor=*/true, /*isDtor=*/false, /*braceStyle=*/braceStyle);
+                    /*isCtor=*/true,
+                    /*isDtor=*/false,
+                    /*braceStyle=*/braceStyle);
                 if (ctor) body->methods.push_back(std::move(ctor));
 
                 if (peek().type == TokenType::SEMICOLON) consume();
@@ -137,7 +150,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
 
                 std::unique_ptr<ExpressionNode> initExpr = nullptr;
                 if (peek().type == TokenType::ASSIGN) {
-                    consume(); // consume '='
+                    consume();  // consume '='
                     initExpr = parse_expression();
                     if (!initExpr) {
                         throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Expected expression after '='");
@@ -146,10 +159,10 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
 
                 auto propNode = std::make_unique<ClassPropertyNode>();
                 propNode->token = nameTok;
-                propNode->name  = propName;
+                propNode->name = propName;
                 propNode->is_private = is_private;
-                propNode->is_static  = is_static;
-                propNode->is_locked  = is_locked;
+                propNode->is_static = is_static;
+                propNode->is_locked = is_locked;
                 propNode->value = initExpr ? std::move(initExpr) : nullptr;
                 body->properties.push_back(std::move(propNode));
 
@@ -176,15 +189,14 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     const std::string& className,
     bool isCtor,
     bool isDtor,
-    bool braceStyle)
-{
+    bool braceStyle) {
     auto node = std::make_unique<ClassMethodNode>();
-    node->is_private     = is_private;
-    node->is_static      = is_static;
-    node->is_locked      = is_locked;
+    node->is_private = is_private;
+    node->is_static = is_static;
+    node->is_locked = is_locked;
     node->is_constructor = isCtor;
-    node->is_destructor  = isDtor;
-    node->is_getter      = false;
+    node->is_destructor = isDtor;
+    node->is_getter = false;
 
     // ---- determine method name ----
     if (isDtor) {
@@ -194,7 +206,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     } else {
         // Detect getter form: lexer classifies 'thabiti' as CONSTANT in your lexer
         if (peek().type == TokenType::CONSTANT && peek().value == "thabiti") {
-            consume(); // consume 'thabiti'
+            consume();  // consume 'thabiti'
             node->is_getter = true;
             expect(TokenType::IDENTIFIER, "Expected getter name after 'thabiti'");
             Token nameTok = tokens[position - 1];
@@ -209,7 +221,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
 
             if (isCtor && node->name != className) {
                 throw std::runtime_error("Parse error at " + nameTok.loc.to_string() +
-                                         ": Constructor name must match class name '" + className + "'");
+                    ": Constructor name must match class name '" + className + "'");
             }
         }
     }
@@ -238,13 +250,13 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                     p->rest_required_count = 0;
 
                     if (peek().type == TokenType::OPENBRACKET) {
-                        consume(); // '['
+                        consume();  // '['
                         expect(TokenType::NUMBER, "Expected number inside rest count brackets");
                         Token numTok = tokens[position - 1];
                         try {
-                           p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
+                            p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                         } catch (...) {
-                           throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
                         }
                         expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                     }
@@ -272,10 +284,10 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
 
                 // optional default initializer: '=' expression
                 if (peek().type == TokenType::ASSIGN) {
-                    consume(); // consume '='
+                    consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position-1].loc.to_string());
+                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string());
                     }
                 }
 
@@ -308,13 +320,13 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                     p->rest_required_count = 0;
 
                     if (peek().type == TokenType::OPENBRACKET) {
-                        consume(); // '['
+                        consume();  // '['
                         expect(TokenType::NUMBER, "Expected number inside rest count brackets");
                         Token numTok = tokens[position - 1];
                         try {
-                           p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
+                            p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                         } catch (...) {
-                           throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
                         }
                         expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                     }
@@ -324,7 +336,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
 
                     // rest must be last in bare form
                     if (peek().type == TokenType::COMMA) {
-                        Token c = tokens[position]; // lookahead
+                        Token c = tokens[position];  // lookahead
                         throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string());
                     }
                     break;
@@ -344,10 +356,10 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
 
                 // optional default initializer: '=' expression (only allowed in paren form semantically; but accept here for consistency)
                 if (peek().type == TokenType::ASSIGN) {
-                    consume(); // consume '='
+                    consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position-1].loc.to_string());
+                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string());
                     }
                 }
 
@@ -370,10 +382,10 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     //  2) '{' ... '}'                      (c-style) -> call parse_block(true) which will consume '{' itself
     if (peek().type == TokenType::COLON) {
         // consume ':' and the following NEWLINE so parse_block(false) can expect INDENT
-        consume(); // ':'
+        consume();  // ':'
         expect(TokenType::NEWLINE, "Expected newline after ':' for method body");
         // parse_block(false) will expect INDENT and DEDENT and return statements
-        auto stmts = parse_block(false); // returns vector<unique_ptr<StatementNode>>
+        auto stmts = parse_block(false);  // returns vector<unique_ptr<StatementNode>>
         node->body = std::move(stmts);
     } else if (peek().type == TokenType::OPENBRACE) {
         // parse_block(true) will consume '{' and '}' and return body

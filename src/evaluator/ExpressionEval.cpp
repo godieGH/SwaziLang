@@ -21,11 +21,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         return Value(std::monostate{});
     }
     if (auto NaN = dynamic_cast<NaNNode*>(expr)) {
-        return Value(std::numeric_limits < double > ::quiet_NaN());
+        return Value(std::numeric_limits<double>::quiet_NaN());
     }
-    
+
     if (auto inf = dynamic_cast<InfNode*>(expr)) {
-        return Value(std::numeric_limits < double > ::infinity());
+        return Value(std::numeric_limits<double>::infinity());
     }
 
     // Template literal evaluation: concatenate quasis and evaluated expressions.
@@ -232,44 +232,44 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
 
         if (std::holds_alternative<ClassPtr>(objVal)) {
-    ClassPtr cls = std::get<ClassPtr>(objVal);
-    if (!cls) return std::monostate{};
+            ClassPtr cls = std::get<ClassPtr>(objVal);
+            if (!cls) return std::monostate{};
 
-    // Walk the class -> super chain to find the first matching static property.
-    ClassPtr walkCls = cls;
-    const PropertyDescriptor* foundDesc = nullptr;
-    ObjectPtr holder = nullptr; // the static_table that actually holds the property
+            // Walk the class -> super chain to find the first matching static property.
+            ClassPtr walkCls = cls;
+            const PropertyDescriptor* foundDesc = nullptr;
+            ObjectPtr holder = nullptr;  // the static_table that actually holds the property
 
-    while (walkCls) {
-        if (walkCls->static_table) {
-            auto it = walkCls->static_table->properties.find(mem->property);
-            if (it != walkCls->static_table->properties.end()) {
-                foundDesc = &it->second;
-                holder = walkCls->static_table;
-                break;
+            while (walkCls) {
+                if (walkCls->static_table) {
+                    auto it = walkCls->static_table->properties.find(mem->property);
+                    if (it != walkCls->static_table->properties.end()) {
+                        foundDesc = &it->second;
+                        holder = walkCls->static_table;
+                        break;
+                    }
+                }
+                walkCls = walkCls->super;
             }
+
+            if (!foundDesc) return std::monostate{};  // not found anywhere in chain
+
+            const PropertyDescriptor& desc = *foundDesc;
+
+            // private static -> allowed only when access is internal (use holder for check)
+            if (desc.is_private && !is_private_access_allowed(holder, env)) {
+                throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string());
+            }
+
+            // Getter semantics: call getter if readonly and stored function
+            if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
+                FunctionPtr getter = std::get<FunctionPtr>(desc.value);
+                return call_function(getter, {}, desc.token);
+            }
+
+            // Normal return of the value (from the class where it was found)
+            return desc.value;
         }
-        walkCls = walkCls->super;
-    }
-
-    if (!foundDesc) return std::monostate{}; // not found anywhere in chain
-
-    const PropertyDescriptor& desc = *foundDesc;
-
-    // private static -> allowed only when access is internal (use holder for check)
-    if (desc.is_private && !is_private_access_allowed(holder, env)) {
-        throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string());
-    }
-
-    // Getter semantics: call getter if readonly and stored function
-    if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
-        FunctionPtr getter = std::get<FunctionPtr>(desc.value);
-        return call_function(getter, {}, desc.token);
-    }
-
-    // Normal return of the value (from the class where it was found)
-    return desc.value;
-}
 
         // --- Universal properties ---
         const std::string& prop = mem->property;
@@ -323,7 +323,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             const std::string& prop = mem->property;
 
             // helper to create native function values (captures s_val and this)
-            auto make_fn = [this,s_val,env,mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
+            auto make_fn = [this, s_val, env, mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
                 auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     return impl(args, callEnv, token);
                 };
@@ -534,14 +534,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         std::string(1, s_val[(size_t)idx])};
                 });
             }
-            
+
             // urefu() -> returns string length (same as .herufi property)
             if (prop == "urefu") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     return Value{static_cast<double>(s_val.size())};
                 });
             }
-            
+
             // No matching string property -> fall through to unknown property error below
         }
 
@@ -872,14 +872,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
                 prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
                 prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
-                auto native_impl = [this,arr,prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
-                    
+
                     // urefu() -> returns array length (same as .idadi property)
                     if (prop == "urefu") {
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-                    
+
                     // push: ongeza(value...)
                     if (prop == "ongeza") {
                         if (args.empty()) throw std::runtime_error("arr.ongeza needs atleast 1 arg at " + token.loc.to_string());
@@ -1297,15 +1297,23 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
         if (u->op == "aina") {
             std::string t = "unknown";
-            if (std::holds_alternative<std::monostate>(operand)) t = "null";
-            else if (std::holds_alternative<double>(operand)) t = "namba";
-            else if (std::holds_alternative<std::string>(operand)) t = "neno";
-            else if (std::holds_alternative<bool>(operand)) t = "bool";
-            else if (std::holds_alternative<ArrayPtr>(operand)) t = "orodha";
-            else if (std::holds_alternative<FunctionPtr>(operand)) t = "kazi";
-            else if (std::holds_alternative<ObjectPtr>(operand)) t = "object";
-            else if (std::holds_alternative<ClassPtr>(operand)) t = "muundo";
-            return Value{ t };
+            if (std::holds_alternative<std::monostate>(operand))
+                t = "null";
+            else if (std::holds_alternative<double>(operand))
+                t = "namba";
+            else if (std::holds_alternative<std::string>(operand))
+                t = "neno";
+            else if (std::holds_alternative<bool>(operand))
+                t = "bool";
+            else if (std::holds_alternative<ArrayPtr>(operand))
+                t = "orodha";
+            else if (std::holds_alternative<FunctionPtr>(operand))
+                t = "kazi";
+            else if (std::holds_alternative<ObjectPtr>(operand))
+                t = "object";
+            else if (std::holds_alternative<ClassPtr>(operand))
+                t = "muundo";
+            return Value{t};
         }
 
         throw std::runtime_error("Unknown unary operator '" + u->op + "' at " + u->token.loc.to_string());
@@ -1695,27 +1703,27 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return Value{
                 !is_equal(left, right)};
         }
-        
+
         bool bothStrings = std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right);
         if (bothStrings) {
-            const std::string &ls = std::get<std::string>(left);
-            const std::string &rs = std::get<std::string>(right);
-        
-            if (op == ">")  return Value{ ls > rs };
-            if (op == "<")  return Value{ ls < rs };
-            if (op == ">=") return Value{ ls >= rs };
-            if (op == "<=") return Value{ ls <= rs };
+            const std::string& ls = std::get<std::string>(left);
+            const std::string& rs = std::get<std::string>(right);
+
+            if (op == ">") return Value{ls > rs};
+            if (op == "<") return Value{ls < rs};
+            if (op == ">=") return Value{ls >= rs};
+            if (op == "<=") return Value{ls <= rs};
         } else {
             // Numeric fallback (preserve existing behavior for mixed or non-string values).
             double ln = to_number(left);
             double rn = to_number(right);
-        
-            if (op == ">")  return Value{ ln > rn };
-            if (op == "<")  return Value{ ln < rn };
-            if (op == ">=") return Value{ ln >= rn };
-            if (op == "<=") return Value{ ln <= rn };
+
+            if (op == ">") return Value{ln > rn};
+            if (op == "<") return Value{ln < rn};
+            if (op == ">=") return Value{ln >= rn};
+            if (op == "<=") return Value{ln <= rn};
         }
-        
+
         throw std::runtime_error("Unknown binary operator '" + op + "' at " + b->token.loc.to_string());
     }
 

@@ -1,53 +1,54 @@
 
 #include "repl.hpp"
 
-
-static bool is_likely_incomplete_input(const std::string &err) {
-  // Treat parser expectations that mean "unterminated input" as incomplete so REPL continues.
-  // Removed "Expected ':'" because the REPL now proactively handles ':'-started blocks.
-  return err.find("Expected dedent") != std::string::npos ||
-         err.find("Expected '}'") != std::string::npos ||
-         err.find("Expected ')'") != std::string::npos ||
-         err.find("Expected ']'") != std::string::npos;
+static bool is_likely_incomplete_input(const std::string& err) {
+    // Treat parser expectations that mean "unterminated input" as incomplete so REPL continues.
+    // Removed "Expected ':'" because the REPL now proactively handles ':'-started blocks.
+    return err.find("Expected dedent") != std::string::npos ||
+        err.find("Expected '}'") != std::string::npos ||
+        err.find("Expected ')'") != std::string::npos ||
+        err.find("Expected ']'") != std::string::npos;
 }
 
 // --- Helpers for REPL indentation and block detection ---
 
-static int count_leading_indent_spaces(const std::string &line) {
-  // Tabs are treated as 4 spaces here. Adjust if you want different behavior.
-  int count = 0;
-  for (char c: line) {
-    if (c == ' ') count += 1;
-    else if (c == '\t') count += 4;
-    else break;
-  }
-  return count;
+static int count_leading_indent_spaces(const std::string& line) {
+    // Tabs are treated as 4 spaces here. Adjust if you want different behavior.
+    int count = 0;
+    for (char c : line) {
+        if (c == ' ')
+            count += 1;
+        else if (c == '\t')
+            count += 4;
+        else
+            break;
+    }
+    return count;
 }
 
-static bool is_blank_or_spaces(const std::string &s) {
-  for (unsigned char c: s) if (!std::isspace(c)) return false;
-  return true;
+static bool is_blank_or_spaces(const std::string& s) {
+    for (unsigned char c : s)
+        if (!std::isspace(c)) return false;
+    return true;
 }
 
-static char last_non_ws_char(const std::string &line) {
-  for (int i = (int)line.size() - 1; i >= 0; --i) {
-    unsigned char ch = static_cast<unsigned char>(line[i]);
-    if (!std::isspace(ch)) return static_cast<char>(ch);
-  }
-  return '\0';
+static char last_non_ws_char(const std::string& line) {
+    for (int i = (int)line.size() - 1; i >= 0; --i) {
+        unsigned char ch = static_cast<unsigned char>(line[i]);
+        if (!std::isspace(ch)) return static_cast<char>(ch);
+    }
+    return '\0';
 }
 
-static bool ends_with_colon(const std::string &line) {
-  return last_non_ws_char(line) == ':';
+static bool ends_with_colon(const std::string& line) {
+    return last_non_ws_char(line) == ':';
 }
 
-static bool ends_with_open_brace(const std::string &line) {
-  return last_non_ws_char(line) == '{';
+static bool ends_with_open_brace(const std::string& line) {
+    return last_non_ws_char(line) == '{';
 }
 
-
-
-static std::string expand_tabs(const std::string &s, int tab_width = 4) {
+static std::string expand_tabs(const std::string& s, int tab_width = 4) {
     std::string out;
     out.reserve(s.size());
     int col = 0;
@@ -67,17 +68,14 @@ static std::string expand_tabs(const std::string &s, int tab_width = 4) {
     return out;
 }
 
-
-
-
 // Return the count of *unclosed* bracket-like tokens: {...}, (...), [...]
 // This ignores characters inside single or double quotes and skips escaped chars.
-static int unclosed_brackets_depth(const std::string &s) {
+static int unclosed_brackets_depth(const std::string& s) {
     int braces = 0, paren = 0, square = 0;
     bool in_single = false, in_double = false;
     for (size_t i = 0; i < s.size(); ++i) {
         char c = s[i];
-        if (c == '\\') { // skip escaped char
+        if (c == '\\') {  // skip escaped char
             ++i;
             continue;
         }
@@ -91,21 +89,26 @@ static int unclosed_brackets_depth(const std::string &s) {
         }
         if (in_single || in_double) continue;
 
-        if (c == '{') ++braces;
-        else if (c == '}') --braces;
-        else if (c == '(') ++paren;
-        else if (c == ')') --paren;
-        else if (c == '[') ++square;
-        else if (c == ']') --square;
+        if (c == '{')
+            ++braces;
+        else if (c == '}')
+            --braces;
+        else if (c == '(')
+            ++paren;
+        else if (c == ')')
+            --paren;
+        else if (c == '[')
+            ++square;
+        else if (c == ']')
+            --square;
     }
 
     int openOnly = 0;
     if (braces > 0) openOnly += braces;
     if (paren > 0) openOnly += paren;
     if (square > 0) openOnly += square;
-    return openOnly; // zero if all balanced (or more closes than opens)
+    return openOnly;  // zero if all balanced (or more closes than opens)
 }
-
 
 // --- REPL: colon-block tracking + brace continuation ---
 // Behavior:
@@ -150,7 +153,6 @@ static fs::path history_file_in_home() {
     return fs::current_path() / ".swazi_history";
 }
 
-
 // Important note:
 // Many linenoise implementations (and terminals) don't handle multi-byte or
 // wide characters gracefully when computing cursor positions for the prompt.
@@ -163,6 +165,7 @@ static fs::path history_file_in_home() {
 void run_repl_mode() {
     std::string buffer;
     Evaluator evaluator;
+    evaluator.set_entry_point("");  // REPL: sets __name__ to "<repl>" and __main__ true
     std::vector<int> colon_indent_stack;
 
     std::cout << "swazi v" << SWAZI_VERSION << " | built on " << __DATE__ << "\n";
@@ -188,28 +191,28 @@ void run_repl_mode() {
     // so we avoid calling those and maintain the value locally.
     std::string last_added_history;
 
-    // If your linenoise supports a multi-line editing mode, you can enable it here.
-    // We try calling it in a guarded way (some builds export it, some do not).
-    // Uncomment the following lines if your linenoise has linenoiseSetMultiLine:
-    //
-    #ifdef LINENOISE_MULTILINE
-      linenoiseSetMultiLine(1);
-    #endif
+// If your linenoise supports a multi-line editing mode, you can enable it here.
+// We try calling it in a guarded way (some builds export it, some do not).
+// Uncomment the following lines if your linenoise has linenoiseSetMultiLine:
+//
+#ifdef LINENOISE_MULTILINE
+    linenoiseSetMultiLine(1);
+#endif
     //
     // We keep it commented out to remain portable.
 
     while (true) {
         // Use plain ASCII prompts to avoid cursor misplacement bugs in some terminals.
         std::string prompt = buffer.empty() ? ">>> " : "... ";
-        char *raw = linenoise(prompt.c_str());
-        if (!raw) { // EOF (Ctrl-D) or error
+        char* raw = linenoise(prompt.c_str());
+        if (!raw) {  // EOF (Ctrl-D) or error
             std::cout << "\n";
             break;
         }
 
         std::string line(raw);
         linenoiseFree(raw);
-        
+
         line = expand_tabs(line, 4);
 
         if (line == "exit" || line == "quit") break;
@@ -230,13 +233,13 @@ void run_repl_mode() {
         if (ends_with_colon(line)) {
             int base_indent = count_leading_indent_spaces(line);
             colon_indent_stack.push_back(base_indent);
-            continue; // keep reading for colon-blocks (pythonic)
+            continue;  // keep reading for colon-blocks (pythonic)
         }
 
         if (ends_with_open_brace(line)) {
             continue;
         }
-        
+
         if (unclosed_brackets_depth(buffer) > 0) {
             continue;
         }
@@ -280,7 +283,7 @@ void run_repl_mode() {
             // success: clear buffer and colon-indent stack
             buffer.clear();
             colon_indent_stack.clear();
-        } catch (const std::exception &e) {
+        } catch (const std::exception& e) {
             std::string msg = e.what();
             if (is_likely_incomplete_input(msg)) {
                 // incomplete -> keep buffer and continue reading

@@ -1,37 +1,44 @@
 #include "lexer.hpp"
+
+#include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
-#include <sstream>
-#include <algorithm>
 
 // Constructor
 Lexer::Lexer(const std::string& source, const std::string& filename)
-    : src(source), filename(filename), i(0), line(1), col(1)
-{
+    : src(source), filename(filename), i(0), line(1), col(1) {
     indent_stack.push_back(0);
 }
 
-bool Lexer::eof() const { return i >= src.size(); }
+bool Lexer::eof() const {
+    return i >= src.size();
+}
 char Lexer::peek(size_t offset) const {
     size_t idx = i + offset;
     if (idx >= src.size()) return '\0';
     return src[idx];
 }
-char Lexer::peek_next() const { return peek(1); }
+char Lexer::peek_next() const {
+    return peek(1);
+}
 
 char Lexer::advance() {
     if (eof()) return '\0';
     char c = src[i++];
-    if (c == '\n') { line++; col = 1; }
-    else col++;
+    if (c == '\n') {
+        line++;
+        col = 1;
+    } else
+        col++;
     return c;
 }
 
 void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length) {
     int len = tok_length >= 0 ? tok_length : static_cast<int>(value.size());
     TokenLocation loc(filename.empty() ? "<repl>" : filename, tok_line, tok_col, len);
-    Token t{ type, value, loc };
+    Token t{type, value, loc};
     out.push_back(std::move(t));
 }
 
@@ -47,22 +54,38 @@ void Lexer::scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_co
     std::string val;
     while (!eof()) {
         char c = peek();
-        if (c == quote) { advance(); break; }
+        if (c == quote) {
+            advance();
+            break;
+        }
         if (c == '\\') {
-            advance(); // backslash
+            advance();  // backslash
             char nxt = peek();
-            if (nxt == 'n') { val.push_back('\n'); advance(); }
-            else if (nxt == 't') { val.push_back('\t'); advance(); }
-            else if (nxt == '\'' ) { val.push_back('\''); advance(); }
-            else if (nxt == '"' ) { val.push_back('"'); advance(); }
-            else if (nxt == '\\') { val.push_back('\\'); advance(); }
-            else { val.push_back(nxt); advance(); }
+            if (nxt == 'n') {
+                val.push_back('\n');
+                advance();
+            } else if (nxt == 't') {
+                val.push_back('\t');
+                advance();
+            } else if (nxt == '\'') {
+                val.push_back('\'');
+                advance();
+            } else if (nxt == '"') {
+                val.push_back('"');
+                advance();
+            } else if (nxt == '\\') {
+                val.push_back('\\');
+                advance();
+            } else {
+                val.push_back(nxt);
+                advance();
+            }
             continue;
         }
         // allow multiline strings: advance updates line/col
         val.push_back(advance());
     }
-    int tok_length = static_cast<int>(i - start_index); // raw source length including quotes and escapes
+    int tok_length = static_cast<int>(i - start_index);  // raw source length including quotes and escapes
 
     TokenType tt = TokenType::STRING;
     if (quote == '\'') tt = TokenType::SINGLE_QUOTED_STRING;
@@ -105,11 +128,22 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
         if (c == '\\') {
             advance();
             char nxt = peek();
-            if (nxt == 'n') { chunk.push_back('\n'); advance(); }
-            else if (nxt == 't') { chunk.push_back('\t'); advance(); }
-            else if (nxt == '`') { chunk.push_back('`'); advance(); }
-            else if (nxt == '\\') { chunk.push_back('\\'); advance(); }
-            else { chunk.push_back(nxt); advance(); }
+            if (nxt == 'n') {
+                chunk.push_back('\n');
+                advance();
+            } else if (nxt == 't') {
+                chunk.push_back('\t');
+                advance();
+            } else if (nxt == '`') {
+                chunk.push_back('`');
+                advance();
+            } else if (nxt == '\\') {
+                chunk.push_back('\\');
+                advance();
+            } else {
+                chunk.push_back(nxt);
+                advance();
+            }
             continue;
         }
 
@@ -119,10 +153,10 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
             emit_chunk();
 
             int expr_line = line;
-            int expr_col  = col;
+            int expr_col = col;
             // consume '${'
-            advance(); // $
-            advance(); // {
+            advance();  // $
+            advance();  // {
             add_token(out, TokenType::TEMPLATE_EXPR_START, "${", expr_line, expr_col, 2);
 
             // Now lex tokens for the embedded expression until the matching top-level '}'.
@@ -132,7 +166,7 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
                 if (peek() == '}' && brace_depth == 0) {
                     int end_line = line;
                     int end_col = col;
-                    advance(); // consume '}'
+                    advance();  // consume '}'
                     add_token(out, TokenType::TEMPLATE_EXPR_END, "}", end_line, end_col, 1);
 
                     // next chunk starts at current line/col
@@ -144,7 +178,7 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
                 // If next is '{' inside expression increase nesting and let scan_token emit tokens
                 if (peek() == '{') {
                     brace_depth++;
-                    scan_token(out); // will emit OPENBRACE token etc
+                    scan_token(out);  // will emit OPENBRACE token etc
                     continue;
                 }
                 if (peek() == '}') {
@@ -213,10 +247,9 @@ void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size
                 // rollback to before 'e' if no digits followed -- leave 'e' for caller
                 i = save_i;
                 val.resize(saved_len);
-                break; // stop scanning number here
+                break;  // stop scanning number here
             }
-        }
-        else {
+        } else {
             break;
         }
     }
@@ -228,8 +261,10 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
     std::string id;
     while (!eof()) {
         char c = peek();
-        if (std::isalnum((unsigned char)c) || c == '_') id.push_back(advance());
-        else break;
+        if (std::isalnum((unsigned char)c) || c == '_')
+            id.push_back(advance());
+        else
+            break;
     }
 
     static const std::unordered_map<std::string, TokenType> keywords = {
@@ -251,15 +286,15 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"si", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
-        
+
         {"ainaya", TokenType::AINA},
 
         // module / import / export
-        {"tumia", TokenType::TUMIA},   // import
-        {"kutoka", TokenType::KUTOKA}, // from
-        {"ruhusu", TokenType::RUHUSU}, // export
+        {"tumia", TokenType::TUMIA},    // import
+        {"kutoka", TokenType::KUTOKA},  // from
+        {"ruhusu", TokenType::RUHUSU},  // export
 
-        //calsses keywords
+        // calsses keywords
         {"muundo", TokenType::MUUNDO},
         {"rithi", TokenType::RITHI},
         {"unda", TokenType::UNDA},
@@ -267,15 +302,15 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"futa", TokenType::FUTA},
 
         // control-flow keywords
-        {"kama", TokenType::KAMA},             // if
-        {"vinginevyo", TokenType::VINGINEVYO}, // else
+        {"kama", TokenType::KAMA},              // if
+        {"vinginevyo", TokenType::VINGINEVYO},  // else
 
         {"jaribu", TokenType::JARIBU},
         {"makosa", TokenType::MAKOSA},
         {"kisha", TokenType::KISHA},
 
         // loop-related keywords
-        {"kwa", TokenType::FOR},              // for-like loop
+        {"kwa", TokenType::FOR},  // for-like loop
         {"kila", TokenType::KILA},
         {"katika", TokenType::KATIKA},
         {"wakati", TokenType::WHILE},
@@ -283,16 +318,17 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"simama", TokenType::SIMAMA},
         {"endelea", TokenType::ENDELEA},
 
-        {"null", TokenType::NULL_LITERAL},      // null token
+        {"null", TokenType::NULL_LITERAL},  // null token
         {"nan", TokenType::NAN_LITERAL},
-        {"inf", TokenType::INF_LITERAL}
-    };
+        {"inf", TokenType::INF_LITERAL}};
 
     auto it = keywords.find(id);
     int tok_length = static_cast<int>(i - start_index);
     if (it != keywords.end()) {
-        if (it->second == TokenType::BOOLEAN) add_token(out, TokenType::BOOLEAN, id, tok_line, tok_col, tok_length);
-        else add_token(out, it->second, id, tok_line, tok_col, tok_length);
+        if (it->second == TokenType::BOOLEAN)
+            add_token(out, TokenType::BOOLEAN, id, tok_line, tok_col, tok_length);
+        else
+            add_token(out, it->second, id, tok_line, tok_col, tok_length);
     } else {
         add_token(out, TokenType::IDENTIFIER, id, tok_line, tok_col, tok_length);
     }
@@ -300,10 +336,13 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
 
 void Lexer::handle_newline(std::vector<Token>& out) {
     // consume newline (supports CRLF)
-    if (peek() == '\r' && peek_next() == '\n') { advance(); advance(); }
-    else advance();
+    if (peek() == '\r' && peek_next() == '\n') {
+        advance();
+        advance();
+    } else
+        advance();
 
-    int newline_line = line - 1; // token should point to the line that ended
+    int newline_line = line - 1;  // token should point to the line that ended
     int newline_col = 1;
 
     // --- CONTINUATION CHECK ---
@@ -311,20 +350,21 @@ void Lexer::handle_newline(std::vector<Token>& out) {
     if (!out.empty()) {
         TokenType prev = out.back().type;
         switch (prev) {
-            case TokenType::ASSIGN:       // =
-            case TokenType::PLUS:         // +
-            case TokenType::MINUS:        // -
-            case TokenType::STAR:         // *
-            case TokenType::SLASH:        // /
-            case TokenType::COMMA:        // ,
-            case TokenType::DOT:          // .
-            case TokenType::LAMBDA:       // =>
-            case TokenType::ELLIPSIS:     // ...
-            case TokenType::PLUS_ASSIGN:  // +=
-            case TokenType::MINUS_ASSIGN: // -=
+            case TokenType::ASSIGN:        // =
+            case TokenType::PLUS:          // +
+            case TokenType::MINUS:         // -
+            case TokenType::STAR:          // *
+            case TokenType::SLASH:         // /
+            case TokenType::COMMA:         // ,
+            case TokenType::DOT:           // .
+            case TokenType::LAMBDA:        // =>
+            case TokenType::ELLIPSIS:      // ...
+            case TokenType::PLUS_ASSIGN:   // +=
+            case TokenType::MINUS_ASSIGN:  // -=
                 continuation = true;
                 break;
-            default: break;
+            default:
+                break;
         }
     }
 
@@ -346,16 +386,27 @@ void Lexer::handle_newline(std::vector<Token>& out) {
 
     while (scan < src.size()) {
         // handle CRLF / LF boundaries: if the candidate line is empty, skip it
-        if (src[scan] == '\r') { scan++; continue; }
-        if (src[scan] == '\n') { scan++; continue; }
+        if (src[scan] == '\r') {
+            scan++;
+            continue;
+        }
+        if (src[scan] == '\n') {
+            scan++;
+            continue;
+        }
 
         // For this candidate line, skip its leading spaces/tabs and compute indent.
         size_t pos = scan;
         int indentCount = 0;
         while (pos < src.size()) {
-            if (src[pos] == ' ') { indentCount++; pos++; }
-            else if (src[pos] == '\t') { indentCount += 4; pos++; }
-            else break;
+            if (src[pos] == ' ') {
+                indentCount++;
+                pos++;
+            } else if (src[pos] == '\t') {
+                indentCount += 4;
+                pos++;
+            } else
+                break;
         }
 
         // If the rest of the line is empty (newline or EOF) -> blank line: skip it
@@ -387,7 +438,11 @@ void Lexer::handle_newline(std::vector<Token>& out) {
             size_t b = pos + 2;
             bool closed = false;
             while (b + 1 < src.size()) {
-                if (src[b] == '*' && src[b + 1] == '/') { b += 2; closed = true; break; }
+                if (src[b] == '*' && src[b + 1] == '/') {
+                    b += 2;
+                    closed = true;
+                    break;
+                }
                 b++;
             }
             // set scan to after the block comment; if closed, continue scanning from there,
@@ -442,85 +497,249 @@ void Lexer::emit_remaining_dedents(std::vector<Token>& out) {
 void Lexer::scan_token(std::vector<Token>& out) {
     char c = peek();
     // whitespace except newline
-    if (c == ' ' || c == '\t' || c == '\r') { advance(); return; }
+    if (c == ' ' || c == '\t' || c == '\r') {
+        advance();
+        return;
+    }
 
-    if (c == '\n') { handle_newline(out); return; }
+    if (c == '\n') {
+        handle_newline(out);
+        return;
+    }
 
     // comments: '#' or '//' style
-    if (c == '#') { skip_line_comment(); return; }
-    if (c == '/' && peek_next() == '/') { advance(); advance(); skip_line_comment(); return; }
+    if (c == '#') {
+        skip_line_comment();
+        return;
+    }
+    if (c == '/' && peek_next() == '/') {
+        advance();
+        advance();
+        skip_line_comment();
+        return;
+    }
     if (c == '/' && peek_next() == '*') {
-        advance(); advance();
+        advance();
+        advance();
         while (!eof()) {
-            if (peek() == '*' && peek_next() == '/') { advance(); advance(); break; }
+            if (peek() == '*' && peek_next() == '/') {
+                advance();
+                advance();
+                break;
+            }
             advance();
         }
         return;
     }
 
-   if(c == '.' && peek_next() == '.' && peek(2) == '.') {
-      add_token(out, TokenType::ELLIPSIS, "...", line, col, 3);
-      advance(); advance(); advance();
-      return;
-   }
-   if (c == '?' && peek_next() == '.') {
-      add_token(out, TokenType::QUESTION_DOT, "?.", line, col, 2);
-      advance(); // consume '?'
-      advance(); // consume '.'
-      return;
-   }
-   if (c == '=' && peek_next() == '=' && peek(2) == '=') {
+    if (c == '.' && peek_next() == '.' && peek(2) == '.') {
+        add_token(out, TokenType::ELLIPSIS, "...", line, col, 3);
+        advance();
+        advance();
+        advance();
+        return;
+    }
+    if (c == '?' && peek_next() == '.') {
+        add_token(out, TokenType::QUESTION_DOT, "?.", line, col, 2);
+        advance();  // consume '?'
+        advance();  // consume '.'
+        return;
+    }
+    if (c == '=' && peek_next() == '=' && peek(2) == '=') {
         add_token(out, TokenType::STRICT_EQUALITY, "===", line, col, 3);
-        advance(); advance(); advance();
+        advance();
+        advance();
+        advance();
         return;
     }
     if (c == '!' && peek_next() == '=' && peek(2) == '=') {
         add_token(out, TokenType::STRICT_NOTEQUAL, "!==", line, col, 3);
-        advance(); advance(); advance();
+        advance();
+        advance();
+        advance();
         return;
     }
 
     // two-char operators
-    if (c == '*' && peek_next() == '*') { add_token(out, TokenType::POWER, "**", line, col, 2); advance(); advance(); return; }
-    if (c == '=' && peek_next() == '=') { add_token(out, TokenType::EQUALITY, "==", line, col, 2); advance(); advance(); return; }
-    if (c == '=' && peek_next() == '>') { add_token(out, TokenType::LAMBDA, "=>", line, col, 2); advance(); advance(); return; }
-    if (c == '!' && peek_next() == '=') { add_token(out, TokenType::NOTEQUAL, "!=", line, col, 2); advance(); advance(); return; }
-    if (c == '>' && peek_next() == '=') { add_token(out, TokenType::GREATEROREQUALTHAN, ">=", line, col, 2); advance(); advance(); return; }
-    if (c == '<' && peek_next() == '=') { add_token(out, TokenType::LESSOREQUALTHAN, "<=", line, col, 2); advance(); advance(); return; }
-    if (c == '+' && peek_next() == '+') { add_token(out, TokenType::INCREMENT, "++", line, col, 2); advance(); advance(); return; }
-    if (c == '-' && peek_next() == '-') { add_token(out, TokenType::DECREMENT, "--", line, col, 2); advance(); advance(); return; }
-    if (c == '+' && peek_next() == '=') { add_token(out, TokenType::PLUS_ASSIGN, "+=", line, col, 2); advance(); advance(); return; }
-    if (c == '-' && peek_next() == '=') { add_token(out, TokenType::MINUS_ASSIGN, "-=", line, col, 2); advance(); advance(); return; }
-    if (c == '*' && peek_next() == '=') { add_token(out, TokenType::TIMES_ASSIGN, "*=", line, col, 2); advance(); advance(); return; }
-    if (c == '&' && peek_next() == '&') { add_token(out, TokenType::AND, "&&", line, col, 2); advance(); advance(); return; }
-    if (c == '|' && peek_next() == '|') { add_token(out, TokenType::OR, "||", line, col, 2); advance(); advance(); return; }
+    if (c == '*' && peek_next() == '*') {
+        add_token(out, TokenType::POWER, "**", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '=' && peek_next() == '=') {
+        add_token(out, TokenType::EQUALITY, "==", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '=' && peek_next() == '>') {
+        add_token(out, TokenType::LAMBDA, "=>", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '!' && peek_next() == '=') {
+        add_token(out, TokenType::NOTEQUAL, "!=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '>' && peek_next() == '=') {
+        add_token(out, TokenType::GREATEROREQUALTHAN, ">=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '<' && peek_next() == '=') {
+        add_token(out, TokenType::LESSOREQUALTHAN, "<=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '+' && peek_next() == '+') {
+        add_token(out, TokenType::INCREMENT, "++", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '-' && peek_next() == '-') {
+        add_token(out, TokenType::DECREMENT, "--", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '+' && peek_next() == '=') {
+        add_token(out, TokenType::PLUS_ASSIGN, "+=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '-' && peek_next() == '=') {
+        add_token(out, TokenType::MINUS_ASSIGN, "-=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '*' && peek_next() == '=') {
+        add_token(out, TokenType::TIMES_ASSIGN, "*=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '&' && peek_next() == '&') {
+        add_token(out, TokenType::AND, "&&", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '|' && peek_next() == '|') {
+        add_token(out, TokenType::OR, "||", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
 
     // single-char tokens & bookkeeping
     switch (c) {
-        case ';': add_token(out, TokenType::SEMICOLON, ";", line, col, 1); advance(); return;
-        case ',': add_token(out, TokenType::COMMA, ",", line, col, 1); advance(); return;
-        case '(': paren_level++; add_token(out, TokenType::OPENPARENTHESIS, "(", line, col, 1); advance(); return;
-        case ')': if (paren_level > 0) paren_level--; add_token(out, TokenType::CLOSEPARENTHESIS, ")", line, col, 1); advance(); return;
-        case '{': add_token(out, TokenType::OPENBRACE, "{", line, col, 1); advance(); return;
-        case '}': add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1); advance(); return;
-        case '[': add_token(out, TokenType::OPENBRACKET, "[", line, col, 1); advance(); return;
-        case ']': add_token(out, TokenType::CLOSEBRACKET, "]", line, col, 1); advance(); return;
-        case '$': add_token(out, TokenType::SELF, "$", line, col, 1); advance(); return;
-        case '.': add_token(out, TokenType::DOT, ".", line, col, 1); advance(); return;
-        case ':': add_token(out, TokenType::COLON, ":", line, col, 1); advance(); return;
-        case '?': add_token(out, TokenType::QUESTIONMARK, "?", line, col, 1); advance(); return;
-        case '@': add_token(out, TokenType::AT_SIGN, "@", line, col, 1); advance(); return;
-        case '&': add_token(out, TokenType::AMPERSAND, "&", line, col, 1); advance(); return;
-        case '~': add_token(out, TokenType::TILDE, "~", line, col, 1); advance(); return;
-        case '=': add_token(out, TokenType::ASSIGN, "=", line, col, 1); advance(); return;
-        case '+': add_token(out, TokenType::PLUS, "+", line, col, 1); advance(); return;
-        case '-': add_token(out, TokenType::MINUS, "-", line, col, 1); advance(); return;
-        case '*': add_token(out, TokenType::STAR, "*", line, col, 1); advance(); return;
-        case '/': add_token(out, TokenType::SLASH, "/", line, col, 1); advance(); return;
-        case '%': add_token(out, TokenType::PERCENT, "%", line, col, 1); advance(); return;
-        case '>': add_token(out, TokenType::GREATERTHAN, ">", line, col, 1); advance(); return;
-        case '<': add_token(out, TokenType::LESSTHAN, "<", line, col, 1); advance(); return;
-        case '!': add_token(out, TokenType::NOT, "!", line, col, 1); advance(); return;
+        case ';':
+            add_token(out, TokenType::SEMICOLON, ";", line, col, 1);
+            advance();
+            return;
+        case ',':
+            add_token(out, TokenType::COMMA, ",", line, col, 1);
+            advance();
+            return;
+        case '(':
+            paren_level++;
+            add_token(out, TokenType::OPENPARENTHESIS, "(", line, col, 1);
+            advance();
+            return;
+        case ')':
+            if (paren_level > 0) paren_level--;
+            add_token(out, TokenType::CLOSEPARENTHESIS, ")", line, col, 1);
+            advance();
+            return;
+        case '{':
+            add_token(out, TokenType::OPENBRACE, "{", line, col, 1);
+            advance();
+            return;
+        case '}':
+            add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1);
+            advance();
+            return;
+        case '[':
+            add_token(out, TokenType::OPENBRACKET, "[", line, col, 1);
+            advance();
+            return;
+        case ']':
+            add_token(out, TokenType::CLOSEBRACKET, "]", line, col, 1);
+            advance();
+            return;
+        case '$':
+            add_token(out, TokenType::SELF, "$", line, col, 1);
+            advance();
+            return;
+        case '.':
+            add_token(out, TokenType::DOT, ".", line, col, 1);
+            advance();
+            return;
+        case ':':
+            add_token(out, TokenType::COLON, ":", line, col, 1);
+            advance();
+            return;
+        case '?':
+            add_token(out, TokenType::QUESTIONMARK, "?", line, col, 1);
+            advance();
+            return;
+        case '@':
+            add_token(out, TokenType::AT_SIGN, "@", line, col, 1);
+            advance();
+            return;
+        case '&':
+            add_token(out, TokenType::AMPERSAND, "&", line, col, 1);
+            advance();
+            return;
+        case '~':
+            add_token(out, TokenType::TILDE, "~", line, col, 1);
+            advance();
+            return;
+        case '=':
+            add_token(out, TokenType::ASSIGN, "=", line, col, 1);
+            advance();
+            return;
+        case '+':
+            add_token(out, TokenType::PLUS, "+", line, col, 1);
+            advance();
+            return;
+        case '-':
+            add_token(out, TokenType::MINUS, "-", line, col, 1);
+            advance();
+            return;
+        case '*':
+            add_token(out, TokenType::STAR, "*", line, col, 1);
+            advance();
+            return;
+        case '/':
+            add_token(out, TokenType::SLASH, "/", line, col, 1);
+            advance();
+            return;
+        case '%':
+            add_token(out, TokenType::PERCENT, "%", line, col, 1);
+            advance();
+            return;
+        case '>':
+            add_token(out, TokenType::GREATERTHAN, ">", line, col, 1);
+            advance();
+            return;
+        case '<':
+            add_token(out, TokenType::LESSTHAN, "<", line, col, 1);
+            advance();
+            return;
+        case '!':
+            add_token(out, TokenType::NOT, "!", line, col, 1);
+            advance();
+            return;
         case '"': {
             size_t start_index = i;
             scan_quoted_string(out, line, col, start_index, '"');
@@ -536,14 +755,23 @@ void Lexer::scan_token(std::vector<Token>& out) {
             scan_template(out, line, col, start_index);
             return;
         }
-        default: break;
+        default:
+            break;
     }
 
     // number
-    if (std::isdigit((unsigned char)c)) { size_t start_index = i; scan_number(out, line, col, start_index); return; }
+    if (std::isdigit((unsigned char)c)) {
+        size_t start_index = i;
+        scan_number(out, line, col, start_index);
+        return;
+    }
 
     // identifier or keyword
-    if (std::isalpha((unsigned char)c) || c == '_') { size_t start_index = i; scan_identifier_or_keyword(out, line, col, start_index); return; }
+    if (std::isalpha((unsigned char)c) || c == '_') {
+        size_t start_index = i;
+        scan_identifier_or_keyword(out, line, col, start_index);
+        return;
+    }
 
     // unknown char
     {
