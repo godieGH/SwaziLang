@@ -318,12 +318,20 @@ static Value builtin_toka(const std::vector<Value>& args, EnvPtr env, const Toke
     std::exit(code);
     return std::string("");  // unreachable, keeps signature happy
 }
+static Value builtin_cerr(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    if(args.empty()) {
+      throw std::runtime_error("cerr should have an error message as an argument, you passed no argument");
+    }
+    std::string msg = Evaluator::cerr_colored(value_to_string(args[0]));
+    std::cerr << msg << "\n";
+    return Value();
+}
 
 // --------------------
 // Ordered map factory: Object.map([plainObject])
 // --------------------
 // Add this after builtin_object_entry in this file.
-static Value builtin_object_map(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     // internal ordered store
     auto store = std::make_shared<std::vector<std::pair<std::string, Value>>>();
 
@@ -551,6 +559,7 @@ void init_globals(EnvPtr env) {
     add_fn("soma", builtin_ingiza);
     add_fn("Makosa", builtin_throw);
     add_fn("thibitisha", builtin_thibitisha);
+    add_fn("assert", builtin_thibitisha);
 
     auto objectVal = std::make_shared<ObjectValue>();
 
@@ -582,8 +591,8 @@ void init_globals(EnvPtr env) {
             Token{}};
     }
     {
-        auto fn = std::make_shared<FunctionValue>("map", builtin_object_map, env, Token{});
-        objectVal->properties["map"] = {
+        auto fn = std::make_shared<FunctionValue>("ordered", built_object_ordered, env, Token{});
+        objectVal->properties["ordered"] = {
             fn,
             false,
             false,
@@ -679,6 +688,8 @@ void init_globals(EnvPtr env) {
         };
 
         add("exit", builtin_toka);
+        add("cerr", builtin_cerr);
+        add("cin", builtin_ingiza);
 
         Environment::Variable program;
         program.value = programVal;

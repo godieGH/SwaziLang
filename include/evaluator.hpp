@@ -157,6 +157,7 @@ class Evaluator {
     Value evaluate_expression(ExpressionNode* expr);
     std::string value_to_string(const Value& v);
     bool is_void(const Value& v);
+    static std::string cerr_colored(const std::string& s);
 
     void set_entry_point(const std::string& filename);
 

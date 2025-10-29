@@ -558,6 +558,13 @@ static std::string quote_and_color(const std::string& s, bool use_color) {
     ss << Color::white << "'" << Color::reset;  // ← Changed
     return ss.str();
 }
+std::string Evaluator::cerr_colored(const std::string& s) {
+  bool use_color = supports_color();
+  std::string err_str = use_color ? (Color::bright_red + "Error: " + Color::reset) : "Error: ";
+  std::string ss = use_color ? (Color::bright_black + s + Color::reset) : s;
+  return err_str + ss;
+}
+
 std::string Evaluator::print_value(
     const Value& v,
     int depth,
