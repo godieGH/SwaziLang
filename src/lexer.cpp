@@ -249,6 +249,9 @@ void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size
                 val.resize(saved_len);
                 break;  // stop scanning number here
             }
+        } 
+        else if(c == '_' && std::isdigit((unsigned char)peek_next()) && !seen_dot) {
+          advance();
         } else {
             break;
         }
