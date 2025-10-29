@@ -395,7 +395,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             }
             if (!found) throw std::runtime_error("Unknown super class '" + cd->superClass->name + "' at " + cd->superClass->token.loc.to_string());
         }
-
+        {
+            Environment::Variable earlyVar;
+            earlyVar.value = classDesc;
+            earlyVar.is_constant = true;
+            env->set(classDesc->name, earlyVar);
+        }
         // materialize static table: iterate properties and methods in the ClassBodyNode clone
         if (classDesc->body) {
             // properties

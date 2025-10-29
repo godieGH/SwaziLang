@@ -232,22 +232,44 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
 
         if (std::holds_alternative<ClassPtr>(objVal)) {
-            ClassPtr cls = std::get<ClassPtr>(objVal);
-            if (!cls || !cls->static_table) return std::monostate{};
-            auto it = cls->static_table->properties.find(mem->property);
-            if (it == cls->static_table->properties.end()) return std::monostate{};
-            const PropertyDescriptor& desc = it->second;
-            if (desc.is_private && !is_private_access_allowed(nullptr, env)) {
-                // private static access rule: you may want to permit only from within class methods.
-                throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string());
+    ClassPtr cls = std::get<ClassPtr>(objVal);
+    if (!cls) return std::monostate{};
+
+    // Walk the class -> super chain to find the first matching static property.
+    ClassPtr walkCls = cls;
+    const PropertyDescriptor* foundDesc = nullptr;
+    ObjectPtr holder = nullptr; // the static_table that actually holds the property
+
+    while (walkCls) {
+        if (walkCls->static_table) {
+            auto it = walkCls->static_table->properties.find(mem->property);
+            if (it != walkCls->static_table->properties.end()) {
+                foundDesc = &it->second;
+                holder = walkCls->static_table;
+                break;
             }
-            // getters on static_table use is_readonly same way as objects
-            if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
-                FunctionPtr getter = std::get<FunctionPtr>(desc.value);
-                return call_function(getter, {}, desc.token);
-            }
-            return desc.value;
         }
+        walkCls = walkCls->super;
+    }
+
+    if (!foundDesc) return std::monostate{}; // not found anywhere in chain
+
+    const PropertyDescriptor& desc = *foundDesc;
+
+    // private static -> allowed only when access is internal (use holder for check)
+    if (desc.is_private && !is_private_access_allowed(holder, env)) {
+        throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string());
+    }
+
+    // Getter semantics: call getter if readonly and stored function
+    if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
+        FunctionPtr getter = std::get<FunctionPtr>(desc.value);
+        return call_function(getter, {}, desc.token);
+    }
+
+    // Normal return of the value (from the class where it was found)
+    return desc.value;
+}
 
         // --- Universal properties ---
         const std::string& prop = mem->property;
