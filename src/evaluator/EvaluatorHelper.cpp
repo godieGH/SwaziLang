@@ -93,7 +93,7 @@ std::string Evaluator::to_string_value(const Value& v) {
     if (std::holds_alternative<FunctionPtr>(v)) {
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string name = fn->name.empty() ? "<lambda>" : fn->name;
-        std::string s = "[" + (use_color ? (Color::bright_cyan + "kazi: " + Color::reset) : "kazi: ") + name + "]";
+        std::string s = use_color ? (Color::bright_cyan + "[kazi " + name + "]" + Color::reset): "[kazi " + name + "]";
         return s;
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
