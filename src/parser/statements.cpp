@@ -964,7 +964,8 @@ std::unique_ptr<StatementNode> Parser::parse_continue_statement() {
 
 std::unique_ptr<CaseNode> Parser::parse_switch_case() {
     auto caseNode = std::make_unique<CaseNode>();
-
+    
+    
     if (match(TokenType::IKIWA)) {
         caseNode->test = parse_expression();
     } else if (match(TokenType::KAIDA)) {
@@ -1005,7 +1006,9 @@ std::unique_ptr<CaseNode> Parser::parse_switch_case() {
             caseNode->body.push_back(std::move(stmt));
         }
         expect(TokenType::CLOSEBRACE, "Expected '}' to close case body");
-
+        if(peek().type == TokenType::NEWLINE) {
+            consume();
+        }
     } else {
         Token tok = peek();
         throw std::runtime_error("Parse error at " + tok.loc.to_string() +
