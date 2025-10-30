@@ -273,6 +273,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
     }
 
     while (true) {
+        if(peek().type == TokenType::NEWLINE) {
+          consume();
+          if(peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+          continue;
+        }
         // hole: leading comma indicates an empty slot
         if (peek().type == TokenType::COMMA) {
             consume();
@@ -331,7 +336,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
             break;
         }
     }
-
+    
+    if(peek().type == TokenType::NEWLINE) {
+      consume();
+      if(peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+    }
     expect(TokenType::CLOSEBRACKET, "Expected ']' to close array pattern");
     return node;
 }
@@ -348,6 +357,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_pattern() {
     }
 
     while (true) {
+        if(peek().type == TokenType::NEWLINE) {
+          consume();
+          if(peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+          continue;
+        }
         // expect identifier as key
         expect(TokenType::IDENTIFIER, "Expected property name in object pattern");
         Token keyTok = tokens[position - 1];
@@ -388,7 +402,10 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_pattern() {
             break;
         }
     }
-
+    if(peek().type == TokenType::NEWLINE) {
+          consume();
+          if(peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+    }
     expect(TokenType::CLOSEBRACE, "Expected '}' to close object pattern");
     return node;
 }
