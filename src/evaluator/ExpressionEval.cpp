@@ -526,7 +526,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
 
             // herufiYa(index) -> charAt (single-char string or empty)
-            if (prop == "herufiYa") {
+            if (prop == "herufiYa" || prop == "charAt") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty()) throw std::runtime_error("str.herufiKwa needs 1 arg at " + token.loc.to_string());
                     long long idx = static_cast<long long>(to_number(args[0]));
