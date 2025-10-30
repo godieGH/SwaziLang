@@ -49,7 +49,13 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
         if (peek().type == TokenType::ASSIGN) {
             consume();
             value = parse_expression();
+        } else {
+            // experimental but worth it.
+            if(peek().type != TokenType::SEMICOLON && peek().type != TokenType::NEWLINE) {
+              throw std::runtime_error("You should terminate a variable declaration if not assigned, with a ; or with a newline, at" + peek().loc.to_string());
+            }
         }
+        
     }
 
     if (peek().type == TokenType::SEMICOLON) consume();

@@ -6,8 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 
-Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens) {
-}
+Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens) {}
 
 // Return current token or EOF token
 Token Parser::peek() const {
