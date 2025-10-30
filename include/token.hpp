@@ -52,6 +52,7 @@ enum class TokenType {
     // Functions / lambdas / functional helpers
     // -----------------------
     LAMBDA,
+    BlOCkSHORTHAND, // =>> token
 
     // -----------------------
     // Class / OOP related

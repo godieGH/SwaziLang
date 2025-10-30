@@ -1,6 +1,7 @@
 #include "lexer.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <cctype>
 #include <sstream>
 #include <stdexcept>
@@ -509,6 +510,18 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+    
+    if(c == '=' && peek_next() == '>' && peek(2) == '>') {
+      advance();
+      advance();
+      advance();
+      add_token(out, TokenType::OPENBRACE, "{", line, col, 1);
+      while(peek() != '\n') {
+        scan_token(out);
+      }
+      add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1);
+      return;
+    }
 
     if (c == '\n') {
         handle_newline(out);
@@ -567,6 +580,7 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+    
 
     // two-char operators
     if (c == '*' && peek_next() == '*') {
