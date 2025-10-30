@@ -42,9 +42,15 @@ std::unique_ptr<StatementNode> Parser::parse_if_statement() {
         position--;  // rewind one token so parse_block sees OPENBRACE
         auto thenBody = parse_block(true);
         ifNode->then_body = std::move(thenBody);
+       
+       // experimental , but working it is for ignoring any white new line after } to reach vinginevyo
+        while(peek().type == TokenType::NEWLINE) {
+          consume();
+        }
     } else {
         expect(TokenType::COLON, "Expected ':' or '{' to begin 'kama' body");
     }
+    
 
     // optional else (vinginevyo)
     if (peek().type == TokenType::VINGINEVYO) {
