@@ -388,7 +388,9 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     // readFile(path) -> string | null
     {
         auto fn = make_native_fn("fs.readFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ std::monostate{} };
+            if (args.empty()) {
+              throw std::runtime_error("fs.readFile requires a path as an argument, readFile(path) -> string | null");
+            }
             std::string path = value_to_string_simple(args[0]);
             std::ifstream in(path, std::ios::binary);
             if (!in.is_open()) return Value{ std::monostate{} };
@@ -400,7 +402,9 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     // writeFile(path, content, [binary=false]) -> bool
     {
         auto fn = make_native_fn("fs.writeFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.size() < 2) return Value{ false };
+            if (args.size() < 2) {
+              throw std::runtime_error("fs.writeFile requires two arguments, path and content, and a third optional bool [binary=false], \nfs.writeFile(path, content, [binary=false]) -> bool");
+            }
             std::string path = value_to_string_simple(args[0]);
             std::string content = value_to_string_simple(args[1]);
             bool binary = false;
@@ -411,16 +415,18 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             if (!out.is_open()) return Value{ false };
             out << content;
             return Value{ true }; }, env);
-        obj->properties["writeFile"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["writeFile"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // exists(path) -> bool
     {
         auto fn = make_native_fn("fs.exists", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ false };
+            if (args.empty()) {
+              throw std::runtime_error("fs.exists requires a path as an argument, exists(path) -> bool");
+            }
             std::string path = value_to_string_simple(args[0]);
             return Value{ std::filesystem::exists(path) }; }, env);
-        obj->properties["exists"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["exists"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // listDir(path) -> array of entries (strings)
@@ -437,13 +443,15 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 // return empty array on error
             }
             return Value{ arr }; }, env);
-        obj->properties["listDir"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["listDir"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // copy(src, dest, [overwrite=false]) -> bool
     {
         auto fn = make_native_fn("fs.copy", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ false };
+            if (args.size() < 2) {
+              throw std::runtime_error("fs.copy requires two arguments src and dest and an optional overwrite flag, copy(src, dest, [overwrite=false]) -> bool");
+            };
             std::string src = value_to_string_simple(args[0]);
             std::string dest = value_to_string_simple(args[1]);
             bool overwrite = false;
@@ -456,13 +464,15 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.copy failed at ") + token.loc.to_string() + ": " + e.what());
             } }, env);
-        obj->properties["copy"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["copy"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // move(src, dest, [overwrite=false]) -> bool
     {
         auto fn = make_native_fn("fs.move", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ false };
+            if (args.size() < 2) {
+              throw std::runtime_error("fs.move requires two arguments src and dest and an optional overwrite flag, move(src, dest, [overwrite=false]) -> bool");
+            }
             std::string src = value_to_string_simple(args[0]);
             std::string dest = value_to_string_simple(args[1]);
             bool overwrite = false;
@@ -484,13 +494,15 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                     throw std::runtime_error(std::string("fs.move failed at ") + token.loc.to_string() + ": " + e.what() + " / " + e2.what());
                 }
             } }, env);
-        obj->properties["move"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["move"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // remove(path) -> bool  (files or directories; directories removed recursively)
     {
         auto fn = make_native_fn("fs.remove", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.empty()) return Value{ false };
+            if (args.empty()) {
+              throw std::runtime_error("fs.remove requires a path as argument, remove(path) -> bool  (files or directories; directories removed recursively)");
+            }
             std::string path = value_to_string_simple(args[0]);
             try {
                 if (!std::filesystem::exists(path)) return Value{ false };
@@ -499,13 +511,15 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.remove failed at ") + token.loc.to_string() + ": " + e.what());
             } }, env);
-        obj->properties["remove"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["remove"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // makeDir(path, [recursive=true]) -> bool (does not error if dir already exists)
     {
         auto fn = make_native_fn("fs.makeDir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.empty()) return Value{ false };
+            if (args.empty()) {
+              throw std::runtime_error("fs.makeDir requires a dir path as an argument and an optional recursive flag,  makeDir(path, [recursive=true]) -> bool (does not error if dir already exists)");
+            }
             std::string path = value_to_string_simple(args[0]);
             bool recursive = true;
             if (args.size() >= 2) recursive = std::holds_alternative<bool>(args[1]) ? std::get<bool>(args[1]) : true;
@@ -516,18 +530,20 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.makeDir failed at ") + token.loc.to_string() + ": " + e.what());
             } }, env);
-        obj->properties["makeDir"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["makeDir"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // stat(path) -> object { exists, isFile, isDir, size, modifiedAt (ISO8601), permissions }
     {
         auto fn = make_native_fn("fs.stat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             auto obj = std::make_shared<ObjectValue>();
-            if (args.empty()) return Value{ obj };
+            if (args.empty()) {
+              throw std::runtime_error("fs.stat requires a path as an argument, stat(path) -> object { exists, isFile, isDir, size, modifiedAt (ISO8601), permissions }");
+            }
             std::string path = value_to_string_simple(args[0]);
             try {
                 if (!std::filesystem::exists(path)) {
-                    obj->properties["exists"] = PropertyDescriptor{ Value{ false }, false, false, false, Token() };
+                    obj->properties["exists"] = PropertyDescriptor{ Value{ false }, false, false, true, Token() };
                     return Value{ obj };
                 }
                 auto status = std::filesystem::status(path);
@@ -562,17 +578,17 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 permSummary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
                 permSummary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
 
-                obj->properties["exists"] = PropertyDescriptor{ Value{ true }, false, false, false, Token() };
-                obj->properties["isFile"] = PropertyDescriptor{ Value{ isFile }, false, false, false, Token() };
-                obj->properties["isDir"] = PropertyDescriptor{ Value{ isDir }, false, false, false, Token() };
-                obj->properties["size"] = PropertyDescriptor{ Value{ static_cast<double>(size) }, false, false, false, Token() };
-                obj->properties["modifiedAt"] = PropertyDescriptor{ Value{ modifiedStr }, false, false, false, Token() };
-                obj->properties["permissions"] = PropertyDescriptor{ Value{ permSummary }, false, false, false, Token() };
+                obj->properties["exists"] = PropertyDescriptor{ Value{ true }, false, false, true, Token() };
+                obj->properties["isFile"] = PropertyDescriptor{ Value{ isFile }, false, false, true, Token() };
+                obj->properties["isDir"] = PropertyDescriptor{ Value{ isDir }, false, false, true, Token() };
+                obj->properties["size"] = PropertyDescriptor{ Value{ static_cast<double>(size) }, false, false, true, Token() };
+                obj->properties["modifiedAt"] = PropertyDescriptor{ Value{ modifiedStr }, false, false, true, Token() };
+                obj->properties["permissions"] = PropertyDescriptor{ Value{ permSummary }, false, false, true, Token() };
                 return Value{ obj };
             } catch (const std::filesystem::filesystem_error &e) {
                 throw std::runtime_error(std::string("fs.stat failed at ") + token.loc.to_string() + ": " + e.what());
             } }, env);
-        obj->properties["stat"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["stat"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     return obj;
