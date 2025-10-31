@@ -82,19 +82,28 @@ std::unique_ptr<StatementNode> Parser::parse_if_statement() {
 // ---------- loops: for / while / do-while ----------
 
 std::unique_ptr<StatementNode> Parser::parse_for_statement() {
-    consume();  // consume 'kwa'
+    consume();
     Token forTok = tokens[position - 1];
-
+    
+    
     if (match(TokenType::KILA)) {
-        return parse_for_in_statement(forTok);
-    } else {
+          return parse_for_in_statement(forTok);
+    }
+    else if(peek().type == TokenType::IDENTIFIER || 
+    (peek().type == TokenType::OPENPARENTHESIS && peek_next().type == TokenType::IDENTIFIER && peek_next(2).type == TokenType::CLOSEPARENTHESIS) ||
+    (peek().type == TokenType::OPENPARENTHESIS && peek_next().type == TokenType::IDENTIFIER && peek_next(2).type == TokenType::COMMA && peek_next(3).type == TokenType::IDENTIFIER && peek_next(4).type == TokenType::CLOSEPARENTHESIS)) {
+      return parse_for_in_statement(forTok);
+    }
+    else {
         return parse_for_classic_statement(forTok);
     }
 }
 
 std::unique_ptr<StatementNode> Parser::parse_for_in_statement(Token kwaTok) {
     // value variable
-    expect(TokenType::IDENTIFIER, "Expected identifier after 'kila'");
+    if(peek().type == TokenType::IDENTIFIER) {
+      expect(TokenType::IDENTIFIER, "Expected identifier after 'kila'");
+    }
     Token valTok = tokens[position - 1];
 
     auto valNode = std::make_unique<IdentifierNode>();
