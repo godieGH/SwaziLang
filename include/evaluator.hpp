@@ -201,7 +201,7 @@ class Evaluator {
 
     // helpers: conversions and formatting
     double to_number(const Value& v);
-    std::string to_string_value(const Value& v);
+    std::string to_string_value(const Value& v, bool no_color = false);
     bool to_bool(const Value& v);
     void bind_pattern_to_value(ExpressionNode* pattern, const Value& value, EnvPtr env, bool is_constant, const Token& declToken);
 

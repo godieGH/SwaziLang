@@ -1247,7 +1247,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   for (auto& key : op->properties) {
                       arr->elements.push_back(key.first);
                   }
-                obj->properties["property_names"] = {Value(arr), false, false, true, Token()};
+                obj->properties["properties"] = {Value(arr), false, false, true, Token()};
               }
               {
                 
@@ -1258,7 +1258,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have that named property yet to set to private at " + token.loc.to_string());
+                    throw std::runtime_error("Object doesn't have named property `" + to_string_value(args[0], true)+"` yet to set to private at " + token.loc.to_string());
                   }
                   
                   PropertyDescriptor& desc = it->second;
@@ -1284,7 +1284,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have that named property yet to set a lock at " + token.loc.to_string());
+                    throw std::runtime_error("Object doesn't have a named property `" + to_string_value(args[0], true)+"` yet to set a lock at " + token.loc.to_string());
                   }
                   
                   PropertyDescriptor& desc = it->second;
@@ -1301,7 +1301,46 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   Token()
                 };
               }
-              
+              {
+                
+                auto delete__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                  if(args.empty()) {
+                    throw std::runtime_error("proto.delete requires a property key to delete as an argument at " + token.loc.to_string());
+                  }
+                  std::string name = to_string_value(args[0]);
+                  auto it = op->properties.find(name);
+                  if(it == op->properties.end()) {
+                    throw std::runtime_error("Object doesn't have a key named `" + to_string_value(args[0], true) + "` yet to delete at " + token.loc.to_string());
+                  }
+                  
+                  
+                  PropertyDescriptor& desc = it->second;
+                  if(desc.is_private && !is_private_access_allowed(op, env)) {
+                    throw std::runtime_error("You can not delete a private member from outside the object at " + token.loc.to_string());
+                  }
+                  if(desc.is_locked && !is_private_access_allowed(op, env)) {
+                    throw std::runtime_error("You can not delete a locked member from outside the object at " + token.loc.to_string());
+                  }
+                  
+                  auto itp = op->properties.find(name);
+                  if(itp != op->properties.end()) {
+                    op->properties.erase(itp);
+                    return Value(bool(true));
+                  }
+                  
+                  return Value(bool(false));
+                  
+                };
+                
+                auto delete_prop = std::make_shared<FunctionValue>("__proto__delete", delete__proto, env, Token{});
+                obj->properties["delete"] = {
+                  delete_prop,
+                  false,
+                  false,
+                  true,
+                  Token()
+                };
+              }
               
               return Value(obj);
             }

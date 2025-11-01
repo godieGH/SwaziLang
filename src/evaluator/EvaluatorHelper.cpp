@@ -73,8 +73,9 @@ double Evaluator::to_number(const Value& v) {
     throw std::runtime_error("Cannot convert value of type `" + value_type_name(v) + "` to a number");
 }
 
-std::string Evaluator::to_string_value(const Value& v) {
+std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     static bool use_color = supports_color();
+    if(no_color) use_color = false;
     if (std::holds_alternative<std::monostate>(v)) return use_color ? Color::bright_black + "null" + Color::reset : "null";
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
