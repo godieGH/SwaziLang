@@ -118,6 +118,31 @@ static Value builtin_object_entry(const std::vector<Value>& args, EnvPtr env, co
     return arr;
 }
 
+static Value built_object_freeze(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])){
+      throw std::runtime_error("You should pass an object in Object.freeze(obj) as an argument at " + tok.loc.to_string());
+    }
+    
+    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    obj->is_frozen = true;
+
+    return obj;
+}
+static Value built_object_create(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])){
+      auto obj = std::make_shared<ObjectValue>();
+      return obj;
+    }
+    bool is_frozen = false;
+    if(args.size() >= 2) {
+      is_frozen = value_to_bool(args[1]);
+    }
+    
+    ObjectPtr op = std::get<ObjectPtr>(args[0]);
+    op->is_frozen = is_frozen;
+    return op;
+}
+
 static Value builtin_kadiria(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     double x = args.empty() ? 0.0 : value_to_number(args[0]);
     return std::round(x);
@@ -599,6 +624,24 @@ void init_globals(EnvPtr env) {
             true,
             Token{}};
     }
+    {
+        auto fn = std::make_shared<FunctionValue>("freeze", built_object_freeze, env, Token{});
+        objectVal->properties["freeze"] = {
+            fn,
+            false,
+            false,
+            true,
+            Token{}};
+    }
+    {
+        auto fn = std::make_shared<FunctionValue>("create", built_object_create, env, Token{});
+        objectVal->properties["create"] = {
+            fn,
+            false,
+            false,
+            true,
+            Token{}};
+    }
 
     Environment::Variable objectVar;
     objectVar.value = objectVal;
@@ -675,7 +718,7 @@ void init_globals(EnvPtr env) {
 
     {
         auto programVal = std::make_shared<ObjectValue>();
-
+        programVal->is_frozen = true;
         auto add = [&](const std::string& name,
                        std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
             auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
