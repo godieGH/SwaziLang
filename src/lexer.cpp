@@ -304,6 +304,8 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"unda", TokenType::UNDA},
         {"supa", TokenType::SUPA},
         {"futa", TokenType::FUTA},
+        {"this", TokenType::SELF},
+        {"self", TokenType::SELF},
 
         // control-flow keywords
         {"kama", TokenType::KAMA},              // if
