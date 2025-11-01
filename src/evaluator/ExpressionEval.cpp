@@ -1342,10 +1342,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   Token()
                 };
               }
-              
-              
-              
-              
               {
                 auto freeze__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
                   bool freeze = true;
@@ -1365,10 +1361,42 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   Token()
                 };
               }
-              
-              
-              
-              
+              {
+                auto has__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                  if(args.empty()) {
+                    throw std::runtime_error("__proto__has requires a key as an argument at " + token.loc.to_string());
+                  }
+                  std::string key = to_string_value(args[0]);
+                  auto it = op->properties.find(key);
+                  if(it != op->properties.end()) {
+                    return Value(bool(true));
+                  }
+                  return Value(bool(false));
+                };
+                
+                auto has = std::make_shared<FunctionValue>("__proto__has", has__proto, env, Token{});
+                obj->properties["has"] = {
+                  has,
+                  false,
+                  false,
+                  true,
+                  Token()
+                };
+              }
+              {
+                auto is_frozen_fn = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                  return Value(op->is_frozen);
+                };
+                
+                auto is_frozen = std::make_shared<FunctionValue>("__proto__is_frozen", is_frozen_fn, env, Token{});
+                obj->properties["is_frozen"] = {
+                  is_frozen,
+                  false,
+                  true,
+                  true,
+                  Token()
+                };
+              }
               return Value(obj);
             }
             return get_object_property(op, mem->property, env);
