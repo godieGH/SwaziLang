@@ -1307,6 +1307,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   if(args.empty()) {
                     throw std::runtime_error("proto.delete requires a property key to delete as an argument at " + token.loc.to_string());
                   }
+                  if(op->is_frozen) throw std::runtime_error("Can not delete, add no more or modify properties, this object is frozen at " + token.loc.to_string());
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {
@@ -1341,6 +1342,32 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   Token()
                 };
               }
+              
+              
+              
+              
+              {
+                auto freeze__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                  bool freeze = true;
+                  if(!args.empty()) {
+                    freeze = to_bool(args[0]);
+                  }
+                  op->is_frozen = freeze;
+                  return Value(op->is_frozen);
+                };
+                
+                auto freeze = std::make_shared<FunctionValue>("__proto__freeze", freeze__proto, env, Token{});
+                obj->properties["freeze"] = {
+                  freeze,
+                  false,
+                  false,
+                  true,
+                  Token()
+                };
+              }
+              
+              
+              
               
               return Value(obj);
             }

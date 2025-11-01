@@ -51,6 +51,7 @@ struct ObjectValue {
     std::unordered_map<std::string,
         PropertyDescriptor>
         properties;
+    bool is_frozen = false;
 };
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {

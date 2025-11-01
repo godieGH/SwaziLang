@@ -316,6 +316,8 @@ Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvP
 
 void Evaluator::set_object_property(ObjectPtr obj, const std::string& key, const Value& val, EnvPtr env, const Token& assignToken) {
     if (!obj) throw std::runtime_error("Attempt to assign property on null object at " + assignToken.loc.to_string());
+    
+    if(obj->is_frozen) throw std::runtime_error("Can not add no more properties object is frozen at " + assignToken.loc.to_string());
 
     auto it = obj->properties.find(key);
     if (it != obj->properties.end()) {

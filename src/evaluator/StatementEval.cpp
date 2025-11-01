@@ -195,7 +195,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             if (std::holds_alternative<ObjectPtr>(objVal)) {
                 ObjectPtr op = std::get<ObjectPtr>(objVal);
                 std::string prop = to_property_key(indexVal);  // your helper to convert index to string
-
+                if(op->is_frozen) throw std::runtime_error("Can not add no more or modify properties, object is frozen at " + idx->token.loc.to_string());
                 auto it = op->properties.find(prop);
                 if (it != op->properties.end()) {
                     if (it->second.is_private) {
@@ -260,7 +260,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 throw std::runtime_error("Member assignment on non-object at " + mem->token.loc.to_string());
             }
             ObjectPtr op = std::get<ObjectPtr>(objVal);
-
+            if(op->is_frozen) throw std::runtime_error("Can not add no more or modify properties, object is frozen at " + mem->token.loc.to_string());
             // use the rhs already evaluated earlier: Value rhs = evaluate_expression(an->value.get(), env);
             auto it = op->properties.find(mem->property);
             if (it != op->properties.end()) {
