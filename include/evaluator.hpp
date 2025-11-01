@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <map>
 #include <unordered_set>
 #include <variant>
 #include <vector>
@@ -49,7 +48,7 @@ struct PropertyDescriptor {
 };
 
 struct ObjectValue {
-    std::map<std::string,
+    std::unordered_map<std::string,
         PropertyDescriptor>
         properties;
 };
