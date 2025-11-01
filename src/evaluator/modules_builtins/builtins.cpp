@@ -97,7 +97,9 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     // match(str, pattern [, flags]) -> array|null (JS-like behavior; supports i, g, m)
     {
         auto fn = make_native_fn("regex.match", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ std::monostate{} };
+            if (args.size() < 2) {
+              throw std::runtime_error("regex.metch at " + token.loc.to_string() + "\nrequires atleast two arguments str and pattern. eg. \nmatch(str, pattern [, flags]) -> array|null (JS-like behavior; supports flags like i, g, m)");
+            }
 
             std::string s = value_to_string_simple(args[0]);
             std::string pat = value_to_string_simple(args[1]);
@@ -186,7 +188,10 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     // test(str, pattern [, flags]) -> bool ( supports m)
     {
         auto fn = make_native_fn("regex.test", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ false };
+            if (args.size() < 2) {
+              throw std::runtime_error("regex.test at " + token.loc.to_string() + "\nrequires atleast two arguments str and pattern. eg. \ntest(str, pattern [, flags]) -> bool ( supports m)");
+            }
+            
             std::string s = value_to_string_simple(args[0]);
             std::string pat = value_to_string_simple(args[1]);
             std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : std::string();
@@ -220,7 +225,9 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     // fullMatch(str, pattern [, flags]) -> bool
     {
         auto fn = make_native_fn("regex.fullMatch", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ false };
+            if (args.size() < 2) {
+              throw std::runtime_error("regex.fullMatch at " + token.loc.to_string() + "\nrequires two arguments str and pattern. eg. \nfullMatch(str, pattern [, flags]) -> bool");
+            }
             std::string s = value_to_string_simple(args[0]);
             std::string pat = value_to_string_simple(args[1]);
             std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : std::string();
@@ -237,7 +244,9 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     // search(str, pattern [, flags]) -> number (first match position) or -1; supports m
     {
         auto fn = make_native_fn("regex.search", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ static_cast<double>(-1) };
+            if (args.size() < 2) {
+              throw std::runtime_error("regex.search at " + token.loc.to_string() + "\nrequires two arguments str and pattern. eg. \nsearch(str, pattern [, flags]) -> number (first match position) or -1; supports m");
+            }
             std::string s = value_to_string_simple(args[0]);
             std::string pat = value_to_string_simple(args[1]);
             std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : std::string();
@@ -281,7 +290,9 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     // 'm' causes ^/$ to behave as line anchors by running replacements per-line.
     {
         auto fn = make_native_fn("regex.replace", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 3) return Value{ std::string() };
+            if (args.size() < 3) {
+              throw std::runtime_error("regex.replace at" + token.loc.to_string() + "\nrequires 3 arguments str, pattern and replacement. eg. \nreplace(str, pattern, replacement [, flags]) -> string \n=> Behavior: by default replaces only the first match unless flags contains 'g' (global). \n=>'m' causes ^/$ to behave as line anchors by running replacements per-line. ");
+            }
             std::string s = value_to_string_simple(args[0]);
             std::string pat = value_to_string_simple(args[1]);
             std::string repl = value_to_string_simple(args[2]);
@@ -358,7 +369,9 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     // split(str, pattern [, flags]) -> Array
     {
         auto fn = make_native_fn("regex.split", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.empty()) return Value{ std::make_shared<ArrayValue>() };
+            if (args.empty()) {
+              throw std::runtime_error("regex.split at " + token.loc.to_string() + "\nrequres two arguments str and pattern. eg. \nsplit(str, pattern [, flags]) -> Array");
+            }
             std::string s = value_to_string_simple(args[0]);
             std::string pat = args.size() >= 2 ? value_to_string_simple(args[1]) : std::string();
             std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : std::string();
@@ -387,9 +400,9 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
 
     // readFile(path) -> string | null
     {
-        auto fn = make_native_fn("fs.readFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+        auto fn = make_native_fn("fs.readFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) {
-              throw std::runtime_error("fs.readFile requires a path as an argument, readFile(path) -> string | null");
+              throw std::runtime_error("fs.readFile at " + token.loc.to_string() + "\nrequires a path as an argument, \nreadFile(path) -> string | null");
             }
             std::string path = value_to_string_simple(args[0]);
             std::ifstream in(path, std::ios::binary);
@@ -401,9 +414,9 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
 
     // writeFile(path, content, [binary=false]) -> bool
     {
-        auto fn = make_native_fn("fs.writeFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+        auto fn = make_native_fn("fs.writeFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.size() < 2) {
-              throw std::runtime_error("fs.writeFile requires two arguments, path and content, and a third optional bool [binary=false], \nfs.writeFile(path, content, [binary=false]) -> bool");
+              throw std::runtime_error("fs.writeFile at " + token.loc.to_string() + "\nrequires two arguments, path and content, and a third optional bool [binary=false], \nfs.writeFile(path, content, [binary=false]) -> bool");
             }
             std::string path = value_to_string_simple(args[0]);
             std::string content = value_to_string_simple(args[1]);
@@ -420,9 +433,9 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
 
     // exists(path) -> bool
     {
-        auto fn = make_native_fn("fs.exists", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+        auto fn = make_native_fn("fs.exists", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) {
-              throw std::runtime_error("fs.exists requires a path as an argument, exists(path) -> bool");
+              throw std::runtime_error("fs.exists at " + token.loc.to_string() + "\nrequires a path as an argument, exists(path) -> bool");
             }
             std::string path = value_to_string_simple(args[0]);
             return Value{ std::filesystem::exists(path) }; }, env);
@@ -431,7 +444,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
 
     // listDir(path) -> array of entries (strings)
     {
-        auto fn = make_native_fn("fs.listDir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+        auto fn = make_native_fn("fs.listDir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             std::string path = ".";
             if (!args.empty()) path = value_to_string_simple(args[0]);
             auto arr = std::make_shared<ArrayValue>();
@@ -450,7 +463,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     {
         auto fn = make_native_fn("fs.copy", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.size() < 2) {
-              throw std::runtime_error("fs.copy requires two arguments src and dest and an optional overwrite flag, copy(src, dest, [overwrite=false]) -> bool");
+              throw std::runtime_error("fs.copy at " + token.loc.to_string() + "\nrequires atleast two arguments src and dest and a third optional overwrite flag, copy(src, dest, [overwrite=false]) -> bool");
             };
             std::string src = value_to_string_simple(args[0]);
             std::string dest = value_to_string_simple(args[1]);
@@ -471,7 +484,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     {
         auto fn = make_native_fn("fs.move", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.size() < 2) {
-              throw std::runtime_error("fs.move requires two arguments src and dest and an optional overwrite flag, move(src, dest, [overwrite=false]) -> bool");
+              throw std::runtime_error("fs.move at " + token.loc.to_string() + "\nrequires two arguments src and dest and an optional overwrite flag, move(src, dest, [overwrite=false]) -> bool");
             }
             std::string src = value_to_string_simple(args[0]);
             std::string dest = value_to_string_simple(args[1]);
@@ -501,7 +514,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     {
         auto fn = make_native_fn("fs.remove", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) {
-              throw std::runtime_error("fs.remove requires a path as argument, remove(path) -> bool  (files or directories; directories removed recursively)");
+              throw std::runtime_error("fs.remove at " +token.loc.to_string() + "\nrequires a path as argument, remove(path) -> bool  (files or directories; directories removed recursively)");
             }
             std::string path = value_to_string_simple(args[0]);
             try {
@@ -518,7 +531,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     {
         auto fn = make_native_fn("fs.makeDir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) {
-              throw std::runtime_error("fs.makeDir requires a dir path as an argument and an optional recursive flag,  makeDir(path, [recursive=true]) -> bool (does not error if dir already exists)");
+              throw std::runtime_error("fs.makeDir at" + token.loc.to_string() + "\nrequires a dir path as an argument and an optional recursive flag,  makeDir(path, [recursive=true]) -> bool (does not error if dir already exists)");
             }
             std::string path = value_to_string_simple(args[0]);
             bool recursive = true;
@@ -538,7 +551,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         auto fn = make_native_fn("fs.stat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             auto obj = std::make_shared<ObjectValue>();
             if (args.empty()) {
-              throw std::runtime_error("fs.stat requires a path as an argument, stat(path) -> object { exists, isFile, isDir, size, modifiedAt (ISO8601), permissions }");
+              throw std::runtime_error("fs.stat at " + token.loc.to_string() + "\nrequires a path as an argument, stat(path) -> object { exists, isFile, isDir, size, modifiedAt (ISO8601), permissions }");
             }
             std::string path = value_to_string_simple(args[0]);
             try {
@@ -981,8 +994,10 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
 
     // join(...segments) -> string
     {
-        auto fn = make_native_fn("path.join", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ std::string() };
+        auto fn = make_native_fn("path.join", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+              throw std::runtime_error("path.join at " + token.loc.to_string() + "\nrequires at least one path segments to join, join(...segments) -> string");
+            }
             fs::path p;
             for (const auto &a : args) {
                 p /= value_to_string_simple(a);
@@ -992,16 +1007,20 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
     }
     // basename(path)
     {
-        auto fn = make_native_fn("path.basename", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ std::string() };
+        auto fn = make_native_fn("path.basename", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+              throw std::runtime_error("path.basename at " + token.loc.to_string() + "\nrequires a path argument to extract basename from, basename(path) -> string");
+            }
             fs::path p = value_to_string_simple(args[0]);
             return Value{ p.filename().string() }; }, env);
         obj->properties["basename"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
     // dirname(path)
     {
-        auto fn = make_native_fn("path.dirname", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ std::string() };
+        auto fn = make_native_fn("path.dirname", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+              throw std::runtime_error("path.dirname at " + token.loc.to_string() + "\nrequires a path to extract dirname from, dirname(path)");
+            }
             fs::path p = value_to_string_simple(args[0]);
             return Value{ p.parent_path().string() }; }, env);
         obj->properties["dirname"] = PropertyDescriptor{fn, false, false, false, Token()};

@@ -25,8 +25,13 @@ kazi printf(str, ...args):
   chapisha str;
   rudisha;
 
+kazi error(...arg):
+  swazi.cerr(...arg)
+
+
 # export tools
 ruhusu {
   print,
-  printf
+  printf,
+  error
 }
