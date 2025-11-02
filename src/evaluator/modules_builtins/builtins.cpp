@@ -980,7 +980,7 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env) {
     // json.stringify(val) -> string
     {
         auto fn = make_native_fn("json.stringify", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ std::string("null") };
+            if (args.empty()) return Value();
             return Value{ json_stringify_value(args[0]) }; }, env);
         obj->properties["stringify"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
