@@ -221,7 +221,8 @@ class Evaluator {
     std::string print_value(
         const Value& v,
         int depth = 0,
-        std::unordered_set<const ObjectValue*> visited = {});
+        std::unordered_set<const ObjectValue*> visited = {}, 
+        std::unordered_set<const ArrayValue*> arrvisited = {});
 
     std::string print_object(
         ObjectPtr obj,

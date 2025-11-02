@@ -98,15 +98,10 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         return s;
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
+        std::unordered_set<const ArrayValue*> arrvisited;
+        std::unordered_set<const ObjectValue*> visited;
         auto arr = std::get<ArrayPtr>(v);
-        if (!arr) return "[]";
-        std::string out = "[ ";
-        for (size_t i = 0; i < arr->elements.size(); ++i) {
-            if (i) out += ", ";
-            out += print_value(arr->elements[i]);
-        }
-        out += " ]";
-        return out;
+        return print_value(arr, 0, visited, arrvisited);
     }
     if (std::holds_alternative<ObjectPtr>(v)) {
         ObjectPtr op = std::get<ObjectPtr>(v);
@@ -453,8 +448,8 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
 }
 
 // Tune these to control "small object" inline behavior:
-static constexpr int INLINE_MAX_PROPS = 3;
-static constexpr int INLINE_MAX_LEN = 80;
+static constexpr int INLINE_MAX_PROPS = 5;
+static constexpr int INLINE_MAX_LEN = 150;
 
 // Helper: are we a primitive-ish value that can be inlined simply?
 static bool is_simple_value(const Value& v) {
@@ -571,7 +566,8 @@ std::string Evaluator::cerr_colored(const std::string& s) {
 std::string Evaluator::print_value(
     const Value& v,
     int depth,
-    std::unordered_set<const ObjectValue*> visited) {
+    std::unordered_set<const ObjectValue*> visited,
+    std::unordered_set<const ArrayValue*> arrvisited) {
     bool use_color = supports_color();
 
     if (std::holds_alternative<std::monostate>(v)) {
@@ -609,8 +605,13 @@ std::string Evaluator::print_value(
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr arr = std::get<ArrayPtr>(v);
         if (!arr) return "[]";
+        
+        const ArrayValue* p = arr.get();
+        if (arrvisited.count(p)) return "[/*cycle*/]";
+        arrvisited.insert(p);
+        
         // try compact inline if small and elements simple
-        bool can_inline = (arr->elements.size() <= (size_t)INLINE_MAX_PROPS);
+        bool can_inline = (arr->elements.size() <= (size_t)(15));
         if (can_inline) {
             for (const auto& e : arr->elements) {
                 if (!is_simple_value(e)) {
@@ -624,7 +625,7 @@ std::string Evaluator::print_value(
             ss << "[";
             for (size_t i = 0; i < arr->elements.size(); ++i) {
                 if (i) ss << ", ";
-                ss << print_value(arr->elements[i], depth + 1);
+                ss << print_value(arr->elements[i], depth + 1, visited, arrvisited);
             }
             ss << "]";
             return ss.str();
@@ -633,7 +634,7 @@ std::string Evaluator::print_value(
             ss << "[\n";
             std::string ind(depth + 2, ' ');
             for (size_t i = 0; i < arr->elements.size(); ++i) {
-                ss << ind << print_value(arr->elements[i], depth + 2);
+                ss << ind << print_value(arr->elements[i], depth + 2, visited, arrvisited);
                 if (i + 1 < arr->elements.size()) ss << ",\n";
             }
             ss << "\n"
