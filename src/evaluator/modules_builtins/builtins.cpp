@@ -917,7 +917,7 @@ static std::string json_stringify_string(const std::string& s) {
     return out.str();
 }
 
-static std::string json_stringify_value(const Value& v) {
+static std::string json_stringify_value(const Value& v, std::unordered_set<const ObjectValue*> objvisited = {}, std::unordered_set<const ArrayValue*> arrvisited = {}, Token token = {}) {
     if (std::holds_alternative<std::monostate>(v)) return "null";
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
@@ -930,26 +930,40 @@ static std::string json_stringify_value(const Value& v) {
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr a = std::get<ArrayPtr>(v);
+        
+        ArrayValue* p = a.get();
+        if(arrvisited.count(p)) {
+          throw std::runtime_error("Converting circular structure to JSON at" + token.loc.to_string() + "\n--> Traced at \n * 12 | chapisha(JSON.stringify(ob)) \n" + std::string(token.loc.col + 8, ' ') + "^");
+        };
+        arrvisited.insert(p);
+        
         std::ostringstream ss;
         ss << '[';
         bool first = true;
         for (auto& el : a->elements) {
             if (!first) ss << ',';
             first = false;
-            ss << json_stringify_value(el);
+            ss << json_stringify_value(el, objvisited, arrvisited, token);
         }
         ss << ']';
         return ss.str();
     }
     if (std::holds_alternative<ObjectPtr>(v)) {
         ObjectPtr o = std::get<ObjectPtr>(v);
+        
+        ObjectValue* p = o.get();
+        if(objvisited.count(p)) {
+          throw std::runtime_error("Converting circular structure to JSON at" + token.loc.to_string() + "\n--> Traced at \n * 12 |  code.in.this.line() \n");
+        };
+        objvisited.insert(p);
+        
         std::ostringstream ss;
         ss << '{';
         bool first = true;
         for (auto& kv : o->properties) {
             if (!first) ss << ',';
             first = false;
-            ss << json_stringify_string(kv.first) << ':' << json_stringify_value(kv.second.value);
+            ss << json_stringify_string(kv.first) << ':' << json_stringify_value(kv.second.value, objvisited, arrvisited, token);
         }
         ss << '}';
         return ss.str();
@@ -979,9 +993,11 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env) {
 
     // json.stringify(val) -> string
     {
-        auto fn = make_native_fn("json.stringify", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+        auto fn = make_native_fn("json.stringify", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) return Value();
-            return Value{ json_stringify_value(args[0]) }; }, env);
+            std::unordered_set<const ObjectValue*> objvisited;
+            std::unordered_set<const ArrayValue*> arrvisited;
+            return Value{ json_stringify_value(args[0], objvisited, arrvisited, token) }; }, env);
         obj->properties["stringify"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
