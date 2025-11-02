@@ -1307,7 +1307,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                   if(args.empty()) {
                     throw std::runtime_error("proto.delete requires a property key to delete as an argument at " + token.loc.to_string());
                   }
-                  if(op->is_frozen) throw std::runtime_error("Can not delete, add no more or modify properties, this object is frozen at " + token.loc.to_string());
+                  if(op->is_frozen) throw std::runtime_error("You can not delete, add no more or modify properties of a frozen object at " + token.loc.to_string());
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {

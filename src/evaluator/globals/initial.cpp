@@ -123,11 +123,8 @@ static Value built_object_freeze(const std::vector<Value>& args, EnvPtr env, con
       throw std::runtime_error("You should pass an object in Object.freeze(obj) as an argument at " + tok.loc.to_string());
     }
     
-    ObjectPtr arg_obj = std::get<ObjectPtr>(args[0]);
-    auto obj = std::make_shared<ObjectValue>();
-    obj->properties = arg_obj->properties;
+    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
     obj->is_frozen = true;
-
     return obj;
 }
 static Value built_object_create(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
@@ -140,13 +137,7 @@ static Value built_object_create(const std::vector<Value>& args, EnvPtr env, con
       is_frozen = value_to_bool(args[1]);
     }
     
-    ObjectPtr arg_obj = std::get<ObjectPtr>(args[0]);
-    auto props = arg_obj->properties;
-    auto obj = std::make_shared<ObjectValue>();
-    // deep copy the object->properties of the object passed as argyment to this new object...
-    // this makes it able to have a copy of the object.
-    // TODO: am not sure of this trick yet if it is secure but i thing there is a better way to achive this
-    obj->properties = props;
+    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
     obj->is_frozen = is_frozen;
     return obj;
 }
