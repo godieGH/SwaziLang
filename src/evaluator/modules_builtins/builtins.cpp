@@ -933,7 +933,7 @@ static std::string json_stringify_value(const Value& v, std::unordered_set<const
         
         ArrayValue* p = a.get();
         if(arrvisited.count(p)) {
-          throw std::runtime_error("Converting circular structure to JSON at" + token.loc.to_string() + "\n--> Traced at \n * 12 | chapisha(JSON.stringify(ob)) \n" + std::string(token.loc.col + 8, ' ') + "^");
+          throw std::runtime_error("Converting circular structure to JSON at" + token.loc.to_string() + "\n--> Traced at\n" + token.loc.get_line_trace());
         };
         arrvisited.insert(p);
         
@@ -953,7 +953,7 @@ static std::string json_stringify_value(const Value& v, std::unordered_set<const
         
         ObjectValue* p = o.get();
         if(objvisited.count(p)) {
-          throw std::runtime_error("Converting circular structure to JSON at" + token.loc.to_string() + "\n--> Traced at \n * 12 |  code.in.this.line() \n");
+          throw std::runtime_error("Converting circular structure to JSON at" + token.loc.to_string() + "\n--> Traced at\n" + token.loc.get_line_trace());
         };
         objvisited.insert(p);
         

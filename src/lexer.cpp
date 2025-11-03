@@ -29,12 +29,17 @@ char Lexer::advance() {
     if (eof()) return '\0';
     char c = src[i++];
     if (c == '\n') {
+        linestr[line] = linechunk;
+        linechunk = "";
         line++;
         col = 1;
-    } else
+    } else {
         col++;
+        linechunk += c;
+    }
     return c;
 }
+
 
 void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length) {
     int len = tok_length >= 0 ? tok_length : static_cast<int>(value.size());
@@ -826,5 +831,10 @@ std::vector<Token> Lexer::tokenize() {
 
     // final EOF token
     add_token(out, TokenType::EOF_TOKEN, "", line, col, 0);
+    
+    for(auto& tok: out) {
+      tok.loc.set_map_linestr(linestr);
+    }
+    
     return out;
 }

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <sstream>
+#include <map>
 #include <algorithm>
 
 // Token types (keep in sync with your parser/lexer)
@@ -170,15 +172,30 @@ struct TokenLocation {
     int line = 1;         // 1-based
     int col  = 1;         // 1-based column of token start
     int length = 0;       // token length in characters
-
+    std::map<int, std::string> linestr; // used for tracing
+    
     TokenLocation() = default;
     TokenLocation(const std::string& fn, int ln, int c, int len = 0)
-        : filename(fn), line(ln), col(c), length(len) {}
+        : filename(fn), line(ln), col(c), length(len){}
+
+  void set_map_linestr(const std::map<int, std::string>& lnstr) {
+    linestr = lnstr;
+  }
 
     int end_col() const { return col + std::max(0, length - 1); }
 
     std::string to_string() const {
         return filename + ":" + std::to_string(line) + ":" + std::to_string(col);
+    }
+    std::string get_line_trace() const {
+      std::string lnss = linestr.at(line);
+      std::stringstream ss;
+      ss << " * " << line << " | ";
+      std::string fss = ss.str();
+      std::string lss = std::string(col + fss.size(), ' ') + "^";
+      ss << lnss << "\n" << lss;
+      
+      return ss.str();
     }
 };
 

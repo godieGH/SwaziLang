@@ -3,6 +3,7 @@
 #include "token.hpp"
 #include <string>
 #include <vector>
+#include <map>
 
 class Lexer {
 public:
@@ -15,6 +16,9 @@ private:
     size_t i = 0;
     int line = 1;
     int col = 1;
+    
+    std::string linechunk;
+    std::map<int, std::string> linestr;
 
     // indentation stack (base 0)
     std::vector<int> indent_stack;
@@ -27,7 +31,7 @@ private:
     char peek(size_t offset = 0) const;
     char peek_next() const;
     char advance();
-
+    
     // Add token: optional explicit length (if -1, length is value.size()).
     void add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length = -1);
 
