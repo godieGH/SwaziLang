@@ -99,7 +99,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
             Token nameTok = tokens[position - 1];
             if (nameTok.value != className) {
                 throw std::runtime_error("Parse error at " + nameTok.loc.to_string() +
-                    ": Destructor name must match class name '" + className + "'");
+                    ": Destructor name must match class name '" + className + "'" + "\n --> Traced at: \n" + nameTok.loc.get_line_trace());
             }
 
             auto method = parse_class_method(is_private, is_static, is_locked, className,
@@ -153,7 +153,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
                     consume();  // consume '='
                     initExpr = parse_expression();
                     if (!initExpr) {
-                        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Expected expression after '='");
+                        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Expected expression after '='" + "\n --> Traced at: \n" + peek().loc.get_line_trace());
                     }
                 }
 
@@ -172,11 +172,11 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
             }
 
             // If none matched, it's unexpected (we require 'tabia' for non-constructor methods)
-            throw std::runtime_error("Parse error at " + cur.loc.to_string() + ": Unexpected identifier in class body; expected property, constructor, or 'tabia' method.");
+            throw std::runtime_error("Parse error at " + cur.loc.to_string() + ": Unexpected identifier in class body; expected property, constructor, or 'tabia' method." + "\n --> Traced at: \n" + cur.loc.get_line_trace());
         }
 
         // anything else is unexpected
-        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Unexpected token in class body");
+        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Unexpected token in class body" + "\n --> Traced at: \n" + peek().loc.get_line_trace());
     }
 
     return body;
@@ -221,7 +221,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
 
             if (isCtor && node->name != className) {
                 throw std::runtime_error("Parse error at " + nameTok.loc.to_string() +
-                    ": Constructor name must match class name '" + className + "'");
+                    ": Constructor name must match class name '" + className + "'" + "\n --> Traced at: \n" + nameTok.loc.get_line_trace());
             }
         }
     }
@@ -238,7 +238,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                 if (peek().type == TokenType::ELLIPSIS) {
                     Token ellTok = consume();
                     if (rest_seen) {
-                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
+                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
                     }
                     expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                     Token nameTok = tokens[position - 1];
@@ -256,7 +256,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                         try {
                             p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                         } catch (...) {
-                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
                         }
                         expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                     }
@@ -267,7 +267,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                     // after rest param there must be a closing ')' (rest must be last)
                     if (peek().type != TokenType::CLOSEPARENTHESIS) {
                         Token bad = peek();
-                        throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string());
+                        throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
                     }
                     break;
                 }
@@ -287,7 +287,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string());
+                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
                     }
                 }
 
@@ -308,7 +308,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                 if (peek().type == TokenType::ELLIPSIS) {
                     Token ellTok = consume();
                     if (rest_seen) {
-                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
+                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
                     }
                     expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                     Token nameTok = tokens[position - 1];
@@ -326,7 +326,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                         try {
                             p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                         } catch (...) {
-                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
                         }
                         expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                     }
@@ -337,7 +337,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                     // rest must be last in bare form
                     if (peek().type == TokenType::COMMA) {
                         Token c = tokens[position];  // lookahead
-                        throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string());
+                        throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string() + "\n --> Traced at: \n" + c.loc.get_line_trace());
                     }
                     break;
                 }
@@ -345,7 +345,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                 // normal identifier
                 Token pTok = consume();
                 if (pTok.type != TokenType::IDENTIFIER) {
-                    throw std::runtime_error("Expected parameter name at " + pTok.loc.to_string());
+                    throw std::runtime_error("Expected parameter name at " + pTok.loc.to_string() + "\n --> Traced at: \n" + pTok.loc.get_line_trace());
                 }
                 auto pnode = std::make_unique<ParameterNode>();
                 pnode->token = pTok;
@@ -359,7 +359,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string());
+                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
                     }
                 }
 
@@ -372,7 +372,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     } else {
         // getter cannot have parameters
         if (peek().type == TokenType::OPENPARENTHESIS || peek().type == TokenType::IDENTIFIER) {
-            throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Getter must not accept parameters");
+            throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Getter must not accept parameters" + "\n --> Traced at: \n" + peek().loc.get_line_trace());
         }
     }
 
@@ -392,7 +392,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
         auto stmts = parse_block(true);
         node->body = std::move(stmts);
     } else {
-        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Expected ':' or '{' to begin method body");
+        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Expected ':' or '{' to begin method body" + "\n --> Traced at: \n" + peek().loc.get_line_trace());
     }
 
     return node;

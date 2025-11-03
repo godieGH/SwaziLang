@@ -133,7 +133,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             // For constants, parser already enforced an initializer is required.
             // However, ensure we don't allow uninitialized constant elements here:
             if (vd->is_constant && std::holds_alternative<std::monostate>(val)) {
-                throw std::runtime_error("Constant pattern must be initialized at " + vd->token.loc.to_string());
+                throw std::runtime_error("Constant pattern must be initialized at " + vd->token.loc.to_string() + "\n --> Traced at: \n" + vd->token.loc.get_line_trace());
             }
             bind_pattern_to_value(vd->pattern.get(), val, env, vd->is_constant, vd->token);
             return;
@@ -144,7 +144,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             val,
             vd->is_constant};
         if (vd->is_constant && std::holds_alternative<std::monostate>(val)) {
-            throw std::runtime_error("Constant '" + vd->identifier + "' must be initialized at " + vd->token.loc.to_string());
+            throw std::runtime_error("Constant '" + vd->identifier + "' must be initialized at " + vd->token.loc.to_string() + "\n --> Traced at: \n" + vd->token.loc.get_line_trace());
         }
         env->set(vd->identifier, var);
         return;
@@ -159,7 +159,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             while (walk) {
                 auto it = walk->values.find(id->name);
                 if (it != walk->values.end()) {
-                    if (it->second.is_constant) throw std::runtime_error("Cannot assign to constant '" + id->name + "' at " + id->token.loc.to_string());
+                    if (it->second.is_constant) throw std::runtime_error("Cannot assign to constant '" + id->name + "' at " + id->token.loc.to_string() + "\n --> Traced at: \n" + id->token.loc.get_line_trace());
                     it->second.value = rhs;
                     return;
                 }
@@ -182,9 +182,9 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 long long rawIndex = static_cast<long long>(to_number(indexVal));
                 ArrayPtr arr = std::get<ArrayPtr>(objVal);
                 if (!arr) {
-                    throw std::runtime_error("Cannot assign into null array at " + idx->token.loc.to_string());
+                    throw std::runtime_error("Cannot assign into null array at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                 }
-                if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
+                if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                 size_t uidx = static_cast<size_t>(rawIndex);
                 if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
                 arr->elements[uidx] = rhs;
@@ -208,11 +208,11 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                             }
                         }
                         if (!allowed) {
-                            throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string());
+                            throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                         }
                     }
                     if (it->second.is_readonly) {
-                        throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
+                        throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                     }
 
                     if (it->second.is_locked) {
@@ -226,7 +226,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                         if (!isInternal) {
                             throw std::runtime_error(
-                                "Cannot overwrite locked property '" + prop + "' from outside at " + idx->token.loc.to_string());
+                                "Cannot overwrite locked property '" + prop + "' from outside at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                         }
                     }
 
@@ -244,7 +244,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 return;
             }
 
-            throw std::runtime_error("Attempted index assignment on non-array/non-object at " + idx->token.loc.to_string());
+            throw std::runtime_error("Attempted index assignment on non-array/non-object at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
         }
 
         if (auto mem = dynamic_cast<MemberExpressionNode*>(an->target.get())) {
@@ -252,12 +252,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             if (std::holds_alternative<ClassPtr>(objVal)) {
                 ClassPtr cls = std::get<ClassPtr>(objVal);
-                if (!cls) throw std::runtime_error("Member assignment on null class at " + mem->token.loc.to_string());
+                if (!cls) throw std::runtime_error("Member assignment on null class at " + mem->token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
                 set_object_property(cls->static_table, mem->property, rhs, env, mem->token);
                 return;
             }
             if (!std::holds_alternative<ObjectPtr>(objVal)) {
-                throw std::runtime_error("Member assignment on non-object at " + mem->token.loc.to_string());
+                throw std::runtime_error("Member assignment on non-object at " + mem->token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
             }
             ObjectPtr op = std::get<ObjectPtr>(objVal);
             if(op->is_frozen) return;
@@ -275,7 +275,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         }
                     }
                     if (!allowed) {
-                        throw std::runtime_error("Cannot assign to private property '" + mem->property + "' from outside at " + mem->token.loc.to_string());
+                        throw std::runtime_error("Cannot assign to private property '" + mem->property + "' from outside at " + mem->token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
                     }
                 }
 
@@ -294,7 +294,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                     if (!isInternal) {
                         throw std::runtime_error(
-                            "Cannot overwrite locked property '" + mem->property + "' from outside at " + mem->token.loc.to_string());
+                            "Cannot overwrite locked property '" + mem->property + "' from outside at " + mem->token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
                     }
                 }
 
@@ -313,7 +313,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             }
         }
 
-        throw std::runtime_error("Unsupported assignment target at " + an->token.loc.to_string());
+        throw std::runtime_error("Unsupported assignment target at " + an->token.loc.to_string() + "\n --> Traced at: \n" + an->token.loc.get_line_trace());
     }
 
     if (auto ps = dynamic_cast<PrintStatementNode*>(stmt)) {

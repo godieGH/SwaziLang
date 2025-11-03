@@ -48,7 +48,7 @@ void Parser::expect(TokenType t, const std::string& errMsg) {
     if (peek().type != t) {
         Token tok = peek();
         throw std::runtime_error(
-            "Parse error at " + tok.loc.to_string() + ": " + errMsg);
+            "Parse error at " + tok.loc.to_string() + ": " + errMsg + "\n--> Traced at:\n" + peek_next(-1).loc.get_line_trace());
     }
     consume();
 }
@@ -323,7 +323,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
             node->elements.push_back(std::move(id));
         } else {
             Token tok = peek();
-            throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Unexpected token in array pattern");
+            throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Unexpected token in array pattern" + "\n --> Traced at: \n" + tok.loc.get_line_trace());
         }
 
         // separator or end

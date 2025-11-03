@@ -209,6 +209,9 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
     std::ostringstream ss;
     ss << "Unterminated template literal in file '" << (filename.empty() ? "<repl>" : filename)
        << "' starting at line " << tok_line << ", col " << tok_col;
+       std::stringstream sd;
+       sd  << " * " << tok_line << " | ";
+       ss << "\n --> Traced at: \n" << sd.str() << linestr[tok_line] << "\n" << std::string(sd.str().size() + (tok_col - 6), ' ') << "~~~^~~~";
     throw std::runtime_error(ss.str());
 }
 
@@ -495,6 +498,13 @@ void Lexer::handle_newline(std::vector<Token>& out) {
                 ss << "Indentation error in file '"
                    << (filename.empty() ? "<repl>" : filename)
                    << "' at line " << line;
+                   
+                   ss << "\n --> Traced at: \n";
+                   std::stringstream sd;
+                   sd << " * " << line << " | ";
+                   
+                   ss << sd.str() << linestr[line] << "\n" << std::string(sd.str().size() + col, ' ') << "^";
+                   
                 throw std::runtime_error(ss.str());
             }
         }

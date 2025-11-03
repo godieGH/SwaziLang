@@ -35,14 +35,14 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
         idTok = pattern->token;
     } else {
         Token tok = peek();
-        throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Expected identifier or destructuring pattern after 'data'");
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Expected identifier or destructuring pattern after 'data'" + "\n--> Traced at:\n" + tok.loc.get_line_trace());
     }
 
     std::unique_ptr<ExpressionNode> value = nullptr;
 
     if (is_constant) {
         // force an initializer for constants
-        expect(TokenType::ASSIGN, "Constant '" + (pattern ? "<pattern>" : name) + "' must be initialized");
+        expect(TokenType::ASSIGN, "Constant '" + (pattern ? "<pattern>" : name) + "' must be initialized at declaration");
         value = parse_expression();
     } else {
         // non-constants: assignment is optional
@@ -52,7 +52,7 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
         } else {
             // experimental but worth it.
             if(peek().type != TokenType::SEMICOLON && peek().type != TokenType::NEWLINE) {
-              throw std::runtime_error("You should terminate a variable declaration if not assigned, with a ; or with a newline, at" + peek().loc.to_string());
+              throw std::runtime_error("Terminate variable declaration with a \";\" or with a newline if not initialized at" + peek().loc.to_string() + "\n--> Traced at, bad code practice:\n" + peek_next(-1).loc.get_line_trace());
             }
         }
         
@@ -105,8 +105,8 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
     if (peek().type == TokenType::STAR) {
         Token star = consume();
         node->import_all = true;
-        expect(TokenType::KUTOKA, "Expected 'kutoka' after '*' in import");
-        expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+        expect(TokenType::KUTOKA, "Expected 'kutoka' after '*' in `tumia` statements");
+        expect(TokenType::STRING, "Expected module string after 'kutoka' in `tumia` statements");
         Token pathTok = tokens[position - 1];
         node->module_path = pathTok.value;
         node->module_token = pathTok;
@@ -226,7 +226,7 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
 
     // Otherwise it's a syntax error
     Token bad = peek();
-    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": invalid import syntax after 'tumia'");
+    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": invalid import syntax after 'tumia'" + "\n --> Traced at: \n" + bad.loc.get_line_trace());
 }
 
 std::unique_ptr<StatementNode> Parser::parse_export_declaration() {
@@ -234,7 +234,7 @@ std::unique_ptr<StatementNode> Parser::parse_export_declaration() {
     Token ruhusuTok = tokens[position - 1];
 
     if (saw_export) {
-        throw std::runtime_error("Parse error at " + ruhusuTok.loc.to_string() + ": multiple 'ruhusu' (export) declarations are not allowed");
+        throw std::runtime_error("Parse error at " + ruhusuTok.loc.to_string() + ": multiple 'ruhusu' (export) declarations are not allowed" + "\n --> Traced at: \n" + ruhusuTok.loc.get_line_trace());
     }
 
     auto node = std::make_unique<ExportDeclarationNode>();
@@ -303,7 +303,7 @@ std::unique_ptr<StatementNode> Parser::parse_export_declaration() {
     }
 
     Token bad = peek();
-    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": expected identifier or '{' after 'ruhusu'");
+    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": expected identifier or '{' after 'ruhusu'" + "\n --> Traced at: \n" + bad.loc.get_line_trace());
 }
 
 std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
@@ -405,11 +405,11 @@ std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
                 constructorCount++;
                 if (m.name != classNode->name->name) {
                     throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
-                        ": constructor name '" + m.name + "' must match class name '" + classNode->name->name + "'.");
+                        ": constructor name '" + m.name + "' must match class name '" + classNode->name->name + "'." + "\n --> Traced at: \n" + methodTok.loc.get_line_trace());
                 }
                 if (m.is_static) {
                     throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
-                        ": constructor must not be static.");
+                        ": constructor must not be static." + "\n --> Traced at: \n" + methodTok.loc.get_line_trace());
                 }
                 // do NOT add constructor to memberCount (avoid collision with members named same as class)
                 continue;  // <-- important: skip normal member counting
@@ -420,11 +420,11 @@ std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
                 destructorCount++;
                 if (m.name != classNode->name->name) {
                     throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
-                        ": destructor name '" + m.name + "' must match class name '" + classNode->name->name + "'.");
+                        ": destructor name '" + m.name + "' must match class name '" + classNode->name->name + "'." + "\n --> Traced at: \n" + methodTok.loc.get_line_trace());
                 }
                 if (m.is_static) {
                     throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
-                        ": destructor must not be static.");
+                        ": destructor must not be static." + "\n --> Traced at: \n" + methodTok.loc.get_line_trace());
                 }
                 // do NOT add destructor to memberCount
                 continue;  // <-- important
@@ -433,7 +433,7 @@ std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
             // getter arg rule
             if (m.is_getter && !m.params.empty()) {
                 throw std::runtime_error("Parse error at " + methodTok.loc.to_string() +
-                    ": getter '" + m.name + "' must not have parameters.");
+                    ": getter '" + m.name + "' must not have parameters." + "\n --> Traced at: \n" + methodTok.loc.get_line_trace());
             }
 
             // composite key: static/instance + method + name
@@ -454,11 +454,11 @@ std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
         // enforce at most one constructor/destructor
         if (constructorCount > 1) {
             throw std::runtime_error("Parse error at " + classNode->token.loc.to_string() +
-                ": multiple constructors defined for class '" + classNode->name->name + "'.");
+                ": multiple constructors defined for class '" + classNode->name->name + "'." + "\n --> Traced at: \n" + classNode->token.loc.get_line_trace());
         }
         if (destructorCount > 1) {
             throw std::runtime_error("Parse error at " + classNode->token.loc.to_string() +
-                ": multiple destructors defined for class '" + classNode->name->name + "'.");
+                ": multiple destructors defined for class '" + classNode->name->name + "'." + "\n --> Traced at: \n" + classNode->token.loc.get_line_trace());
         }
 
         // report duplicates (static/instance and kind-aware)
@@ -468,7 +468,7 @@ std::unique_ptr<StatementNode> Parser::parse_class_declaration() {
                 auto pos = kv.first.rfind(':');
                 std::string pretty = (pos == std::string::npos) ? kv.first : kv.first.substr(pos + 1);
                 throw std::runtime_error("Parse error at " + classNode->token.loc.to_string() +
-                    ": duplicate member name '" + pretty + "' found " + std::to_string(kv.second) + " times.");
+                    ": duplicate member name '" + pretty + "' found " + std::to_string(kv.second) + " times." + "\n --> Traced at: \n" + classNode->token.loc.get_line_trace());
             }
         }
     }
@@ -600,7 +600,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
 
                 // otherwise syntax error
                 Token bad = peek();
-                throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": unexpected token after '?.'");
+                throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": unexpected token after '?.'" + "\n --> Traced at: \n" + bad.loc.get_line_trace());
             }
 
             if (peek().type == TokenType::OPENBRACKET) {
@@ -623,7 +623,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
         if (peek().type == TokenType::ASSIGN) {
             if (!is_assignable(nodeExpr.get())) {
                 Token opTok = peek();
-                throw std::runtime_error("Invalid assignment target at " + opTok.loc.to_string());
+                throw std::runtime_error("Invalid assignment target at " + opTok.loc.to_string() + "\n --> Traced at: \n" + opTok.loc.get_line_trace());
             }
             consume();  // '='
             auto value = parse_expression();
@@ -641,7 +641,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
             peek().type == TokenType::TIMES_ASSIGN) {
             if (!is_assignable(nodeExpr.get())) {
                 Token opTok = peek();
-                throw std::runtime_error("Compound assignment is only supported for assignable targets at " + opTok.loc.to_string());
+                throw std::runtime_error("Compound assignment is only supported for assignable targets at " + opTok.loc.to_string() + "\n --> Traced at: \n" + opTok.loc.get_line_trace());
             }
 
             Token opTok = consume();  // one of +=, -=, *=
@@ -674,7 +674,7 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
         if (peek().type == TokenType::INCREMENT || peek().type == TokenType::DECREMENT) {
             if (!is_assignable(nodeExpr.get())) {
                 Token opTok = peek();
-                throw std::runtime_error("Increment/decrement is only supported for assignable targets at " + opTok.loc.to_string());
+                throw std::runtime_error("Increment/decrement is only supported for assignable targets at " + opTok.loc.to_string() + "\n --> Traced at: \n" + opTok.loc.get_line_trace());
             }
             Token opTok = consume();
             // build BinaryExpressionNode: left + 1 OR left - 1
@@ -733,7 +733,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                 if (peek().type == TokenType::ELLIPSIS) {
                     Token ellTok = consume();
                     if (rest_seen) {
-                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
+                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
                     }
                     expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                     Token nameTok = tokens[position - 1];
@@ -751,7 +751,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                         try {
                             p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                         } catch (...) {
-                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
                         }
                         expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                     }
@@ -763,7 +763,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                     if (peek().type == TokenType::COMMA) {
                         if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
                             Token bad = tokens[position];
-                            throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string());
+                            throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
                         }
                         // allow trailing comma then break
                     }
@@ -786,7 +786,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string());
+                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
                     }
                 }
 
@@ -810,7 +810,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
             if (peek().type == TokenType::ELLIPSIS) {
                 Token ellTok = consume();
                 if (rest_seen) {
-                    throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed");
+                    throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
                 }
                 expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                 Token nameTok = tokens[position - 1];
@@ -828,7 +828,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                     try {
                         p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                     } catch (...) {
-                        throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string());
+                        throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
                     }
                     expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                 }
@@ -839,7 +839,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                 // rest must be last in bare form
                 if (peek().type == TokenType::COMMA) {
                     Token c = tokens[position];  // lookahead
-                    throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string());
+                    throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string() + "\n --> Traced at: \n" + c.loc.get_line_trace());
                 }
                 break;
             }
@@ -859,7 +859,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string());
+                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
                     }
                 }
 
@@ -973,7 +973,7 @@ std::unique_ptr<CaseNode> Parser::parse_switch_case() {
     } else {
         Token tok = peek();
         throw std::runtime_error("Parse error at " + tok.loc.to_string() +
-            ": Expected 'ikiwa' or 'kaida' in switch");
+            ": Expected 'ikiwa' or 'kaida' in switch" + "\n --> Traced at: \n" + tok.loc.get_line_trace());
     }
 
     // Now parse the body, which can be ':' (indented block) or '{' (brace block)
@@ -1012,7 +1012,7 @@ std::unique_ptr<CaseNode> Parser::parse_switch_case() {
     } else {
         Token tok = peek();
         throw std::runtime_error("Parse error at " + tok.loc.to_string() +
-            ": Expected ':' or '{' after case header");
+            ": Expected ':' or '{' after case header" + "\n --> Traced at: \n" + tok.loc.get_line_trace());
     }
 
     return caseNode;
@@ -1052,7 +1052,7 @@ std::unique_ptr<StatementNode> Parser::parse_switch_statement() {
     } else {
         Token tok = peek();
         throw std::runtime_error("Parse error at " + tok.loc.to_string() +
-            ": Expected ':' or '{' after 'chagua' expression");
+            ": Expected ':' or '{' after 'chagua' expression" + "\n --> Traced at: \n" + tok.loc.get_line_trace());
     }
 
     return node;
@@ -1061,7 +1061,8 @@ std::unique_ptr<StatementNode> Parser::parse_switch_statement() {
 std::unique_ptr<StatementNode> Parser::parse_try_catch() {
     // caller already consumed 'jaribu' (JARIBU)
     if (position == 0) {
-        throw std::runtime_error("Internal parser error: parse_try_catch called with position == 0");
+        throw std::runtime_error("Internal parser error: at "  + peek().loc.to_string() + " \n --> Parse_try_catch called with position == 0" +
+        "\n --> Traced around: \n" + peek().loc.get_line_trace());
     }
 
     auto node = std::make_unique<TryCatchNode>();

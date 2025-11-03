@@ -54,7 +54,7 @@ static std::string value_type_name(const Value& v) {
     return "unknown";
 }
 
-double Evaluator::to_number(const Value& v) {
+double Evaluator::to_number(const Value& v, Token token) {
     if (std::holds_alternative<double>(v)) return std::get<double>(v);
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? 1.0 : 0.0;
     if (std::holds_alternative<std::string>(v)) {
@@ -295,7 +295,7 @@ Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvP
 
     // private property -> not allowed unless we are inside the same object's context ($ bound)
     if (desc.is_private && !is_private_access_allowed(obj, env)) {
-        throw std::runtime_error("Cannot access private property '" + key + "' at " + desc.token.loc.to_string());
+        throw std::runtime_error("Cannot access private property '" + key + "' at " + desc.token.loc.to_string() + "\n --> Traced at: \n" + desc.token.loc.get_line_trace());
     }
 
     // If property is a readonly getter and value is a function -> call it and return its result
@@ -357,7 +357,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
     if (auto arrPat = dynamic_cast<ArrayPatternNode*>(pattern)) {
         // RHS must be an array
         if (!std::holds_alternative<ArrayPtr>(value)) {
-            throw std::runtime_error("Cannot destructure non-array value at " + declToken.loc.to_string());
+            throw std::runtime_error("Cannot destructure non-array value at " + declToken.loc.to_string() + "\n --> Traced at: \n" + declToken.loc.get_line_trace());
         }
         ArrayPtr src = std::get<ArrayPtr>(value);
         size_t srcLen = src ? src->elements.size() : 0;
@@ -373,7 +373,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             if (auto spread = dynamic_cast<SpreadElementNode*>(elem.get())) {
                 // argument should evaluate to an IdentifierNode (target)
                 if (!spread->argument) {
-                    throw std::runtime_error("Invalid rest target in array pattern at " + spread->token.loc.to_string());
+                    throw std::runtime_error("Invalid rest target in array pattern at " + spread->token.loc.to_string() + "\n --> Traced at: \n" + spread->token.loc.get_line_trace());
                 }
                 auto idTarget = dynamic_cast<IdentifierNode*>(spread->argument.get());
                 if (!idTarget) {
@@ -405,7 +405,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             }
 
             // spread could also be represented as an Identifier wrapped differently, but we only support the above
-            throw std::runtime_error("Unsupported element in array pattern at " + arrPat->token.loc.to_string());
+            throw std::runtime_error("Unsupported element in array pattern at " + arrPat->token.loc.to_string() + "\n --> Traced at: \n" + arrPat->token.loc.get_line_trace());
         }
         return;
     }
@@ -413,7 +413,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
     // Object pattern
     if (auto objPat = dynamic_cast<ObjectPatternNode*>(pattern)) {
         if (!std::holds_alternative<ObjectPtr>(value)) {
-            throw std::runtime_error("Cannot destructure non-object value at " + declToken.loc.to_string());
+            throw std::runtime_error("Cannot destructure non-object value at " + declToken.loc.to_string() + "\n --> Traced at: \n" + declToken.loc.get_line_trace());
         }
         ObjectPtr src = std::get<ObjectPtr>(value);
 
@@ -423,7 +423,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             // target should be an IdentifierNode (we support only simple renames/shorthand)
             auto targetId = dynamic_cast<IdentifierNode*>(propPtr->value.get());
             if (!targetId) {
-                throw std::runtime_error("Only identifier targets supported in object pattern at " + propPtr->value->token.loc.to_string());
+                throw std::runtime_error("Only identifier targets supported in object pattern at " + propPtr->value->token.loc.to_string() + "\n --> Traced at: \n" + propPtr->value->token.loc.get_line_trace());
             }
 
             // Use existing getter to respect privacy/getters (get_object_property is a member)
@@ -444,7 +444,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
         return;
     }
 
-    throw std::runtime_error("Unsupported pattern node in destructuring at " + pattern->token.loc.to_string());
+    throw std::runtime_error("Unsupported pattern node in destructuring at " + pattern->token.loc.to_string() + "\n --> Traced at: \n" + pattern->token.loc.get_line_trace());
 }
 
 // Tune these to control "small object" inline behavior:

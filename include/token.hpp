@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iostream>
+
 #include <string>
 #include <sstream>
 #include <map>
@@ -168,35 +170,38 @@ enum class TokenType {
 
 // Small struct for token location / span in source
 struct TokenLocation {
+public:    
     std::string filename; // source filename (or "<repl>")
     int line = 1;         // 1-based
     int col  = 1;         // 1-based column of token start
     int length = 0;       // token length in characters
-    std::map<int, std::string> linestr; // used for tracing
+    std::map<int, std::string> linestrv; // used for tracing
+    std::string line_trace; // trace line
     
     TokenLocation() = default;
     TokenLocation(const std::string& fn, int ln, int c, int len = 0)
         : filename(fn), line(ln), col(c), length(len){}
 
-  void set_map_linestr(const std::map<int, std::string>& lnstr) {
-    linestr = lnstr;
-  }
-
+    void set_map_linestr(std::map<int, std::string> line_str) {
+      linestrv = line_str;
+      std::string ss = line_str[line];
+      line_trace = ss;
+    }
     int end_col() const { return col + std::max(0, length - 1); }
 
     std::string to_string() const {
         return filename + ":" + std::to_string(line) + ":" + std::to_string(col);
     }
     std::string get_line_trace() const {
-      std::string lnss = linestr.at(line);
       std::stringstream ss;
       ss << " * " << line << " | ";
       std::string fss = ss.str();
       std::string lss = std::string(col + fss.size(), ' ') + "^";
-      ss << lnss << "\n" << lss;
-      
+      ss << line_trace << "\n" << lss;
       return ss.str();
     }
+
+
 };
 
 // Represents a single token with location

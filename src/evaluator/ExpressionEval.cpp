@@ -208,7 +208,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         if (!env) throw std::runtime_error("No environment when resolving identifier '" + id->name + "'");
         if (!env->has(id->name)) {
-            throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.loc.to_string());
+            throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.loc.to_string() + "\n --> Traced at: \n" + id->token.loc.get_line_trace());
         }
         return env->get(id->name).value;
     }
@@ -223,7 +223,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
 
         // not found -> undefined this
-        throw std::runtime_error("Undefined 'this' ('$') at " + self->token.loc.to_string());
+        throw std::runtime_error("Undefined 'this' ('$') at " + self->token.loc.to_string() + "\n --> Traced at: \n" + self->token.loc.get_line_trace());
     }
 
     // Member access: object.property (e.g., arr.idadi, arr.ongeza, str.herufi)
@@ -261,7 +261,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
             // private static -> allowed only when access is internal (use holder for check)
             if (desc.is_private && !is_private_access_allowed(holder, env)) {
-                throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string());
+                throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
             }
 
             // Getter semantics: call getter if readonly and stored function
@@ -406,7 +406,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     if (args.empty()) throw std::runtime_error("str.tafuta needs 1 argument at " + token.loc.to_string());
                     std::string sub = to_string_value(args[0]);
                     size_t from = 0;
-                    if (args.size() >= 2) from = static_cast<size_t>(std::max(0LL, static_cast<long long>(to_number(args[1]))));
+                    if (args.size() >= 2) from = static_cast<size_t>(std::max(0LL, static_cast<long long>(to_number(args[1], token))));
                     size_t pos = s_val.find(sub, from);
                     if (pos == std::string::npos) return Value{
                         static_cast<double>(-1)};
@@ -417,12 +417,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
             // slesi(start?, end?) -> substring-like slice
             if (prop == "slesi" || prop == "substr") {
-                return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+                return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     long long n = static_cast<long long>(s_val.size());
                     long long start = 0;
                     long long end = n;
-                    if (args.size() >= 1) start = static_cast<long long>(to_number(args[0]));
-                    if (args.size() >= 2) end = static_cast<long long>(to_number(args[1]));
+                    if (args.size() >= 1) start = static_cast<long long>(to_number(args[0], token));
+                    if (args.size() >= 2) end = static_cast<long long>(to_number(args[1], token));
                     if (start < 0) start = std::max(0LL, n + start);
                     if (end < 0) end = std::max(0LL, n + end);
                     start = std::min(std::max(0LL, start), n);
@@ -514,8 +514,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // rudia(n) -> repeat string n times
             if (prop == "rudia") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.rudia needs 1 args at " + token.loc.to_string());
-                    long long n = static_cast<long long>(to_number(args[0]));
+                    if (args.empty()) throw std::runtime_error("str.rudia needs 1 argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
+                    long long n = static_cast<long long>(to_number(args[0], token));
                     if (n <= 0) return Value{
                         std::string()};
                     std::string out;
@@ -529,8 +529,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // herufiYa(index) -> charAt (single-char string or empty)
             if (prop == "herufiYa" || prop == "charAt") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.herufiKwa needs 1 arg at " + token.loc.to_string());
-                    long long idx = static_cast<long long>(to_number(args[0]));
+                    if (args.empty()) throw std::runtime_error("str.herufiKwa needs 1 arg at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
+                    long long idx = static_cast<long long>(to_number(args[0], token));
                     if (idx < 0 || (size_t)idx >= s_val.size()) return Value{
                         std::string()};
                     return Value{
@@ -675,7 +675,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         return Value{
                             num * num};  // square by default
                     }
-                    double b = to_number(args[0]);
+                    double b = to_number(args[0], token);
                     return Value{
                         std::pow(num, b)};
                 };
@@ -688,14 +688,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                        num](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     // default: sqrt
                     if (args.empty()) {
-                        if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha pili cha thamani hasi");
+                        if (num < 0) throw std::runtime_error("Math error at " +  token.loc.to_string() + "\nCan not calculate root of a negative value" + "\nerror at \n --> Traced at: \n" + token.loc.get_line_trace());
                         return Value{
                             std::sqrt(num)};
                     }
 
-                    double b = to_number(args[0]);
-                    if (b == 0) throw std::runtime_error("Huwezi kugawa kwa sifuri kwenye kipeuo");
-                    if (!std::isfinite(b)) throw std::runtime_error("Kiwango cha kipeuo si sahihi(inf)");
+                    double b = to_number(args[0], token);
+                    if (b == 0) throw std::runtime_error("Math error at " + token.loc.to_string() + "\nCan not devide by zero" + "\n --> Traced at: \n" + token.loc.get_line_trace());
+                    if (!std::isfinite(b)) throw std::runtime_error("Math error at " +token.loc.to_string()  + "\nroot value is inf" + "\n --> Traced at: \n" + token.loc.get_line_trace());
 
                     // guard: negative base with negative root degree -> division by zero if num==0
                     if (num == 0.0 && b < 0.0) throw std::runtime_error("Haiwezekani kupata kipeuo hasi cha sifuri");
@@ -1253,14 +1253,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 
                 auto set_private__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
                   if(args.empty()) {
-                    throw std::runtime_error("proto.set_private requires an object key as an argument at " + token.loc.to_string());
+                    throw std::runtime_error("__proto__.set_private requires an object key as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have named property `" + to_string_value(args[0], true)+"` yet to set to private at " + token.loc.to_string());
+                    throw std::runtime_error("Object doesn't have named property `" + to_string_value(args[0], true)+"` to set to private at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
-                  
                   PropertyDescriptor& desc = it->second;
                   desc.is_private = true;
                   return Value(bool(desc.is_private));
@@ -1279,12 +1278,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 
                 auto set_lock__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
                   if(args.empty()) {
-                    throw std::runtime_error("proto.set_lock requires an object key as an argument at " + token.loc.to_string());
+                    throw std::runtime_error("__proto__.set_lock requires an object key as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have a named property `" + to_string_value(args[0], true)+"` yet to set a lock at " + token.loc.to_string());
+                    throw std::runtime_error("Object doesn't have a named property `" + to_string_value(args[0], true)+"` to set a lock at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   
                   PropertyDescriptor& desc = it->second;
@@ -1305,22 +1304,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 
                 auto delete__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
                   if(args.empty()) {
-                    throw std::runtime_error("proto.delete requires a property key to delete as an argument at " + token.loc.to_string());
+                    throw std::runtime_error("__proto___delete requires a property key to delete as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
-                  if(op->is_frozen) throw std::runtime_error("You can not delete, add no more or modify properties of a frozen object at " + token.loc.to_string());
+                  if(op->is_frozen) throw std::runtime_error("Can not delete, add no more or modify properties of a frozen object at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   std::string name = to_string_value(args[0]);
                   auto it = op->properties.find(name);
                   if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have a key named `" + to_string_value(args[0], true) + "` yet to delete at " + token.loc.to_string());
+                    throw std::runtime_error("Object doesn't have a key named `" + to_string_value(args[0], true) + "` to delete at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   
                   
                   PropertyDescriptor& desc = it->second;
                   if(desc.is_private && !is_private_access_allowed(op, env)) {
-                    throw std::runtime_error("You can not delete a private member from outside the object at " + token.loc.to_string());
+                    throw std::runtime_error("Can not delete a private member from outside the object at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   if(desc.is_locked && !is_private_access_allowed(op, env)) {
-                    throw std::runtime_error("You can not delete a locked member from outside the object at " + token.loc.to_string());
+                    throw std::runtime_error("Can not delete a locked member from outside the object at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   
                   auto itp = op->properties.find(name);
@@ -1364,7 +1363,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
               {
                 auto has__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
                   if(args.empty()) {
-                    throw std::runtime_error("__proto__has requires a key as an argument at " + token.loc.to_string());
+                    throw std::runtime_error("__proto__has requires a key as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
                   }
                   std::string key = to_string_value(args[0]);
                   auto it = op->properties.find(key);
@@ -1402,7 +1401,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return get_object_property(op, mem->property, env);
         }
         // For other non-array/non-string objects, return undefined for unknown props
-        throw std::runtime_error("Unknown property '" + mem->property + "' on value at " + mem->token.loc.to_string());
+        throw std::runtime_error("Unknown property '" + mem->property + "' on value at " + mem->token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
     }
 
     // Indexing: obj[index]
@@ -1429,7 +1428,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
             if (!arr) return std::monostate{};
 
-            long long rawIndex = static_cast<long long>(to_number(indexVal));
+            long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
             if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
                 return std::monostate{};
             }
@@ -1504,7 +1503,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     auto it = walk->values.find(leftIdent->name);
                     if (it != walk->values.end()) {
                         if (it->second.is_constant) {
-                            throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string());
+                            throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
                         }
 
                         // IMPORTANT: avoid converting stored value to number until we know
@@ -1603,11 +1602,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 if (std::holds_alternative<ArrayPtr>(objVal)) {
                     ArrayPtr arr = std::get<ArrayPtr>(objVal);
                     if (!arr) {
-                        throw std::runtime_error("Cannot assign into null array at " + b->token.loc.to_string());
+                        throw std::runtime_error("Cannot assign into null array at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
                     }
 
                     long long rawIndex = static_cast<long long>(to_number(indexVal));
-                    if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string());
+                    if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                     size_t uidx = static_cast<size_t>(rawIndex);
                     if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
 
@@ -1659,7 +1658,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 if (std::holds_alternative<ObjectPtr>(objVal)) {
                     ObjectPtr op = std::get<ObjectPtr>(objVal);
                     if (!op) {
-                        throw std::runtime_error("Cannot operate on null object at " + b->token.loc.to_string());
+                        throw std::runtime_error("Cannot operate on null object at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
                     }
 
                     // convert indexVal -> property key string
@@ -1682,12 +1681,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 }
                             }
                             if (!allowed) {
-                                throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string());
+                                throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                             }
                         }
 
                         if (it->second.is_readonly) {
-                            throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string());
+                            throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
                         }
 
                         // Avoid converting to number until numeric path is chosen.
@@ -1784,7 +1783,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
 
                 // Fallback: not array nor object
-                throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string());
+                throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
             }
         }
         // --- Normal binary evaluation path (short-circuit logicals returning operands) ---
