@@ -11,18 +11,22 @@
 #include "globals.hpp"
 namespace fs = std::filesystem;
 
-Evaluator::Evaluator() : global_env(std::make_shared<Environment>(nullptr)) {
-    global_env = std::make_shared<Environment>();
+Evaluator::Evaluator() : global_env(std::make_shared<Environment>(nullptr)), main_module_env(nullptr) {
+    // global_env is the shared root/builtins environment (parent == nullptr)
     init_globals(global_env);
 }
-
 // ----------------- Program evaluation -----------------
 void Evaluator::evaluate(ProgramNode* program) {
     if (!program) return;
     Value dummy_ret;
     bool did_return = false;
+
+    // Choose run environment: use main_module_env if it was created by set_entry_point,
+    // otherwise fall back to global_env (REPL mode or tests).
+    EnvPtr run_env = main_module_env ? main_module_env : global_env;
+
     for (auto& stmt_uptr : program->body) {
-        evaluate_statement(stmt_uptr.get(), global_env, &dummy_ret, &did_return);
+        evaluate_statement(stmt_uptr.get(), run_env, &dummy_ret, &did_return);
         if (did_return) break;
     }
     try {
@@ -33,7 +37,6 @@ void Evaluator::evaluate(ProgramNode* program) {
         std::cerr << "Unknown error while running async callbacks\n";
     }
 }
-
 void Evaluator::populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main) {
     if (!env) return;
 
@@ -95,5 +98,11 @@ void Evaluator::set_entry_point(const std::string& filename) {
     else
         name = fs::path(resolved).filename().string();
 
-    populate_module_metadata(global_env, resolved, name, true);
+    // Create a dedicated module environment for the main program. It should be a child of
+    // global_env (which contains builtins and shared runtime). This prevents main top-level
+    // variables from becoming the parent for imported modules.
+    main_module_env = std::make_shared<Environment>(global_env);
+
+    // Populate __main__/__name__/__file__/__dir__ in the main module env.
+    populate_module_metadata(main_module_env, resolved, name, true);
 }

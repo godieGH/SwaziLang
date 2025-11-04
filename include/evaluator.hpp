@@ -164,6 +164,8 @@ class Evaluator {
 
    private:
     EnvPtr global_env;
+    EnvPtr main_module_env;
+    EnvPtr repl_env;
 
     ClassPtr current_class_context = nullptr;
 
