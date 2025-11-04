@@ -2,8 +2,9 @@
 #include <fstream>
 #include <sstream>
 
+#include "SwaziError.hpp"
 #include "builtin_sl.h"
-#include "builtins.hpp"  // new: built-in module factories (regex, fs, http)
+#include "builtins.hpp"  //built-in module factories (regex, fs, http)
 #include "evaluator.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
@@ -68,7 +69,10 @@ std::string Evaluator::resolve_module_path(const std::string& module_spec, const
         }
     }
 
-    throw std::runtime_error("Module not found for '" + module_spec + "' at " + tok.loc.to_string());
+    throw SwaziError(
+        "ReferenceError",
+        "Module not found for '" + module_spec + "'.",
+        tok.loc);
 }
 
 // import_module: loads, parses, evaluates a module file and returns its exports object.
@@ -93,7 +97,10 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         auto srcOpt = get_embedded_module_source(module_spec);
         if (!srcOpt.has_value()) {
             module_cache.erase(key);
-            throw std::runtime_error("Embedded module found but source missing for " + module_spec);
+            throw SwaziError(
+                "ReferenceError",
+                "Embedded module found but source is missing for '" + module_spec + "'.",
+                requesterTok.loc);
         }
 
         std::string src = srcOpt.value();
@@ -114,7 +121,10 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
                             rec->exports->properties["default"] = PropertyDescriptor{std::monostate{}, false, false, false, ed->token};
                         } else {
                             if (!rec->module_env->has(ed->single_identifier)) {
-                                throw std::runtime_error("Export name '" + ed->single_identifier + "' not defined in embedded module " + module_spec);
+                                throw SwaziError(
+                                    "ReferenceError",
+                                    "Export name '" + ed->single_identifier + "' not defined in embedded module '" + module_spec + "'.",
+                                    ed->token.loc);
                             }
                             Environment::Variable& v = rec->module_env->get(ed->single_identifier);
                             PropertyDescriptor pd{v.value, false, false, false, ed->token};
@@ -315,7 +325,12 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
     auto it = module_cache.find(key);
     if (it != module_cache.end()) {
         auto rec = it->second;
-        if (!rec) throw std::runtime_error("Internal module cache corruption for " + key);
+        if (!rec) {
+            throw SwaziError(
+                "InternalError",
+                "Internal module cache corruption for '" + key + "'.",
+                requesterTok.loc);
+        }
         // If loading, return the mounts.exports for circular dependency (may be incomplete)
         if (rec->state == ModuleRecord::State::Loading) {
             return rec->exports;
@@ -344,7 +359,10 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
     std::ifstream in(resolved);
     if (!in.is_open()) {
         module_cache.erase(key);
-        throw std::runtime_error("Unable to open module file: " + resolved);
+        throw SwaziError(
+            "IOError",
+            "Unable to open module file: '" + resolved + "'.",
+            requesterTok.loc);
     }
     std::stringstream buf;
     buf << in.rdbuf();
@@ -378,7 +396,10 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
                             ed->token};
                     } else {
                         if (!rec->module_env->has(ed->single_identifier)) {
-                            throw std::runtime_error("Export name '" + ed->single_identifier + "' not defined in module " + key + " at " + ed->token.loc.to_string());
+                            throw SwaziError(
+                                "ReferenceError",
+                                "Export name '" + ed->single_identifier + "' not defined in module '" + key + "'.",
+                                ed->token.loc);
                         }
                         Environment::Variable& v = rec->module_env->get(ed->single_identifier);
                         PropertyDescriptor pd;

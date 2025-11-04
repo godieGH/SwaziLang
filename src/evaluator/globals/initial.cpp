@@ -13,6 +13,80 @@
 #include "muda_class.hpp"
 #include "set_class.hpp"
 #include "time.hpp"
+#include "SwaziError.hpp"
+#include "token.hpp"
+
+// Helper: build a TokenLocation from a user-supplied object value (if possible).
+// The user-provided object may contain fields like:
+//  - filename (string)
+//  - line (number)
+//  - col (number)
+//  - length (number)
+//  - line_trace (string) OR trace_str (string)
+//  - linestrv (plain object mapping line numbers -> string)
+//
+// This function is defensive: if fields are missing or the arg isn't an object, it will
+// fall back to the provided defaultLoc.
+static TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc) {
+    if (!std::holds_alternative<ObjectPtr>(v)) return defaultLoc;
+    ObjectPtr o = std::get<ObjectPtr>(v);
+    if (!o) return defaultLoc;
+
+    TokenLocation loc = defaultLoc;
+
+    auto get_string = [&](const std::string& key) -> std::optional<std::string> {
+        auto it = o->properties.find(key);
+        if (it == o->properties.end()) return std::nullopt;
+        const Value& vv = it->second.value;
+        if (std::holds_alternative<std::string>(vv)) return std::get<std::string>(vv);
+        return std::nullopt;
+    };
+    auto get_number = [&](const std::string& key) -> std::optional<int> {
+        auto it = o->properties.find(key);
+        if (it == o->properties.end()) return std::nullopt;
+        const Value& vv = it->second.value;
+        if (std::holds_alternative<double>(vv)) return static_cast<int>(std::llround(std::get<double>(vv)));
+        return std::nullopt;
+    };
+
+    if (auto s = get_string("filename")) loc.filename = *s;
+    else if (auto s2 = get_string("file")) loc.filename = *s2;
+
+    if (auto n = get_number("line")) loc.line = *n;
+    if (auto n = get_number("col")) loc.col = *n;
+    if (auto n = get_number("length")) loc.length = *n;
+
+    // line trace / trace string
+    if (auto t = get_string("line_trace")) loc.line_trace = *t;
+    else if (auto t2 = get_string("trace_str")) loc.line_trace = *t2;
+    else if (auto t3 = get_string("trace")) loc.line_trace = *t3;
+
+    // linestrv (map) -- optional; if present and an object, convert its string keys to ints
+    auto it_lines = o->properties.find("linestrv");
+    if (it_lines != o->properties.end() && std::holds_alternative<ObjectPtr>(it_lines->second.value)) {
+        ObjectPtr mobj = std::get<ObjectPtr>(it_lines->second.value);
+        std::map<int, std::string> mp;
+        for (auto &kv : mobj->properties) {
+            // kv.first is the key (string) -> try to parse as integer
+            try {
+                int ln = std::stoi(kv.first);
+                const Value& valv = kv.second.value;
+                if (std::holds_alternative<std::string>(valv)) {
+                    mp[ln] = std::get<std::string>(valv);
+                } else {
+                    // fallback: stringify non-strings (limited)
+                    if (std::holds_alternative<double>(valv)) mp[ln] = std::to_string(std::get<double>(valv));
+                    else if (std::holds_alternative<bool>(valv)) mp[ln] = std::get<bool>(valv) ? "true" : "false";
+                }
+            } catch (...) {
+                // ignore non-integer keys
+            }
+        }
+        if (!mp.empty()) loc.set_map_linestr(mp);
+    }
+
+    return loc;
+}
 
 static Value builtin_ainaya(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if (args.empty()) {
@@ -120,7 +194,7 @@ static Value builtin_object_entry(const std::vector<Value>& args, EnvPtr env, co
 
 static Value built_object_freeze(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])){
-      throw std::runtime_error("You should pass an object in Object.freeze(obj) as an argument at " + tok.loc.to_string());
+      throw SwaziError("TypeError", "You should pass an object in Object.freeze(obj) as an argument", tok.loc);
     }
     
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
@@ -323,15 +397,51 @@ static Value builtin_lcm(const std::vector<Value>& args, EnvPtr env, const Token
     return static_cast<double>(l);
 }
 
+// Modified builtin_throw to support three formats:
+// 1) throw("message") -> throws std::runtime_error with message and call-site loc appended.
+// 2) throw("Type", "message") -> throws std::runtime_error with "Type: message" and call-site loc appended.
+// 3) throw("Type", "message", locObj) -> constructs a TokenLocation from locObj and throws SwaziError(Type, message, locObjConverted).
 static Value builtin_throw(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    std::string msg = args.empty() ? "Error" : value_to_string(args[0]);
-    throw std::runtime_error(msg);
+    // default type and message
+    std::string type = "Error";
+    std::string msg = "Error";
+
+    if (args.empty()) {
+        // no args: use default message and include call token location in the runtime_error text
+        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
+        throw std::runtime_error(out);
+    }
+
+    // One argument: treat as message
+    if (args.size() == 1) {
+        msg = value_to_string(args[0]);
+        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
+        throw std::runtime_error(out);
+    }
+
+    // Two arguments: first is type, second is message
+    if (args.size() == 2) {
+        type = value_to_string(args[0]);
+        msg = value_to_string(args[1]);
+        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
+        throw std::runtime_error(out);
+    }
+
+    // Three or more: first type, second message, third is location object to build TokenLocation
+    type = value_to_string(args[0]);
+    msg = value_to_string(args[1]);
+    const Value& locVal = args[2];
+
+    TokenLocation userLoc = build_location_from_value(locVal, tok.loc);
+    // Use SwaziError when explicit location is provided
+    throw SwaziError(type, msg, userLoc);
 }
 static Value builtin_thibitisha(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     bool ok = args.empty() ? false : value_to_bool(args[0]);
     if (!ok) {
         std::string msg = args.size() > 1 ? value_to_string(args[1]) : std::string("Assertion failed");
-        throw std::runtime_error(msg);
+        // Use call-site location for assertions
+        throw SwaziError("AssertionError", msg, tok.loc);
     }
     return Value();
 }
@@ -344,7 +454,7 @@ static Value builtin_toka(const std::vector<Value>& args, EnvPtr env, const Toke
 }
 static Value builtin_cerr(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if(args.empty()) {
-      throw std::runtime_error("cerr should have an error message as an argument, you passed no argument");
+      throw SwaziError("RuntimeError", "cerr should have an error message as an argument, you passed no argument", tok.loc);
     }
     std::string msg = Evaluator::cerr_colored(value_to_string(args[0]));
     std::cerr << msg << "\n";
@@ -352,7 +462,7 @@ static Value builtin_cerr(const std::vector<Value>& args, EnvPtr env, const Toke
 }
 
 // --------------------
-// Ordered map factory: Object.map([plainObject])
+// Ordered map factory: Object.ordered([plainObject])
 // --------------------
 // Add this after builtin_object_entry in this file.
 static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
@@ -364,13 +474,13 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
         if (std::holds_alternative<double>(v)) {
             double d = std::get<double>(v);
-            if (!std::isfinite(d)) throw std::runtime_error("Invalid number for property key");
+            if (!std::isfinite(d)) throw SwaziError("TypeError", "Invalid number for property key", TokenLocation{"<builtin>", 0, 0, 0});
             double floor_d = std::floor(d);
             if (d == floor_d) return std::to_string(static_cast<long long>(d));
             return std::to_string(d);
         }
         if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
-        throw std::runtime_error("Cannot convert value to property key");
+        throw SwaziError("TypeError", "Cannot convert value to property key", TokenLocation{"<builtin>", 0, 0, 0});
     };
 
     // If caller provided a plain object as first argument, copy its properties into store
@@ -398,7 +508,7 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
     // set(key, value)
     {
         auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
-            if (a.empty()) throw std::runtime_error("map.set needs (key, value) at " + callTok.loc.to_string());
+            if (a.empty()) throw SwaziError("TypeError", "map.set needs (key, value)", callTok.loc);
             std::string k = key_to_string(a[0]);
             Value val = (a.size() >= 2) ? a[1] : std::monostate{};
             for (auto& p : *store) {
@@ -421,7 +531,7 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
     // get(key)
     {
         auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
-            if (a.empty()) throw std::runtime_error("map.get needs (key) at " + callTok.loc.to_string());
+            if (a.empty()) throw SwaziError("TypeError", "map.get needs (key)", callTok.loc);
             std::string k = key_to_string(a[0]);
             for (auto& p : *store)
                 if (p.first == k) return p.second;
@@ -438,7 +548,7 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
     // has(key)
     {
         auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
-            if (a.empty()) throw std::runtime_error("map.has needs (key) at " + callTok.loc.to_string());
+            if (a.empty()) throw SwaziError("TypeError", "map.has needs (key)", callTok.loc);
             std::string k = key_to_string(a[0]);
             for (auto& p : *store)
                 if (p.first == k) return true;
@@ -455,7 +565,7 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
     // delete(key) -> bool
     {
         auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
-            if (a.empty()) throw std::runtime_error("map.delete needs (key) at " + callTok.loc.to_string());
+            if (a.empty()) throw SwaziError("TypeError", "map.delete needs (key)", callTok.loc);
             std::string k = key_to_string(a[0]);
             for (size_t i = 0; i < store->size(); ++i) {
                 if ((*store)[i].first == k) {

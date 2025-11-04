@@ -10,8 +10,10 @@
 #include <string>
 #include <vector>
 
+#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
 #include "muda_time_utils.hpp"
+#include "token.hpp"  // for TokenLocation
 
 // NOTE: This file implements the Muda runtime class and native helpers.
 // The design goal:
@@ -84,11 +86,11 @@ static ObjectPtr instantiate_muda_from_class(ClassPtr cls, double ms, EnvPtr env
 
 // Helper to extract __ms__ from a Muda instance (arg position or this)
 static double recv_ms_from_args(const std::vector<Value>& args, size_t idx, const Token& tok) {
-    if (idx >= args.size()) throw std::runtime_error("Missing argument at " + tok.loc.to_string());
-    if (!std::holds_alternative<ObjectPtr>(args[idx])) throw std::runtime_error("Expected Muda object at " + tok.loc.to_string());
+    if (idx >= args.size()) throw SwaziError("RuntimeError", "Missing argument", tok.loc);
+    if (!std::holds_alternative<ObjectPtr>(args[idx])) throw SwaziError("TypeError", "Expected Muda object", tok.loc);
     ObjectPtr o = std::get<ObjectPtr>(args[idx]);
     auto it = o->properties.find("__ms__");
-    if (it == o->properties.end() || !std::holds_alternative<double>(it->second.value)) throw std::runtime_error("Muda object missing __ms__");
+    if (it == o->properties.end() || !std::holds_alternative<double>(it->second.value)) throw SwaziError("MudaError", "Muda object missing __ms__", tok.loc);
     return std::get<double>(it->second.value);
 }
 
@@ -179,9 +181,9 @@ static Value native_muda_ms(const std::vector<Value>& args, EnvPtr, const Token&
     return ms;
 }
 static Value native_muda_fmt(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw std::runtime_error("fmt requires format string");
+    if (args.size() < 2) throw SwaziError("RuntimeError", "fmt requires format string", tok.loc);
     double ms = recv_ms_from_args(args, 0, tok);
-    if (!std::holds_alternative<std::string>(args[1])) throw std::runtime_error("fmt expects string format");
+    if (!std::holds_alternative<std::string>(args[1])) throw SwaziError("TypeError", "fmt expects string format", tok.loc);
     std::string fmt = std::get<std::string>(args[1]);
     std::string zone = "UTC";
     if (args.size() >= 3 && std::holds_alternative<std::string>(args[2])) zone = std::get<std::string>(args[2]);
@@ -214,25 +216,25 @@ static Value native_muda_object(const std::vector<Value>& args, EnvPtr, const To
     return obj;
 }
 static Value native_muda_eq(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw std::runtime_error("eq requires one argument");
+    if (args.size() < 2) throw SwaziError("RuntimeError", "eq requires one argument", tok.loc);
     double a = recv_ms_from_args(args, 0, tok);
     double b = recv_ms_from_args(args, 1, tok);
     return a == b;
 }
 static Value native_muda_gt(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw std::runtime_error("gt requires one argument");
+    if (args.size() < 2) throw SwaziError("RuntimeError", "gt requires one argument", tok.loc);
     double a = recv_ms_from_args(args, 0, tok);
     double b = recv_ms_from_args(args, 1, tok);
     return a > b;
 }
 static Value native_muda_lt(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw std::runtime_error("lt requires one argument");
+    if (args.size() < 2) throw SwaziError("RuntimeError", "lt requires one argument", tok.loc);
     double a = recv_ms_from_args(args, 0, tok);
     double b = recv_ms_from_args(args, 1, tok);
     return a < b;
 }
 static Value native_muda_diff(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw std::runtime_error("diff requires two arguments");
+    if (args.size() < 2) throw SwaziError("RuntimeError", "diff requires two arguments", tok.loc);
     double a = recv_ms_from_args(args, 0, tok);
     double b = recv_ms_from_args(args, 1, tok);
     if (args.size() >= 3 && std::holds_alternative<std::string>(args[2])) {
@@ -248,17 +250,21 @@ static Value native_muda_diff(const std::vector<Value>& args, EnvPtr, const Toke
 
 // add/sub (produce new instance)
 static Value native_muda_ongeza(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    if (args.size() < 3) throw std::runtime_error("ongeza expects (this, unit, amount)");
+    if (args.size() < 3) throw SwaziError("RuntimeError", "ongeza expects (this, unit, amount)", tok.loc);
     double orig = recv_ms_from_args(args, 0, tok);
-    if (!std::holds_alternative<std::string>(args[1])) throw std::runtime_error("unit must be string");
+    if (!std::holds_alternative<std::string>(args[1])) throw SwaziError("TypeError", "unit must be string", tok.loc);
     std::string unit = std::get<std::string>(args[1]);
     double amt = 0.0;
     if (std::holds_alternative<double>(args[2]))
         amt = std::get<double>(args[2]);
-    else if (std::holds_alternative<std::string>(args[2]))
-        amt = std::stod(std::get<std::string>(args[2]));
-    else
-        throw std::runtime_error("amount must be numeric");
+    else if (std::holds_alternative<std::string>(args[2])) {
+        try {
+            amt = std::stod(std::get<std::string>(args[2]));
+        } catch (...) {
+            throw SwaziError("TypeError", "amount must be numeric", tok.loc);
+        }
+    } else
+        throw SwaziError("TypeError", "amount must be numeric", tok.loc);
 
     double new_ms = orig;
     if (unit == "sekunde" || unit == "s")
@@ -298,7 +304,7 @@ static Value native_muda_ongeza(const std::vector<Value>& args, EnvPtr env, cons
 #endif
         new_ms = static_cast<double>(static_cast<long long>(tt) * 1000LL);
     } else {
-        throw std::runtime_error("Unknown unit for ongeza: " + unit);
+        throw SwaziError("RuntimeError", "Unknown unit for ongeza: " + unit, tok.loc);
     }
 
     EnvPtr walk = env;
@@ -311,25 +317,29 @@ static Value native_muda_ongeza(const std::vector<Value>& args, EnvPtr env, cons
         }
         walk = walk->parent;
     }
-    if (!cls) throw std::runtime_error("Muda class not found when creating new instance");
+    if (!cls) throw SwaziError("MudaError", "Muda class not found when creating new instance", tok.loc);
 
     return instantiate_muda_from_class(cls, new_ms, env);
 }
 
 static Value native_muda_punguza(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    if (args.size() < 3) throw std::runtime_error("punguza expects (this, unit, amount)");
+    if (args.size() < 3) throw SwaziError("RuntimeError", "punguza expects (this, unit, amount)", tok.loc);
     std::vector<Value> n = args;
     if (std::holds_alternative<double>(n[2]))
         n[2] = std::get<double>(n[2]) * -1.0;
-    else if (std::holds_alternative<std::string>(n[2]))
-        n[2] = std::string(std::to_string(-std::stod(std::get<std::string>(n[2]))));
-    else
-        throw std::runtime_error("amount must be numeric");
+    else if (std::holds_alternative<std::string>(n[2])) {
+        try {
+            n[2] = std::string(std::to_string(-std::stod(std::get<std::string>(n[2]))));
+        } catch (...) {
+            throw SwaziError("TypeError", "amount must be numeric", tok.loc);
+        }
+    } else
+        throw SwaziError("TypeError", "amount must be numeric", tok.loc);
     return native_muda_ongeza(n, env, tok);
 }
 
 // Low-level function-style helper Muda(...)
-static Value native_Muda_lowlevel(const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*tok*/) {
+static Value native_Muda_lowlevel(const std::vector<Value>& args, EnvPtr /*env*/, const Token& tok) {
     double now_ms = epoch_ms_now();
     if (args.empty()) return now_ms;
 
@@ -357,9 +367,9 @@ static Value native_Muda_lowlevel(const std::vector<Value>& args, EnvPtr /*env*/
             }
             return parsed_ms;
         }
-        return parse_iso_like_local(s);
+        return parse_iso_like_local(s, tok);
     }
-    throw std::runtime_error("Invalid arguments to Muda()");
+    throw SwaziError("RuntimeError", "Invalid arguments to Muda()", tok.loc);
 }
 
 // Constructor native: accepts many signatures
@@ -409,24 +419,24 @@ static Value native_Muda_ctor(const std::vector<Value>& args, EnvPtr /*env*/, co
     if (std::holds_alternative<std::string>(args[0])) {
         std::string s = std::get<std::string>(args[0]);
         if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) {
-            return parse_date_string_with_format_local(s, std::get<std::string>(args[1]));
+            return parse_date_string_with_format_local(s, std::get<std::string>(args[1]), tok);
         }
-        return parse_iso_like_local(s);
+        return parse_iso_like_local(s, tok);
     }
-    throw std::runtime_error("Invalid constructor arguments for Muda at " + tok.loc.to_string());
+    throw SwaziError("RuntimeError", "Invalid constructor arguments for Muda", tok.loc);
 }
 
 // setiMuda(this, field, value)
 static Value native_muda_seti(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    if (args.size() < 3) throw std::runtime_error("setiMuda expects (this, field, value)");
-    if (!std::holds_alternative<ObjectPtr>(args[0])) throw std::runtime_error("setiMuda: first arg must be Muda object");
+    if (args.size() < 3) throw SwaziError("RuntimeError", "setiMuda expects (this, field, value)", tok.loc);
+    if (!std::holds_alternative<ObjectPtr>(args[0])) throw SwaziError("TypeError", "setiMuda: first arg must be Muda object", tok.loc);
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
     auto it = obj->properties.find("__ms__");
-    if (it == obj->properties.end() || !std::holds_alternative<double>(it->second.value)) throw std::runtime_error("Muda object missing __ms__");
+    if (it == obj->properties.end() || !std::holds_alternative<double>(it->second.value)) throw SwaziError("MudaError", "Muda object missing __ms__", tok.loc);
     double ms = std::get<double>(it->second.value);
     std::tm tm = tm_from_ms(ms);
 
-    if (!std::holds_alternative<std::string>(args[1])) throw std::runtime_error("setiMuda field must be string");
+    if (!std::holds_alternative<std::string>(args[1])) throw SwaziError("TypeError", "setiMuda field must be string", tok.loc);
     std::string field = std::get<std::string>(args[1]);
 
     if (field == "saa") {
@@ -448,7 +458,7 @@ static Value native_muda_seti(const std::vector<Value>& args, EnvPtr env, const 
         int v = static_cast<int>(std::llround(std::holds_alternative<double>(args[2]) ? std::get<double>(args[2]) : 1900.0));
         tm.tm_year = v - 1900;
     } else if (field == "ms") {
-        double v = value_to_ms_or_throw(args[2]);
+        double v = value_to_ms_or_throw(args[2], tok);
         EnvPtr walk = env;
         ClassPtr cls = nullptr;
         while (walk) {
@@ -459,10 +469,10 @@ static Value native_muda_seti(const std::vector<Value>& args, EnvPtr env, const 
             }
             walk = walk->parent;
         }
-        if (!cls) throw std::runtime_error("Muda class not found when creating new instance");
+        if (!cls) throw SwaziError("MudaError", "Muda class not found when creating new instance", tok.loc);
         return instantiate_muda_from_class(cls, v, env);
     } else {
-        throw std::runtime_error("Unsupported setiMuda field: " + field);
+        throw SwaziError("RuntimeError", "Unsupported setiMuda field: " + field, tok.loc);
     }
 
 #if defined(_WIN32)
@@ -482,7 +492,7 @@ static Value native_muda_seti(const std::vector<Value>& args, EnvPtr env, const 
         }
         walk = walk->parent;
     }
-    if (!cls) throw std::runtime_error("Muda class not found when creating new instance");
+    if (!cls) throw SwaziError("MudaError", "Muda class not found when creating new instance", tok.loc);
 
     return instantiate_muda_from_class(cls, new_ms, env);
 }

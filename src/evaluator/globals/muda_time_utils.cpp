@@ -1,3 +1,5 @@
+#include "token.hpp"
+#include "SwaziError.hpp"
 #include "muda_time_utils.hpp"
 #include <sstream>
 #include <stdexcept>
@@ -11,7 +13,7 @@
 using namespace std;
 
 // A few permissive ISO-like parses: epoch (digits), YYYY-MM-DD[ H:MM[:SS]]
-double parse_iso_like_local(const std::string &s) {
+double parse_iso_like_local(const std::string &s, Token token) {
     // numeric epoch ms?
     bool allDigits = !s.empty() && (std::all_of(s.begin(), s.end(), [](char c){
         return std::isdigit((unsigned char)c) || c=='+' || c=='-' || c=='.';
@@ -66,11 +68,11 @@ double parse_iso_like_local(const std::string &s) {
 #endif
         return static_cast<double>(static_cast<long long>(tt) * 1000LL);
     }
-    throw std::runtime_error(std::string("Unrecognized date string: ") + s);
+    throw SwaziError("RuntimeError", std::string("Unrecognized date string: ") + s, token.loc);
 }
 
 // parse with user-provided format through strptime (POSIX) or std::get_time on Windows
-double parse_date_string_with_format_local(const std::string &input, const std::string &userFmt) {
+double parse_date_string_with_format_local(const std::string &input, const std::string &userFmt, Token token) {
     // map user tokens to strptime tokens, simple mapping
     auto convert_user_fmt_to_strptime = [](const std::string &fmt)->std::string {
         std::string out = fmt;
@@ -101,7 +103,7 @@ double parse_date_string_with_format_local(const std::string &input, const std::
     // POSIX: use strptime which is widely available on Linux/Android
     char *res = strptime(input.c_str(), fmt.c_str(), &tm);
     if (!res) {
-        throw std::runtime_error(std::string("Failed to parse date '") + input + "' with format '" + userFmt + "'");
+        throw SwaziError("RuntimeError", std::string("Failed to parse date '") + input + "' with format '" + userFmt + "'", token.loc);
     }
     // convert to epoch ms (UTC)
 #if defined(_WIN32)
@@ -115,7 +117,7 @@ double parse_date_string_with_format_local(const std::string &input, const std::
     std::istringstream iss(input);
     iss >> std::get_time(&tm, fmt.c_str());
     if (iss.fail()) {
-        throw std::runtime_error(std::string("Failed to parse date '") + input + "' with format '" + userFmt + "'");
+        throw SwaziError("RuntimeError", std::string("Failed to parse date '") + input + "' with format '" + userFmt + "'", token.loc);
     }
 #if defined(_WIN32)
     time_t tt = _mkgmtime(&tm);
@@ -127,7 +129,7 @@ double parse_date_string_with_format_local(const std::string &input, const std::
 }
 
 // Convert a Value to epoch milliseconds (accepts number or parsable string)
-double value_to_ms_or_throw(const Value& v) {
+double value_to_ms_or_throw(const Value& v, Token token) {
     if (std::holds_alternative<double>(v)) return std::get<double>(v);
     if (std::holds_alternative<std::string>(v)) {
         const std::string &s = std::get<std::string>(v);
@@ -137,7 +139,7 @@ double value_to_ms_or_throw(const Value& v) {
             return static_cast<double>(val);
         } catch (...) {}
         // if not numeric, try permissive ISO-like parse
-        return parse_iso_like_local(s);
+        return parse_iso_like_local(s, token);
     }
-    throw std::runtime_error("Expected numeric epoch ms or parsable date string");
+    throw SwaziError("RuntimeError", "Expected numeric epoch ms or parsable date string", token.loc);
 }
