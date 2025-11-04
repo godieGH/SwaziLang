@@ -3,6 +3,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "SwaziError.hpp"
 #include "parser.hpp"
 
 // ---------- helper: parse block ----------
@@ -98,8 +99,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
             expect(TokenType::IDENTIFIER, "Expected class name after '~' for destructor");
             Token nameTok = tokens[position - 1];
             if (nameTok.value != className) {
-                throw std::runtime_error("Parse error at " + nameTok.loc.to_string() +
-                    ": Destructor name must match class name '" + className + "'" + "\n --> Traced at: \n" + nameTok.loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Destructor name must match class name '" + className + "'.", nameTok.loc);
             }
 
             auto method = parse_class_method(is_private, is_static, is_locked, className,

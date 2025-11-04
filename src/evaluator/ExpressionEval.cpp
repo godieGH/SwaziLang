@@ -6,8 +6,8 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
+#include "SwaziError.hpp"
 #include "evaluator.hpp"
 
 Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
@@ -68,8 +68,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     throw SwaziError(
                         "SyntaxError",
                         "Spread element is missing an argument.",
-                        spread->token.loc
-                    );
+                        spread->token.loc);
                 }
                 Value v = evaluate_expression(spread->argument.get(), env);
 
@@ -86,8 +85,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     throw SwaziError(
                         "TypeError",
                         "Spread operator in array expects an array value.",
-                        spread->token.loc
-                    );
+                        spread->token.loc);
                 }
                 continue;
             }
@@ -143,8 +141,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     throw SwaziError(
                         "TypeError",
                         "Spread operator expects an object, but received a " + type_name(val) + " type",
-                        p->token.loc
-                    );
+                        p->token.loc);
                 }
 
                 ObjectPtr src = std::get<ObjectPtr>(val);
@@ -160,23 +157,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             std::string keyStr;
             if (p->computed) {
                 if (!p->key) {
-    throw SwaziError(
-        "SyntaxError",
-        "Computed property is missing a key expression.",
-        p->token.loc
-    );
-}
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Computed property is missing a key expression.",
+                        p->token.loc);
+                }
                 keyStr = to_string_value(evaluate_expression(p->key.get(), env));
             } else if (!p->key_name.empty()) {
                 keyStr = p->key_name;
             } else if (p->key) {
                 keyStr = to_string_value(evaluate_expression(p->key.get(), env));
             } else {
-              throw SwaziError(
-                  "SyntaxError",
-                  "Object property declared without a key.",
-                  p->token.loc
-              );
+                throw SwaziError(
+                    "SyntaxError",
+                    "Object property declared without a key.",
+                    p->token.loc);
             }
 
             // Build property value
@@ -227,25 +222,23 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto b = dynamic_cast<BooleanLiteralNode*>(expr)) return Value{
         b->value};
 
-if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
-    if (!env) {
-        throw SwaziError(
-            "ReferenceError",
-            "Cannot resolve identifier '" + id->name + "' — no environment found.",
-            id->token.loc
-        );
-    }
+    if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
+        if (!env) {
+            throw SwaziError(
+                "ReferenceError",
+                "Cannot resolve identifier '" + id->name + "' — no environment found.",
+                id->token.loc);
+        }
 
-    if (!env->has(id->name)) {
-        throw SwaziError(
-            "ReferenceError",
-            "Undefined identifier '" + id->name + "'.",
-            id->token.loc
-        );
-    }
+        if (!env->has(id->name)) {
+            throw SwaziError(
+                "ReferenceError",
+                "Undefined identifier '" + id->name + "'.",
+                id->token.loc);
+        }
 
-    return env->get(id->name).value;
-}
+        return env->get(id->name).value;
+    }
     // handle the $ / this node
     if (auto self = dynamic_cast<ThisExpressionNode*>(expr)) {
         // defensive checks similar to IdentifierNode handling
@@ -253,8 +246,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             throw SwaziError(
                 "ReferenceError",
                 "Cannot resolve '$' — no environment found for 'this'.",
-                self->token.loc
-            );
+                self->token.loc);
         }
         if (env->has("$")) {
             return env->get("$").value;
@@ -262,8 +254,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         throw SwaziError(
             "ReferenceError",
             "Undefined 'this/self' ('$') — must be called within a valid class instance or a regular plain object.",
-            self->token.loc
-        );
+            self->token.loc);
     }
 
     // Member access: object.property (e.g., arr.idadi, arr.ongeza, str.herufi)
@@ -277,12 +268,12 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         if (std::holds_alternative<ClassPtr>(objVal)) {
             ClassPtr cls = std::get<ClassPtr>(objVal);
             if (!cls) return std::monostate{};
-        
+
             // Walk the class -> super chain to find the first matching static property.
             ClassPtr walkCls = cls;
             const PropertyDescriptor* foundDesc = nullptr;
             ObjectPtr holder = nullptr;  // the static_table that actually holds the property
-        
+
             while (walkCls) {
                 if (walkCls->static_table) {
                     auto it = walkCls->static_table->properties.find(mem->property);
@@ -294,11 +285,11 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                 }
                 walkCls = walkCls->super;
             }
-        
+
             if (!foundDesc) return std::monostate{};  // not found anywhere in chain
-        
+
             const PropertyDescriptor& desc = *foundDesc;
-        
+
             // private static -> allowed only when access is internal (use holder for check)
             if (desc.is_private && !is_private_access_allowed(holder, env)) {
                 throw std::runtime_error(
@@ -306,17 +297,16 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     "\nCannot access private static property '" + mem->property + "' from outside the declaring class/object." +
                     "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
             }
-        
+
             // Getter semantics: call getter if readonly and stored function
             if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
                 FunctionPtr getter = std::get<FunctionPtr>(desc.value);
                 return call_function(getter, {}, desc.token);
             }
-        
+
             // Normal return of the value (from the class where it was found)
             return desc.value;
         }
-
 
         // --- Universal properties ---
         const std::string& prop = mem->property;
@@ -368,44 +358,44 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         if (std::holds_alternative<std::string>(objVal)) {
             const std::string s_val = std::get<std::string>(objVal);
             const std::string& prop = mem->property;
-        
+
             // helper to create native function values (captures s_val and this)
             auto make_fn = [this, s_val, env, mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
                 auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     return impl(args, callEnv, token);
                 };
                 auto fn = std::make_shared<FunctionValue>(std::string("native:string.") + mem->property, native_impl, env, mem->token);
-                return Value{ fn };
+                return Value{fn};
             };
-        
+
             // herufiNdogo() -> toLowerCase
             if (prop == "herufiNdogo" || prop == "toLower") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     std::string out = s_val;
                     for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    return Value{ out };
+                    return Value{out};
                 });
             }
-        
+
             // herufiKubwa() -> toUpperCase
             if (prop == "herufiKubwa" || prop == "toUpper") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     std::string out = s_val;
                     for (auto& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                    return Value{ out };
+                    return Value{out};
                 });
             }
-        
+
             // sawazisha() -> trim()
             if (prop == "sawazisha" || prop == "trim") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     size_t a = 0, b = s_val.size();
                     while (a < b && std::isspace(static_cast<unsigned char>(s_val[a]))) ++a;
                     while (b > a && std::isspace(static_cast<unsigned char>(s_val[b - 1]))) --b;
-                    return Value{ s_val.substr(a, b - a) };
+                    return Value{s_val.substr(a, b - a)};
                 });
             }
-        
+
             // anzaNa(prefix) -> startsWith
             if (prop == "huanzaNa" || prop == "startsWith") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -415,11 +405,11 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nstr.anzaNa requires 1 argument (prefix)." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string pref = to_string_value(args[0]);
-                    if (pref.size() > s_val.size()) return Value{ false };
-                    return Value{ s_val.rfind(pref, 0) == 0 };
+                    if (pref.size() > s_val.size()) return Value{false};
+                    return Value{s_val.rfind(pref, 0) == 0};
                 });
             }
-        
+
             // ishaNa(suffix) -> endsWith
             if (prop == "huishaNa" || prop == "endsWith") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -429,11 +419,11 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nstr.ishaNa requires 1 argument (suffix)." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string suf = to_string_value(args[0]);
-                    if (suf.size() > s_val.size()) return Value{ false };
-                    return Value{ s_val.compare(s_val.size() - suf.size(), suf.size(), suf) == 0 };
+                    if (suf.size() > s_val.size()) return Value{false};
+                    return Value{s_val.compare(s_val.size() - suf.size(), suf.size(), suf) == 0};
                 });
             }
-        
+
             // kuna(sub) -> includes
             if (prop == "kuna" || prop == "includes") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -443,10 +433,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nstr.kuna requires 1 argument (substring)." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string sub = to_string_value(args[0]);
-                    return Value{ s_val.find(sub) != std::string::npos };
+                    return Value{s_val.find(sub) != std::string::npos};
                 });
             }
-        
+
             // tafuta(sub, fromIndex?) -> indexOf
             if (prop == "tafuta") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -459,11 +449,11 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     size_t from = 0;
                     if (args.size() >= 2) from = static_cast<size_t>(std::max(0LL, static_cast<long long>(to_number(args[1], token))));
                     size_t pos = s_val.find(sub, from);
-                    if (pos == std::string::npos) return Value{ static_cast<double>(-1) };
-                    return Value{ static_cast<double>(pos) };
+                    if (pos == std::string::npos) return Value{static_cast<double>(-1)};
+                    return Value{static_cast<double>(pos)};
                 });
             }
-        
+
             // slesi(start?, end?) -> substring-like slice
             if (prop == "slesi" || prop == "substr") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -476,10 +466,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     if (end < 0) end = std::max(0LL, n + end);
                     start = std::min(std::max(0LL, start), n);
                     end = std::min(std::max(0LL, end), n);
-                    return Value{ s_val.substr((size_t)start, (size_t)(end - start)) };
+                    return Value{s_val.substr((size_t)start, (size_t)(end - start))};
                 });
             }
-        
+
             // badilisha(old, neu) -> replace first occurrence
             if (prop == "badilisha" || prop == "replace") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -493,10 +483,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     std::string out = s_val;
                     size_t pos = out.find(oldv);
                     if (pos != std::string::npos) out.replace(pos, oldv.size(), newv);
-                    return Value{ out };
+                    return Value{out};
                 });
             }
-        
+
             // badilishaZote(old, new) -> replace all occurrences
             if (prop == "badilishaZote" || prop == "replaceAll") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -507,7 +497,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string oldv = to_string_value(args[0]);
                     std::string newv = to_string_value(args[1]);
-                    if (oldv.empty()) return Value{ s_val };  // avoid infinite loop
+                    if (oldv.empty()) return Value{s_val};  // avoid infinite loop
                     std::string out;
                     size_t pos = 0, prev = 0;
                     while ((pos = s_val.find(oldv, prev)) != std::string::npos) {
@@ -516,10 +506,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         prev = pos + oldv.size();
                     }
                     out.append(s_val, prev, std::string::npos);
-                    return Value{ out };
+                    return Value{out};
                 });
             }
-        
+
             // orodhesha(separator?) -> split into ArrayPtr
             if (prop == "orodhesha" || prop == "split") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
@@ -531,23 +521,23 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     }
                     auto out = std::make_shared<ArrayValue>();
                     if (!useSep) {
-                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{ std::string(1, s_val[i]) });
-                        return Value{ out };
+                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{std::string(1, s_val[i])});
+                        return Value{out};
                     }
                     if (sep.empty()) {
-                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{ std::string(1, s_val[i]) });
-                        return Value{ out };
+                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{std::string(1, s_val[i])});
+                        return Value{out};
                     }
                     size_t pos = 0, prev = 0;
                     while ((pos = s_val.find(sep, prev)) != std::string::npos) {
-                        out->elements.push_back(Value{ s_val.substr(prev, pos - prev) });
+                        out->elements.push_back(Value{s_val.substr(prev, pos - prev)});
                         prev = pos + sep.size();
                     }
-                    out->elements.push_back(Value{ s_val.substr(prev) });
-                    return Value{ out };
+                    out->elements.push_back(Value{s_val.substr(prev)});
+                    return Value{out};
                 });
             }
-        
+
             // unganisha(other) -> concat and return new string
             if (prop == "unganisha" || prop == "concat") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -556,10 +546,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "TypeError at " + token.loc.to_string() +
                             "\nstr.unganisha requires at least 1 argument (string to concat)." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
-                    return Value{ s_val + to_string_value(args[0]) };
+                    return Value{s_val + to_string_value(args[0])};
                 });
             }
-        
+
             // rudia(n) -> repeat string n times
             if (prop == "rudia") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -569,14 +559,14 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nstr.rudia requires 1 argument (repeat count)." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     long long n = static_cast<long long>(to_number(args[0], token));
-                    if (n <= 0) return Value{ std::string() };
+                    if (n <= 0) return Value{std::string()};
                     std::string out;
                     out.reserve(s_val.size() * (size_t)n);
                     for (long long i = 0; i < n; ++i) out += s_val;
-                    return Value{ out };
+                    return Value{out};
                 });
             }
-        
+
             // herufiYa(index) -> charAt (single-char string or empty)
             if (prop == "herufiYa" || prop == "charAt") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -586,21 +576,20 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nstr.herufiYa requires 1 argument (index)." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     long long idx = static_cast<long long>(to_number(args[0], token));
-                    if (idx < 0 || (size_t)idx >= s_val.size()) return Value{ std::string() };
-                    return Value{ std::string(1, s_val[(size_t)idx]) };
+                    if (idx < 0 || (size_t)idx >= s_val.size()) return Value{std::string()};
+                    return Value{std::string(1, s_val[(size_t)idx])};
                 });
             }
-        
+
             // urefu() -> returns string length (same as .herufi property)
             if (prop == "urefu") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-                    return Value{ static_cast<double>(s_val.size()) };
+                    return Value{static_cast<double>(s_val.size())};
                 });
             }
-        
+
             // No matching string property -> fall through to unknown property error below
         }
-
 
         // --- Number methods & properties (place this after string methods, before array methods) ---
         if (std::holds_alternative<double>(objVal)) {
@@ -767,14 +756,14 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         // Array properties & methods
         if (std::holds_alternative<ArrayPtr>(objVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
-        
+
             // length property
             if (mem->property == "idadi") {
                 return Value{static_cast<double>(arr ? arr->elements.size() : 0)};
             }
-        
+
             const std::string& prop = mem->property;
-        
+
             // Recognized array method names
             if (prop == "join" || prop == "reduce" || prop == "filter" || prop == "map" ||
                 prop == "slice" || prop == "splice" || prop == "includes" || prop == "sort" ||
@@ -786,15 +775,14 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                 prop == "badili" || prop == "tafuta" || prop == "kuna" || prop == "panga" ||
                 prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" ||
                 prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach") {
-        
                 auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
-        
+
                     // urefu() -> returns array length (same as .idadi property)
                     if (prop == "urefu") {
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-        
+
                     // push: ongeza(value...)
                     if (prop == "ongeza" || prop == "push") {
                         if (args.empty())
@@ -805,7 +793,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements.insert(arr->elements.end(), args.begin(), args.end());
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-        
+
                     // pop (from end) : toa
                     if (prop == "toa" || prop == "pop") {
                         if (arr->elements.empty()) return std::monostate{};
@@ -813,7 +801,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements.pop_back();
                         return v;
                     }
-        
+
                     // remove by value: ondoa(value)
                     if (prop == "ondoa") {
                         if (args.empty()) {
@@ -831,7 +819,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{false};
                     }
-        
+
                     // remove all by value: ondoaZote(value)
                     if (prop == "ondoaZote" || prop == "removeAll") {
                         if (args.empty()) {
@@ -849,7 +837,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         size_t removed = before - arr->elements.size();
                         return Value{static_cast<double>(removed)};
                     }
-        
+
                     // shift: ondoaMwanzo
                     if (prop == "ondoaMwanzo" || prop == "shift") {
                         if (arr->elements.empty()) return std::monostate{};
@@ -857,7 +845,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements.erase(arr->elements.begin());
                         return v;
                     }
-        
+
                     // unshift: ongezaMwanzo(...)
                     if (prop == "ongezaMwanzo" || prop == "unshift") {
                         if (args.empty())
@@ -868,7 +856,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements.insert(arr->elements.begin(), args.begin(), args.end());
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-        
+
                     // insert(value, index)
                     if (prop == "ingiza" || prop == "insert") {
                         if (args.size() < 2)
@@ -883,13 +871,13 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements.insert(arr->elements.begin() + uidx, val);
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-        
+
                     // clear: futa()
                     if (prop == "futa") {
                         arr->elements.clear();
                         return std::monostate{};
                     }
-        
+
                     // extend: panua(otherArray)
                     if (prop == "panua" || prop == "extend") {
                         if (args.empty() || !std::holds_alternative<ArrayPtr>(args[0])) {
@@ -904,13 +892,13 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         if (other) out->elements.insert(out->elements.end(), other->elements.begin(), other->elements.end());
                         return Value{out};
                     }
-        
+
                     // reverse: geuza()
                     if (prop == "geuza" || prop == "reverse") {
                         std::reverse(arr->elements.begin(), arr->elements.end());
                         return Value{arr};
                     }
-        
+
                     // sort: panga([comparator])
                     if (prop == "panga" || prop == "sort") {
                         if (!args.empty() && !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -932,7 +920,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{arr};
                     }
-        
+
                     // indexOf: indexOf(value, start?) -> returns index or -1
                     if (prop == "indexOf" || prop == "indexYa") {
                         if (args.empty())
@@ -964,7 +952,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{static_cast<double>(-1)};
                     }
-        
+
                     // find: tafuta(fn)
                     if (prop == "tafuta") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -980,7 +968,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return std::monostate{};
                     }
-        
+
                     // findIndex: tafutaIndex(fn)
                     if (prop == "tafutaIndex") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -996,7 +984,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{static_cast<double>(-1)};
                     }
-        
+
                     // includes: kuna(value)
                     if (prop == "kuna" || prop == "includes") {
                         if (args.empty())
@@ -1004,10 +992,11 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                 "TypeError at " + token.loc.to_string() +
                                 "\narr.kuna requires 1 argument (value to check). Got 0 arguments." +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
-                        for (const auto& e : arr->elements) if (is_equal(e, args[0])) return Value{true};
+                        for (const auto& e : arr->elements)
+                            if (is_equal(e, args[0])) return Value{true};
                         return Value{false};
                     }
-        
+
                     // slice: slesi(start?, end?)
                     if (prop == "slesi" || prop == "slice") {
                         long long n = static_cast<long long>(arr->elements.size());
@@ -1023,7 +1012,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         for (long long i = start; i < end; ++i) out->elements.push_back(arr->elements[(size_t)i]);
                         return Value{out};
                     }
-        
+
                     // splice: pachika(start, deleteCount, ...items)
                     if (prop == "pachika" || prop == "splice") {
                         if (args.size() < 2) {
@@ -1043,7 +1032,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         if (args.size() > 2) arr->elements.insert(arr->elements.begin() + start, args.begin() + 2, args.end());
                         return Value{out};
                     }
-        
+
                     // map: badili(fn)
                     if (prop == "badili" || prop == "map") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -1060,7 +1049,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{out};
                     }
-        
+
                     // forEach : kwaKila(fn)
                     if (prop == "kwaKila" || prop == "forEach") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -1069,14 +1058,14 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                 "\narr.kwaKila requires a function argument. Syntax: arr.kwaKila(fn), fn(elem, index?, array?)" +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-        
+
                         FunctionPtr fn = std::get<FunctionPtr>(args[0]);
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
-                            call_function(fn, { arr->elements[i], Value{ static_cast<double>(i) }, Value{ arr } }, token);
+                            call_function(fn, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
                         }
                         return std::monostate{};
                     }
-        
+
                     // filter: chambua(fn)
                     if (prop == "chambua" || prop == "filter") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -1093,7 +1082,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{out};
                     }
-        
+
                     // reduce: punguza(fn, initial?)
                     if (prop == "punguza" || prop == "reduce") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
@@ -1122,7 +1111,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return acc;
                     }
-        
+
                     // join: unganisha(separator?)
                     if (prop == "unganisha" || prop == "join") {
                         std::string sep = ",";
@@ -1134,10 +1123,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value{oss.str()};
                     }
-        
+
                     return std::monostate{};
                 };
-        
+
                 auto fn = std::make_shared<FunctionValue>(std::string("native:array.") + prop, native_impl, env, mem->token);
                 return Value{fn};
             }
@@ -1146,7 +1135,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
             const std::string& prop = mem->property;
-        
+
             if (prop == "__proto__") {
                 auto obj = std::make_shared<ObjectValue>();
                 obj->properties["object_size"] = {Value(static_cast<double>(op ? op->properties.size() : 0)), false, false, true, Token()};
@@ -1177,7 +1166,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         desc.is_private = true;
                         return Value(bool(desc.is_private));
                     };
-        
+
                     auto set_private = std::make_shared<FunctionValue>("__proto__set_private", set_private__proto, env, Token{});
                     obj->properties["set_private"] = {
                         set_private,
@@ -1202,12 +1191,12 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                 "\nCannot set lock: object does not have a property named `" + to_string_value(args[0], true) + "`." +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-        
+
                         PropertyDescriptor& desc = it->second;
                         desc.is_locked = true;
                         return Value(bool(desc.is_locked));
                     };
-        
+
                     auto set_lock = std::make_shared<FunctionValue>("__proto__set_lock", set_lock__proto, env, Token{});
                     obj->properties["set_lock"] = {
                         set_lock,
@@ -1236,7 +1225,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                 "\nCannot delete property: object does not have a key named `" + to_string_value(args[0], true) + "`." +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-        
+
                         PropertyDescriptor& desc = it->second;
                         if (desc.is_private && !is_private_access_allowed(op, env)) {
                             throw std::runtime_error(
@@ -1250,16 +1239,16 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                 "\nCannot delete a locked member from outside the object." +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-        
+
                         auto itp = op->properties.find(name);
                         if (itp != op->properties.end()) {
                             op->properties.erase(itp);
                             return Value(bool(true));
                         }
-        
+
                         return Value(bool(false));
                     };
-        
+
                     auto delete_prop = std::make_shared<FunctionValue>("__proto__delete", delete__proto, env, Token{});
                     obj->properties["delete"] = {
                         delete_prop,
@@ -1277,7 +1266,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         op->is_frozen = freeze;
                         return Value(op->is_frozen);
                     };
-        
+
                     auto freeze = std::make_shared<FunctionValue>("__proto__freeze", freeze__proto, env, Token{});
                     obj->properties["freeze"] = {
                         freeze,
@@ -1301,7 +1290,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         }
                         return Value(bool(false));
                     };
-        
+
                     auto has = std::make_shared<FunctionValue>("__proto__has", has__proto, env, Token{});
                     obj->properties["has"] = {
                         has,
@@ -1314,7 +1303,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     auto is_frozen_fn = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
                         return Value(op->is_frozen);
                     };
-        
+
                     auto is_frozen = std::make_shared<FunctionValue>("__proto__is_frozen", is_frozen_fn, env, Token{});
                     obj->properties["is_frozen"] = {
                         is_frozen,
@@ -1332,20 +1321,19 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             "ReferenceError at " + mem->token.loc.to_string() +
             "\nUnknown property '" + mem->property + "' on value." +
             "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-
     }
 
     // Indexing: obj[index]
     if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
         // Evaluate receiver first.
         Value objVal = evaluate_expression(idx->object.get(), env);
-    
+
         // Optional chaining: if receiver is nullish and this is an optional index,
         // short-circuit and return undefined without evaluating the index expression.
         if (idx->is_optional && is_nullish(objVal)) {
             return std::monostate{};
         }
-    
+
         // Ensure index expression exists
         if (!idx->index) {
             throw std::runtime_error(
@@ -1353,22 +1341,22 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                 "\nIndex expression missing." +
                 "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
         }
-    
+
         // Now safe to evaluate the index expression.
         Value indexVal = evaluate_expression(idx->index.get(), env);
-    
+
         // Array indexing uses numeric interpretation of indexVal
         if (std::holds_alternative<ArrayPtr>(objVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
             if (!arr) return std::monostate{};
-    
+
             long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
             if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
                 return std::monostate{};
             }
             return arr->elements[(size_t)rawIndex];
         }
-    
+
         // String indexing: return single-char string (optional)
         if (std::holds_alternative<std::string>(objVal)) {
             std::string s = std::get<std::string>(objVal);
@@ -1378,7 +1366,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             }
             return Value{std::string(1, s[(size_t)rawIndex])};
         }
-    
+
         // Objects: use stringified index as key, go through unified getter (privacy/getter enforced)
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
@@ -1386,26 +1374,25 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             std::string key = to_string_value(indexVal);
             return get_object_property(op, key, env);
         }
-    
+
         throw std::runtime_error(
             "TypeError at " + idx->token.loc.to_string() +
             "\nAttempted to index a non-array/non-string/non-object value." +
             "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
     }
 
-
     if (auto u = dynamic_cast<UnaryExpressionNode*>(expr)) {
         Value operand = evaluate_expression(u->operand.get(), env);
-    
+
         if (u->op == "!" || u->op == "si") {
-            return Value{ !to_bool(operand) };
+            return Value{!to_bool(operand)};
         }
-    
+
         if (u->op == "-") {
             // ensure to_number receives token for accurate traced errors
-            return Value{ -to_number(operand, u->token) };
+            return Value{-to_number(operand, u->token)};
         }
-    
+
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
         if (u->op == "aina") {
             std::string t = "unknown";
@@ -1425,9 +1412,9 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                 t = "object";
             else if (std::holds_alternative<ClassPtr>(operand))
                 t = "muundo";
-            return Value{ t };
+            return Value{t};
         }
-    
+
         throw std::runtime_error(
             "SyntaxError at " + u->token.loc.to_string() +
             "\nUnknown unary operator '" + u->op + "'." +
@@ -1454,7 +1441,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                 "\nCannot assign to constant '" + leftIdent->name + "'." +
                                 "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                         }
-    
+
                         // IMPORTANT: avoid converting stored value to number until we know
                         // we're on the numeric path. For += we must first check string concat.
                         if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
@@ -1467,7 +1454,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             it->second.value = Value{newv};
                             return Value{newv};
                         }
-    
+
                         if (b->token.type == TokenType::PLUS_ASSIGN) {
                             Value rightVal = evaluate_expression(b->right.get(), env);
                             // string concat if either side is string
@@ -1484,7 +1471,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             it->second.value = Value{newv};
                             return Value{newv};
                         }
-    
+
                         // other compound ops: numeric-only
                         {
                             Value rightVal = evaluate_expression(b->right.get(), env);
@@ -1503,7 +1490,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     }
                     walk = walk->parent;
                 }
-    
+
                 // Not found in any parent -> create in current env (same behavior as assignment).
                 // For += with string RHS create a string, otherwise create numeric start value.
                 if (b->token.type == TokenType::PLUS_ASSIGN) {
@@ -1512,13 +1499,13 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     if (std::holds_alternative<std::string>(rightVal)) {
                         var.value = to_string_value(rightVal);
                     } else {
-                        var.value = Value{ to_number(rightVal, b->token) };
+                        var.value = Value{to_number(rightVal, b->token)};
                     }
                     var.is_constant = false;
                     env->set(leftIdent->name, var);
                     return var.value;
                 }
-    
+
                 // compute start value (treat missing as 0 for numeric ops)
                 double start = 0.0;
                 if (b->token.type == TokenType::INCREMENT)
@@ -1537,15 +1524,15 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                 var.value = start;
                 var.is_constant = false;
                 env->set(leftIdent->name, var);
-                return Value{ start };
+                return Value{start};
             }
-    
+
             // Case B: left is an index expression (arr[idx]++ or arr[idx] += ...)
             if (auto idx = dynamic_cast<IndexExpressionNode*>(b->left.get())) {
                 // Evaluate the object expression (this will return ArrayPtr or ObjectPtr)
                 Value objVal = evaluate_expression(idx->object.get(), env);
                 Value indexVal = evaluate_expression(idx->index.get(), env);
-    
+
                 // --- ARRAY PATH ---
                 if (std::holds_alternative<ArrayPtr>(objVal)) {
                     ArrayPtr arr = std::get<ArrayPtr>(objVal);
@@ -1555,7 +1542,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nCannot assign into null array." +
                             "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                     }
-    
+
                     long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
                     if (rawIndex < 0) {
                         throw std::runtime_error(
@@ -1565,7 +1552,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                     }
                     size_t uidx = static_cast<size_t>(rawIndex);
                     if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
-    
+
                     // Avoid converting element to number until numeric path chosen.
                     if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
                         double oldv = to_number(arr->elements[uidx], b->token);
@@ -1577,7 +1564,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements[uidx] = Value{newv};
                         return Value{newv};
                     }
-    
+
                     if (b->token.type == TokenType::PLUS_ASSIGN) {
                         Value rightVal = evaluate_expression(b->right.get(), env);
                         if (std::holds_alternative<std::string>(arr->elements[uidx]) ||
@@ -1592,7 +1579,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         arr->elements[uidx] = Value{newv};
                         return Value{newv};
                     }
-    
+
                     // other compound ops: numeric-only
                     {
                         Value rightVal = evaluate_expression(b->right.get(), env);
@@ -1609,7 +1596,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         return Value{newv};
                     }
                 }
-    
+
                 // --- OBJECT PATH (obj[key]++ / obj[key] += v / obj[key] *= v) ---
                 if (std::holds_alternative<ObjectPtr>(objVal)) {
                     ObjectPtr op = std::get<ObjectPtr>(objVal);
@@ -1619,12 +1606,12 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             "\nCannot operate on null object." +
                             "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                     }
-    
+
                     // convert indexVal -> property key string
                     std::string prop = to_string_value(indexVal);
-    
+
                     auto it = op->properties.find(prop);
-    
+
                     // If property exists, enforce privacy/read-only rules
                     if (it != op->properties.end()) {
                         if (it->second.is_private) {
@@ -1646,14 +1633,14 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                                     "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
                             }
                         }
-    
+
                         if (it->second.is_readonly) {
                             throw std::runtime_error(
                                 "TypeError at " + idx->token.loc.to_string() +
                                 "\nCannot assign to read-only property '" + prop + "'." +
                                 "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
                         }
-    
+
                         // Avoid converting to number until numeric path is chosen.
                         if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
                             double oldv = to_number(it->second.value, b->token);
@@ -1666,7 +1653,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             it->second.token = idx->token;
                             return Value{newv};
                         }
-    
+
                         if (b->token.type == TokenType::PLUS_ASSIGN) {
                             Value rightVal = evaluate_expression(b->right.get(), env);
                             if (std::holds_alternative<std::string>(it->second.value) ||
@@ -1683,7 +1670,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             it->second.token = idx->token;
                             return Value{newv};
                         }
-    
+
                         // other compound ops: numeric-only
                         {
                             Value rightVal = evaluate_expression(b->right.get(), env);
@@ -1701,7 +1688,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                             return Value{newv};
                         }
                     }
-    
+
                     // Property does not exist -> create public property:
                     // If += with string RHS create string property; otherwise create numeric property
                     if (b->token.type == TokenType::PLUS_ASSIGN) {
@@ -1710,7 +1697,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         if (std::holds_alternative<std::string>(rightVal)) {
                             desc.value = Value{to_string_value(rightVal)};
                         } else {
-                            desc.value = Value{ to_number(rightVal, b->token) };
+                            desc.value = Value{to_number(rightVal, b->token)};
                         }
                         desc.is_private = false;
                         desc.is_readonly = false;
@@ -1718,7 +1705,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         op->properties[prop] = std::move(desc);
                         return op->properties[prop].value;
                     }
-    
+
                     // Create numeric property starting from 0 and apply op
                     double oldv = 0.0;
                     double newv = oldv;
@@ -1735,16 +1722,16 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         double rv = to_number(rightVal, b->token);
                         newv = oldv + ((b->token.type == TokenType::MINUS_ASSIGN) ? -rv : rv);
                     }
-    
+
                     PropertyDescriptor desc;
-                    desc.value = Value{ newv };
+                    desc.value = Value{newv};
                     desc.is_private = false;
                     desc.is_readonly = false;
                     desc.token = idx->token;
                     op->properties[prop] = std::move(desc);
-                    return Value{ newv };
+                    return Value{newv};
                 }
-    
+
                 // Fallback: not array nor object
                 throw std::runtime_error(
                     "TypeError at " + b->token.loc.to_string() +
@@ -1755,7 +1742,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         // --- Normal binary evaluation path (short-circuit logicals returning operands) ---
         Value left = evaluate_expression(b->left.get(), env);
         const std::string& op = b->op;
-    
+
         // Logical AND: short-circuit; return operand (left or right) instead of boolean.
         if (op == "&&" || op == "na") {
             // If left is falsy -> return left (no RHS evaluation).
@@ -1763,7 +1750,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             // Otherwise evaluate RHS and return the RHS value (preserve identity).
             return evaluate_expression(b->right.get(), env);
         }
-    
+
         // Logical OR: short-circuit; return operand (left or right).
         if (op == "||" || op == "au") {
             // If left is truthy -> return left (no RHS evaluation).
@@ -1771,49 +1758,49 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             // Otherwise evaluate RHS and return it.
             return evaluate_expression(b->right.get(), env);
         }
-    
+
         // For all other binary operators evaluate RHS now (both operands required)
         Value right = evaluate_expression(b->right.get(), env);
-    
+
         if (op == "+") {
             // --- string concatenation if either is string ---
             if (std::holds_alternative<std::string>(left) || std::holds_alternative<std::string>(right)) {
-                return Value{ to_string_value(left) + to_string_value(right) };
+                return Value{to_string_value(left) + to_string_value(right)};
             }
-    
+
             // --- array concatenation if both are arrays ---
             if (std::holds_alternative<ArrayPtr>(left) && std::holds_alternative<ArrayPtr>(right)) {
                 ArrayPtr a1 = std::get<ArrayPtr>(left);
                 ArrayPtr a2 = std::get<ArrayPtr>(right);
-    
+
                 if (!a1 || !a2) {
                     throw std::runtime_error(
                         "TypeError at " + b->token.loc.to_string() +
                         "\nCannot concatenate null arrays." +
                         "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                 }
-    
+
                 auto result = std::make_shared<ArrayValue>();
                 result->elements.reserve(a1->elements.size() + a2->elements.size());
                 result->elements.insert(result->elements.end(), a1->elements.begin(), a1->elements.end());
                 result->elements.insert(result->elements.end(), a2->elements.begin(), a2->elements.end());
-    
-                return Value{ result };
+
+                return Value{result};
             }
-    
+
             // --- fallback numeric addition ---
-            return Value{ to_number(left, b->token) + to_number(right, b->token) };
+            return Value{to_number(left, b->token) + to_number(right, b->token)};
         }
-    
-        if (op == "-") return Value{ to_number(left, b->token) - to_number(right, b->token) };
-        if (op == "*") return Value{ to_number(left, b->token) * to_number(right, b->token) };
+
+        if (op == "-") return Value{to_number(left, b->token) - to_number(right, b->token)};
+        if (op == "*") return Value{to_number(left, b->token) * to_number(right, b->token)};
         if (op == "/") {
             double r = to_number(right, b->token);
             if (r == 0.0) throw std::runtime_error(
                 "MathError at " + b->token.loc.to_string() +
                 "\nDivision by zero." +
                 "\n --> Traced at:\n" + b->token.loc.get_line_trace());
-            return Value{ to_number(left, b->token) / r };
+            return Value{to_number(left, b->token) / r};
         }
         if (op == "%") {
             double r = to_number(right, b->token);
@@ -1821,10 +1808,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                 "MathError at " + b->token.loc.to_string() +
                 "\nModulo by zero." +
                 "\n --> Traced at:\n" + b->token.loc.get_line_trace());
-            return Value{ std::fmod(to_number(left, b->token), r) };
+            return Value{std::fmod(to_number(left, b->token), r)};
         }
-        if (op == "**") return Value{ std::pow(to_number(left, b->token), to_number(right, b->token)) };
-    
+        if (op == "**") return Value{std::pow(to_number(left, b->token), to_number(right, b->token))};
+
         if (op == "===") {
             return Value(to_bool(Value(is_strict_equal(left, right))));
         }
@@ -1832,17 +1819,17 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             return Value(!is_strict_equal(left, right));
         }
         if (op == "==" || op == "sawa") {
-            return Value{ is_equal(left, right) };
+            return Value{is_equal(left, right)};
         }
         if (op == "!=" || op == "sisawa") {
-            return Value{ !is_equal(left, right) };
+            return Value{!is_equal(left, right)};
         }
-    
+
         bool bothStrings = std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right);
         if (bothStrings) {
             const std::string& ls = std::get<std::string>(left);
             const std::string& rs = std::get<std::string>(right);
-    
+
             if (op == ">") return Value{ls > rs};
             if (op == "<") return Value{ls < rs};
             if (op == ">=") return Value{ls >= rs};
@@ -1851,13 +1838,13 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             // Numeric fallback (preserve existing behavior for mixed or non-string values).
             double ln = to_number(left, b->token);
             double rn = to_number(right, b->token);
-    
+
             if (op == ">") return Value{ln > rn};
             if (op == "<") return Value{ln < rn};
             if (op == ">=") return Value{ln >= rn};
             if (op == "<=") return Value{ln <= rn};
         }
-    
+
         throw std::runtime_error(
             "SyntaxError at " + b->token.loc.to_string() +
             "\nUnknown binary operator '" + op + "'." +
@@ -1879,9 +1866,8 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
                         throw std::runtime_error(
                             "SyntaxError at " + spread->token.loc.to_string() + "\n" +
                             "Missing expression after spread operator" +
-                            "\n --> Traced at:\n" + 
-                            spread->token.loc.get_line_trace()
-                        );
+                            "\n --> Traced at:\n" +
+                            spread->token.loc.get_line_trace());
                     }
                     Value v = evaluate_expression(spread->argument.get(), env);
 
@@ -1923,13 +1909,30 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         if (std::holds_alternative<FunctionPtr>(calleeVal)) {
             std::vector<Value> args;
             eval_args(args);
-            return call_function(std::get<FunctionPtr>(calleeVal), args, call->token);
+
+            // Compute an effective token to pass to the callee:
+            // - If the AST call node has a token, use it.
+            // - Else if the FunctionValue has a token with a filename, use that.
+            // - Else synthesize a builtin token using the function name so errors are informative.
+            Token effectiveTok = call->token;
+            FunctionPtr fn = std::get<FunctionPtr>(calleeVal);
+            if (effectiveTok.loc.filename.empty() && fn) {
+                if (!fn->token.loc.filename.empty()) {
+                    effectiveTok = fn->token;
+                } else {
+                    // synthesize a helpful builtin token (line/col set to 1)
+                    effectiveTok.loc.filename = std::string("<builtin:") + (fn->name.empty() ? "<anonymous>" : fn->name) + ">";
+                    effectiveTok.loc.line = 1;
+                    effectiveTok.loc.col = 1;
+                }
+            }
+
+            return call_function(fn, args, effectiveTok);
         }
         throw SwaziError(
             "TypeError",
             "Attempted to call a non-function value.",
-            call->token.loc
-        );
+            call->token.loc);
     }
 
     if (auto t = dynamic_cast<TernaryExpressionNode*>(expr)) {
@@ -1985,11 +1988,10 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
         // Evaluate callee to find class (callee is usually an IdentifierNode)
         Value calleeVal = evaluate_expression(ne->callee.get(), env);
         if (!std::holds_alternative<ClassPtr>(calleeVal)) {
-          throw SwaziError(
-              "TypeError",
-              "Attempted to instantiate a non-class value.",
-              ne->token.loc
-          );
+            throw SwaziError(
+                "TypeError",
+                "Attempted to instantiate a non-class value.",
+                ne->token.loc);
         }
         ClassPtr cls = std::get<ClassPtr>(calleeVal);
 
@@ -2149,8 +2151,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             throw SwaziError(
                 "ContextError",
                 "'super/supa(...)' may only be invoked inside a class constructor.",
-                se->token.loc
-            );
+                se->token.loc);
         }
         // find the instance from env via $
         EnvPtr walk = env;
@@ -2169,8 +2170,7 @@ if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
             throw SwaziError(
                 "ReferenceError",
                 "No '$' receiver found for 'super(...)' call — must be called within a class instance.",
-                se->token.loc
-            );
+                se->token.loc);
         }
 
         ClassPtr parent = current_class_context->super;

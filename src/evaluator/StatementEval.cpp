@@ -5,8 +5,8 @@
 #include <stdexcept>
 #include <string>
 
-#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
+#include "SwaziError.hpp"
 #include "evaluator.hpp"
 
 static std::string to_property_key(const Value& v, Token token) {
@@ -22,8 +22,7 @@ static std::string to_property_key(const Value& v, Token token) {
             throw SwaziError(
                 "TypeError",
                 "Invalid number for property key — must be finite.",
-                token.loc
-            );
+                token.loc);
         }
         double floor_d = std::floor(d);
         if (d == floor_d) {
@@ -45,8 +44,7 @@ static std::string to_property_key(const Value& v, Token token) {
     throw SwaziError(
         "TypeError",
         "Cannot convert value to a property key — unsupported type.",
-        token.loc
-    );
+        token.loc);
 }
 // ----------------- Statement evaluation -----------------
 void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return, LoopControl* lc) {
@@ -144,8 +142,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 throw SwaziError(
                     "SyntaxError",
                     "Constant pattern must be initialized.",
-                    vd->token.loc
-                );
+                    vd->token.loc);
             }
             bind_pattern_to_value(vd->pattern.get(), val, env, vd->is_constant, vd->token);
             return;
@@ -159,8 +156,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             throw SwaziError(
                 "SyntaxError",
                 "Constant '" + vd->identifier + "' must be initialized.",
-                vd->token.loc
-            );
+                vd->token.loc);
         }
         env->set(vd->identifier, var);
         return;
@@ -168,7 +164,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     // Assignment: target is now an ExpressionNode (IdentifierNode / IndexExpressionNode / MemberExpressionNode)
     if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
         Value rhs = evaluate_expression(an->value.get(), env);
-    
+
         // Identifier target: update variable in enclosing environment (search up chain) or create in current env
         if (auto id = dynamic_cast<IdentifierNode*>(an->target.get())) {
             EnvPtr walk = env;
@@ -192,11 +188,11 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             env->set(id->name, var);
             return;
         }
-    
+
         if (auto idx = dynamic_cast<IndexExpressionNode*>(an->target.get())) {
             Value objVal = evaluate_expression(idx->object.get(), env);
             Value indexVal = evaluate_expression(idx->index.get(), env);
-    
+
             // array path (unchanged)
             if (std::holds_alternative<ArrayPtr>(objVal)) {
                 long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
@@ -218,7 +214,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 arr->elements[uidx] = rhs;
                 return;
             }
-    
+
             // object property path: o[key] = rhs
             if (std::holds_alternative<ObjectPtr>(objVal)) {
                 ObjectPtr op = std::get<ObjectPtr>(objVal);
@@ -248,7 +244,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                             "\nCannot assign to read-only property '" + prop + "'." +
                             "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
                     }
-    
+
                     if (it->second.is_locked) {
                         bool isInternal = false;
                         if (env && env->has("$")) {
@@ -257,7 +253,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                                 isInternal = true;
                             }
                         }
-    
+
                         if (!isInternal) {
                             throw std::runtime_error(
                                 "PermissionError at " + idx->token.loc.to_string() +
@@ -265,7 +261,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                                 "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
                         }
                     }
-    
+
                     it->second.value = rhs;
                     it->second.token = idx->token;
                 } else {
@@ -279,16 +275,16 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 }
                 return;
             }
-    
+
             throw std::runtime_error(
                 "TypeError at " + idx->token.loc.to_string() +
                 "\nAttempted index assignment on non-array/non-object value." +
                 "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
         }
-    
+
         if (auto mem = dynamic_cast<MemberExpressionNode*>(an->target.get())) {
             Value objVal = evaluate_expression(mem->object.get(), env);
-    
+
             if (std::holds_alternative<ClassPtr>(objVal)) {
                 ClassPtr cls = std::get<ClassPtr>(objVal);
                 if (!cls) {
@@ -328,14 +324,14 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                             "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
                     }
                 }
-    
+
                 if (it->second.is_readonly) {
                     throw std::runtime_error(
                         "TypeError at " + mem->token.loc.to_string() +
                         "\nCannot assign to read-only property '" + mem->property + "'." +
                         "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
                 }
-    
+
                 if (it->second.is_locked) {
                     bool isInternal = false;
                     if (env && env->has("$")) {
@@ -344,7 +340,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                             isInternal = true;
                         }
                     }
-    
+
                     if (!isInternal) {
                         throw std::runtime_error(
                             "PermissionError at " + mem->token.loc.to_string() +
@@ -352,7 +348,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                             "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
                     }
                 }
-    
+
                 it->second.value = rhs;
                 it->second.token = mem->token;
                 return;
@@ -367,7 +363,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 return;
             }
         }
-    
+
         throw std::runtime_error(
             "TypeError at " + an->token.loc.to_string() +
             "\nUnsupported assignment target." +
@@ -448,8 +444,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         throw SwaziError(
                             "TypeError",
                             "Super identifier '" + cd->superClass->name + "' is not a class.",
-                            cd->superClass->token.loc
-                        );
+                            cd->superClass->token.loc);
                     }
                     break;
                 }
@@ -459,8 +454,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 throw SwaziError(
                     "ReferenceError",
                     "Unknown super class '" + cd->superClass->name + "'.",
-                    cd->superClass->token.loc
-                );
+                    cd->superClass->token.loc);
             }
         }
         {
@@ -769,8 +763,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             throw SwaziError(
                 "TypeError",
                 "Cannot iterate over a non-array/non-object value in 'kwa kila' loop.",
-                fin->token.loc
-            );
+                fin->token.loc);
         }
     }
 

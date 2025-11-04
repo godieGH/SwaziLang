@@ -1,5 +1,6 @@
 // scr/parser/parser.cpp
 #include "parser.hpp"
+#include "SwaziError.hpp"
 
 #include <cctype>
 #include <iostream>
@@ -48,7 +49,7 @@ void Parser::expect(TokenType t, const std::string& errMsg) {
     if (peek().type != t) {
         Token tok = peek();
         throw std::runtime_error(
-            "Parse error at " + tok.loc.to_string() + ": " + errMsg + "\n--> Traced at:\n" + peek_next(-1).loc.get_line_trace());
+            "SyntaxError at " + tok.loc.to_string() + ": " + errMsg + "\n--> Traced at:\n" + peek_next(-1).loc.get_line_trace());
     }
     consume();
 }
@@ -129,7 +130,7 @@ bool Parser::is_lambda_ahead() {
             // If we've already seen a rest param, that's a syntax error.
             if (seen_rest) {
                 // produce a helpful error pointing at the current token
-                throw std::runtime_error("Multiple rest parameters are not allowed at " + peek().loc.to_string());
+                throw SwaziError("SyntaxError", "Multiple rest parameters are not allowed.", peek().loc);
             }
 
             consume();  // consume '...'
@@ -163,7 +164,7 @@ bool Parser::is_lambda_ahead() {
                 // if comma and next isn't closeparen, it's not a valid lambda param list
                 if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
                     // throw with location because a parameter follows a rest -> syntax error
-                    throw std::runtime_error("Parameter not allowed after rest parameter at " + peek_next().loc.to_string());
+                    throw SwaziError("SyntaxError", "Parameter not allowed after rest parameter.", peek_next().loc);
                 }
                 consume();  // consume trailing comma
             }
@@ -175,7 +176,7 @@ bool Parser::is_lambda_ahead() {
 
         // If we've already seen a rest parameter, any other parameter is an error.
         if (seen_rest) {
-            throw std::runtime_error("Cannot have parameter after rest parameter at " + peek().loc.to_string());
+            throw SwaziError("SyntaxError", "Cannot have parameter after rest parameter.", peek().loc);
         }
 
         // identifier param (maybe with default 'id = <expr>')
@@ -258,7 +259,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_pattern() {
         return parse_object_pattern();
     }
     Token tok = peek();
-    throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Expected array or object pattern");
+    throw SwaziError("SyntaxError", "Expected array or object pattern.", tok.loc);
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
@@ -307,7 +308,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
             if (peek().type == TokenType::COMMA) {
                 // if comma is followed by something other than CLOSEBRACKET it's an error
                 if (peek_next().type != TokenType::CLOSEBRACKET) {
-                    throw std::runtime_error("Parse error at " + peek_next().loc.to_string() + ": parameter not allowed after rest element");
+                    throw SwaziError("SyntaxError", "Parameter not allowed after rest element.", peek_next().loc);
                 }
                 consume();  // consume trailing comma
             }
@@ -323,7 +324,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_array_pattern() {
             node->elements.push_back(std::move(id));
         } else {
             Token tok = peek();
-            throw std::runtime_error("Parse error at " + tok.loc.to_string() + ": Unexpected token in array pattern" + "\n --> Traced at: \n" + tok.loc.get_line_trace());
+            throw SwaziError("SyntaxError", "Unexpected token in array pattern.", tok.loc);
         }
 
         // separator or end
