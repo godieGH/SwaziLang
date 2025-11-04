@@ -311,6 +311,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"rithi", TokenType::RITHI},
         {"unda", TokenType::UNDA},
         {"supa", TokenType::SUPA},
+        {"super", TokenType::SUPA},
         {"futa", TokenType::FUTA},
         {"this", TokenType::SELF},
         {"self", TokenType::SELF},

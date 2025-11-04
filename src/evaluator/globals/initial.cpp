@@ -708,7 +708,6 @@ void init_globals(EnvPtr env) {
         hesabuVar.value = hesabuVal;
         hesabuVar.is_constant = true;
         env->set("Hesabu", hesabuVar);
-        env->set("Math", hesabuVar);
     }
 
     init_time(env);

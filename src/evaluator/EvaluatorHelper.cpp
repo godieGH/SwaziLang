@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
 #include "evaluator.hpp"
 
@@ -54,23 +55,59 @@ static std::string value_type_name(const Value& v) {
     return "unknown";
 }
 
+std::string Evaluator::type_name(const Value& v) {
+  return value_type_name(v);
+}
+
 double Evaluator::to_number(const Value& v, Token token) {
-    if (std::holds_alternative<double>(v)) return std::get<double>(v);
-    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? 1.0 : 0.0;
+    if (std::holds_alternative<double>(v)) {
+        return std::get<double>(v);
+    }
+
+    if (std::holds_alternative<bool>(v)) {
+        return std::get<bool>(v) ? 1.0 : 0.0;
+    }
+
     if (std::holds_alternative<std::string>(v)) {
         const auto& s = std::get<std::string>(v);
         try {
             size_t idx = 0;
             double d = std::stod(s, &idx);
-            if (idx == 0) throw std::invalid_argument("no conversion");
-            if (idx != s.size()) throw std::invalid_argument("partial conversion");
+
+            // if no characters were parsed
+            if (idx == 0) {
+                throw std::runtime_error(
+                    "ValueError at " + token.loc.to_string() +
+                    "\nCannot convert string '" + s + "' to number: no digits found" +
+                    "\n --> Traced at:\n" + token.loc.get_line_trace()
+                );
+            }
+
+            // if only part of the string was parsed
+            if (idx != s.size()) {
+                throw std::runtime_error(
+                    "ValueError at " + token.loc.to_string() +
+                    "\nCannot convert string '" + s + "' to number: contains invalid characters after position " + std::to_string(idx) +
+                    "\n --> Traced at:\n" + token.loc.get_line_trace()
+                );
+            }
+
             return d;
-        } catch (...) {
-            throw std::runtime_error("Cannot convert string '" + s + "' to number");
+        } catch (const std::exception& e) {
+            throw std::runtime_error(
+                "ValueError at " + token.loc.to_string() +
+                "\nCannot convert string '" + s + "' to number(" + e.what() + ")" +
+                "\n --> Traced at:\n" + token.loc.get_line_trace()
+            );
         }
     }
-    // Arrays and functions cannot be converted to numbers in current semantics
-    throw std::runtime_error("Cannot convert value of type `" + value_type_name(v) + "` to a number");
+
+    // Arrays, functions, or other unsupported types
+    throw std::runtime_error(
+        "TypeError at " + token.loc.to_string() +
+        "\nCannot convert value of type `" + value_type_name(v) + "` to a number" +
+        "\n --> Traced at:\n" + token.loc.get_line_trace()
+    );
 }
 
 std::string Evaluator::to_string_value(const Value& v, bool no_color) {
@@ -295,7 +332,11 @@ Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvP
 
     // private property -> not allowed unless we are inside the same object's context ($ bound)
     if (desc.is_private && !is_private_access_allowed(obj, env)) {
-        throw std::runtime_error("Cannot access private property '" + key + "' at " + desc.token.loc.to_string() + "\n --> Traced at: \n" + desc.token.loc.get_line_trace());
+        throw std::runtime_error(
+            "PermissionError at " + desc.token.loc.to_string() +
+            "\nCannot access private property '" + key + "' from outside the owning object." +
+            "\n --> Traced at:\n" + desc.token.loc.get_line_trace()
+        );
     }
 
     // If property is a readonly getter and value is a function -> call it and return its result
@@ -310,9 +351,13 @@ Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvP
 }
 
 void Evaluator::set_object_property(ObjectPtr obj, const std::string& key, const Value& val, EnvPtr env, const Token& assignToken) {
-    if (!obj) throw std::runtime_error("Attempt to assign property on null object at " + assignToken.loc.to_string());
-    
-    if(obj->is_frozen) return;
+    if (!obj) throw std::runtime_error(
+        "TypeError at " + assignToken.loc.to_string() +
+        "\nAttempt to assign a property on a undefined object." +
+        "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+    );
+
+    if (obj->is_frozen) return;
 
     auto it = obj->properties.find(key);
     if (it != obj->properties.end()) {
@@ -320,19 +365,31 @@ void Evaluator::set_object_property(ObjectPtr obj, const std::string& key, const
 
         // cannot assign to private from outside
         if (desc.is_private && !is_private_access_allowed(obj, env)) {
-            throw std::runtime_error("Cannot assign to private property '" + key + "' at " + assignToken.loc.to_string());
+            throw std::runtime_error(
+                "PermissionError at " + assignToken.loc.to_string() +
+                "\nCannot assign to private property '" + key + "' from outside the owning object." +
+                "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+            );
         }
 
         // cannot assign to readonly / getter-backed property
         if (desc.is_readonly) {
-            throw std::runtime_error("Cannot assign to readonly property '" + key + "' at " + assignToken.loc.to_string());
+            throw std::runtime_error(
+                "TypeError at " + assignToken.loc.to_string() +
+                "\nCannot assign to readonly property '" + key + "'." +
+                "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+            );
         }
 
         // locked: only allow internal code (same-$ or class-internal) to overwrite
         if (desc.is_locked) {
             bool isInternal = is_private_access_allowed(obj, env);
             if (!isInternal) {
-                throw std::runtime_error("Cannot overwrite locked property '" + key + "' from outside at " + assignToken.loc.to_string());
+                throw std::runtime_error(
+                    "PermissionError at " + assignToken.loc.to_string() +
+                    "\nCannot overwrite locked property '" + key + "' from outside the owning object." +
+                    "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+                );
             }
         }
 
@@ -357,7 +414,11 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
     if (auto arrPat = dynamic_cast<ArrayPatternNode*>(pattern)) {
         // RHS must be an array
         if (!std::holds_alternative<ArrayPtr>(value)) {
-            throw std::runtime_error("Cannot destructure non-array value at " + declToken.loc.to_string() + "\n --> Traced at: \n" + declToken.loc.get_line_trace());
+            throw SwaziError(
+                "TypeError",
+                "Cannot destructure a non-array value.",
+                declToken.loc
+            );
         }
         ArrayPtr src = std::get<ArrayPtr>(value);
         size_t srcLen = src ? src->elements.size() : 0;
@@ -373,11 +434,19 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             if (auto spread = dynamic_cast<SpreadElementNode*>(elem.get())) {
                 // argument should evaluate to an IdentifierNode (target)
                 if (!spread->argument) {
-                    throw std::runtime_error("Invalid rest target in array pattern at " + spread->token.loc.to_string() + "\n --> Traced at: \n" + spread->token.loc.get_line_trace());
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Invalid rest target in array pattern — missing argument.",
+                        spread->token.loc
+                    );
                 }
                 auto idTarget = dynamic_cast<IdentifierNode*>(spread->argument.get());
                 if (!idTarget) {
-                    throw std::runtime_error("Only identifier allowed as rest target in array pattern at " + spread->token.loc.to_string());
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Only an identifier is allowed as the rest target in an array pattern.",
+                        spread->token.loc
+                    );
                 }
                 // collect remaining elements starting at current index
                 auto restArr = std::make_shared<ArrayValue>();
@@ -405,7 +474,11 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             }
 
             // spread could also be represented as an Identifier wrapped differently, but we only support the above
-            throw std::runtime_error("Unsupported element in array pattern at " + arrPat->token.loc.to_string() + "\n --> Traced at: \n" + arrPat->token.loc.get_line_trace());
+            throw SwaziError(
+                "SyntaxError",
+                "Unsupported element in array destructuring pattern.",
+                arrPat->token.loc
+            );
         }
         return;
     }
@@ -413,7 +486,11 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
     // Object pattern
     if (auto objPat = dynamic_cast<ObjectPatternNode*>(pattern)) {
         if (!std::holds_alternative<ObjectPtr>(value)) {
-            throw std::runtime_error("Cannot destructure non-object value at " + declToken.loc.to_string() + "\n --> Traced at: \n" + declToken.loc.get_line_trace());
+            throw SwaziError(
+                "TypeError",
+                "Cannot destructure a non-object value.",
+                declToken.loc
+            );
         }
         ObjectPtr src = std::get<ObjectPtr>(value);
 
@@ -423,7 +500,11 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             // target should be an IdentifierNode (we support only simple renames/shorthand)
             auto targetId = dynamic_cast<IdentifierNode*>(propPtr->value.get());
             if (!targetId) {
-                throw std::runtime_error("Only identifier targets supported in object pattern at " + propPtr->value->token.loc.to_string() + "\n --> Traced at: \n" + propPtr->value->token.loc.get_line_trace());
+                throw SwaziError(
+                    "SyntaxError",
+                    "Only identifier targets are supported in object patterns.",
+                    propPtr->value->token.loc
+                );
             }
 
             // Use existing getter to respect privacy/getters (get_object_property is a member)
@@ -444,9 +525,12 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
         return;
     }
 
-    throw std::runtime_error("Unsupported pattern node in destructuring at " + pattern->token.loc.to_string() + "\n --> Traced at: \n" + pattern->token.loc.get_line_trace());
+    throw SwaziError(
+        "SyntaxError",
+        "Unsupported pattern node in destructuring assignment.",
+        pattern->token.loc
+    );
 }
-
 // Tune these to control "small object" inline behavior:
 static constexpr int INLINE_MAX_PROPS = 5;
 static constexpr int INLINE_MAX_LEN = 150;

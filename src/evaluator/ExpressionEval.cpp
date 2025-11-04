@@ -6,9 +6,9 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
 #include "evaluator.hpp"
-
 
 Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (!expr) return std::monostate{};
@@ -65,7 +65,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // Support spread element nodes (parser should produce a SpreadElementNode)
             if (auto spread = dynamic_cast<SpreadElementNode*>(elemPtr.get())) {
                 if (!spread->argument) {
-                    throw std::runtime_error("Spread element missing argument at " + spread->token.loc.to_string());
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Spread element is missing an argument.",
+                        spread->token.loc
+                    );
                 }
                 Value v = evaluate_expression(spread->argument.get(), env);
 
@@ -78,8 +82,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
                     }
                 } else {
-                    // you can change this to allow strings -> char elements, objects -> ???, etc.
-                    throw std::runtime_error("Spread in array expects array value at " + spread->token.loc.to_string());
+                    // TODO: Extend to allow strings -> char elements, objects -> iterable values, etc.
+                    throw SwaziError(
+                        "TypeError",
+                        "Spread operator in array expects an array value.",
+                        spread->token.loc
+                    );
                 }
                 continue;
             }
@@ -132,7 +140,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
 
                 if (!std::holds_alternative<ObjectPtr>(val)) {
-                    throw std::runtime_error("Spread expects an object at " + p->token.loc.to_string());
+                    throw SwaziError(
+                        "TypeError",
+                        "Spread operator expects an object, but received a " + type_name(val) + " type",
+                        p->token.loc
+                    );
                 }
 
                 ObjectPtr src = std::get<ObjectPtr>(val);
@@ -147,14 +159,24 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // Determine property key
             std::string keyStr;
             if (p->computed) {
-                if (!p->key) throw std::runtime_error("Computed property missing expression at " + p->token.loc.to_string());
+                if (!p->key) {
+    throw SwaziError(
+        "SyntaxError",
+        "Computed property is missing a key expression.",
+        p->token.loc
+    );
+}
                 keyStr = to_string_value(evaluate_expression(p->key.get(), env));
             } else if (!p->key_name.empty()) {
                 keyStr = p->key_name;
             } else if (p->key) {
                 keyStr = to_string_value(evaluate_expression(p->key.get(), env));
             } else {
-                throw std::runtime_error("Property with no key at " + p->token.loc.to_string());
+              throw SwaziError(
+                  "SyntaxError",
+                  "Object property declared without a key.",
+                  p->token.loc
+              );
             }
 
             // Build property value
@@ -205,25 +227,43 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto b = dynamic_cast<BooleanLiteralNode*>(expr)) return Value{
         b->value};
 
-    if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
-        if (!env) throw std::runtime_error("No environment when resolving identifier '" + id->name + "'");
-        if (!env->has(id->name)) {
-            throw std::runtime_error("Undefined identifier '" + id->name + "' at " + id->token.loc.to_string() + "\n --> Traced at: \n" + id->token.loc.get_line_trace());
-        }
-        return env->get(id->name).value;
+if (auto id = dynamic_cast<IdentifierNode*>(expr)) {
+    if (!env) {
+        throw SwaziError(
+            "ReferenceError",
+            "Cannot resolve identifier '" + id->name + "' — no environment found.",
+            id->token.loc
+        );
     }
 
+    if (!env->has(id->name)) {
+        throw SwaziError(
+            "ReferenceError",
+            "Undefined identifier '" + id->name + "'.",
+            id->token.loc
+        );
+    }
+
+    return env->get(id->name).value;
+}
     // handle the $ / this node
     if (auto self = dynamic_cast<ThisExpressionNode*>(expr)) {
         // defensive checks similar to IdentifierNode handling
-        if (!env) throw std::runtime_error("No environment when resolving '$' at " + self->token.loc.to_string());
-
+        if (!env) {
+            throw SwaziError(
+                "ReferenceError",
+                "Cannot resolve '$' — no environment found for 'this'.",
+                self->token.loc
+            );
+        }
         if (env->has("$")) {
             return env->get("$").value;
         }
-
-        // not found -> undefined this
-        throw std::runtime_error("Undefined 'this' ('$') at " + self->token.loc.to_string() + "\n --> Traced at: \n" + self->token.loc.get_line_trace());
+        throw SwaziError(
+            "ReferenceError",
+            "Undefined 'this/self' ('$') — must be called within a valid class instance or a regular plain object.",
+            self->token.loc
+        );
     }
 
     // Member access: object.property (e.g., arr.idadi, arr.ongeza, str.herufi)
@@ -237,12 +277,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (std::holds_alternative<ClassPtr>(objVal)) {
             ClassPtr cls = std::get<ClassPtr>(objVal);
             if (!cls) return std::monostate{};
-
+        
             // Walk the class -> super chain to find the first matching static property.
             ClassPtr walkCls = cls;
             const PropertyDescriptor* foundDesc = nullptr;
             ObjectPtr holder = nullptr;  // the static_table that actually holds the property
-
+        
             while (walkCls) {
                 if (walkCls->static_table) {
                     auto it = walkCls->static_table->properties.find(mem->property);
@@ -254,25 +294,29 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
                 walkCls = walkCls->super;
             }
-
+        
             if (!foundDesc) return std::monostate{};  // not found anywhere in chain
-
+        
             const PropertyDescriptor& desc = *foundDesc;
-
+        
             // private static -> allowed only when access is internal (use holder for check)
             if (desc.is_private && !is_private_access_allowed(holder, env)) {
-                throw std::runtime_error("Cannot access private static property '" + mem->property + "' at " + desc.token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
+                throw std::runtime_error(
+                    "PermissionError at " + mem->token.loc.to_string() +
+                    "\nCannot access private static property '" + mem->property + "' from outside the declaring class/object." +
+                    "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
             }
-
+        
             // Getter semantics: call getter if readonly and stored function
             if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
                 FunctionPtr getter = std::get<FunctionPtr>(desc.value);
                 return call_function(getter, {}, desc.token);
             }
-
+        
             // Normal return of the value (from the class where it was found)
             return desc.value;
         }
+
 
         // --- Universal properties ---
         const std::string& prop = mem->property;
@@ -324,97 +368,102 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (std::holds_alternative<std::string>(objVal)) {
             const std::string s_val = std::get<std::string>(objVal);
             const std::string& prop = mem->property;
-
+        
             // helper to create native function values (captures s_val and this)
             auto make_fn = [this, s_val, env, mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
                 auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     return impl(args, callEnv, token);
                 };
                 auto fn = std::make_shared<FunctionValue>(std::string("native:string.") + mem->property, native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{ fn };
             };
-
+        
             // herufiNdogo() -> toLowerCase
             if (prop == "herufiNdogo" || prop == "toLower") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     std::string out = s_val;
                     for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    return Value{
-                        out};
+                    return Value{ out };
                 });
             }
-
+        
             // herufiKubwa() -> toUpperCase
             if (prop == "herufiKubwa" || prop == "toUpper") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     std::string out = s_val;
                     for (auto& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                    return Value{
-                        out};
+                    return Value{ out };
                 });
             }
-
+        
             // sawazisha() -> trim()
             if (prop == "sawazisha" || prop == "trim") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
                     size_t a = 0, b = s_val.size();
                     while (a < b && std::isspace(static_cast<unsigned char>(s_val[a]))) ++a;
                     while (b > a && std::isspace(static_cast<unsigned char>(s_val[b - 1]))) --b;
-                    return Value{
-                        s_val.substr(a, b - a)};
+                    return Value{ s_val.substr(a, b - a) };
                 });
             }
-
+        
             // anzaNa(prefix) -> startsWith
             if (prop == "huanzaNa" || prop == "startsWith") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.anzaNa needs 1 arg at " + token.loc.to_string());
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.anzaNa requires 1 argument (prefix)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string pref = to_string_value(args[0]);
-                    if (pref.size() > s_val.size()) return Value{
-                        false};
-                    return Value{
-                        s_val.rfind(pref, 0) == 0};
+                    if (pref.size() > s_val.size()) return Value{ false };
+                    return Value{ s_val.rfind(pref, 0) == 0 };
                 });
             }
-
+        
             // ishaNa(suffix) -> endsWith
             if (prop == "huishaNa" || prop == "endsWith") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.ishaNa needs 1 arg at " + token.loc.to_string());
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.ishaNa requires 1 argument (suffix)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string suf = to_string_value(args[0]);
-                    if (suf.size() > s_val.size()) return Value{
-                        false};
-                    return Value{
-                        s_val.compare(s_val.size() - suf.size(), suf.size(), suf) == 0};
+                    if (suf.size() > s_val.size()) return Value{ false };
+                    return Value{ s_val.compare(s_val.size() - suf.size(), suf.size(), suf) == 0 };
                 });
             }
-
+        
             // kuna(sub) -> includes
             if (prop == "kuna" || prop == "includes") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.kuna needs 1 arg at " + token.loc.to_string());
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.kuna requires 1 argument (substring)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string sub = to_string_value(args[0]);
-                    return Value{
-                        s_val.find(sub) != std::string::npos};
+                    return Value{ s_val.find(sub) != std::string::npos };
                 });
             }
-
+        
             // tafuta(sub, fromIndex?) -> indexOf
             if (prop == "tafuta") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.tafuta needs 1 argument at " + token.loc.to_string());
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.tafuta requires 1 argument (substring)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string sub = to_string_value(args[0]);
                     size_t from = 0;
                     if (args.size() >= 2) from = static_cast<size_t>(std::max(0LL, static_cast<long long>(to_number(args[1], token))));
                     size_t pos = s_val.find(sub, from);
-                    if (pos == std::string::npos) return Value{
-                        static_cast<double>(-1)};
-                    return Value{
-                        static_cast<double>(pos)};
+                    if (pos == std::string::npos) return Value{ static_cast<double>(-1) };
+                    return Value{ static_cast<double>(pos) };
                 });
             }
-
+        
             // slesi(start?, end?) -> substring-like slice
             if (prop == "slesi" || prop == "substr") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -427,33 +476,38 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     if (end < 0) end = std::max(0LL, n + end);
                     start = std::min(std::max(0LL, start), n);
                     end = std::min(std::max(0LL, end), n);
-                    return Value{
-                        s_val.substr((size_t)start, (size_t)(end - start))};
+                    return Value{ s_val.substr((size_t)start, (size_t)(end - start)) };
                 });
             }
-
+        
             // badilisha(old, neu) -> replace first occurrence
             if (prop == "badilisha" || prop == "replace") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.size() < 2) throw std::runtime_error("str.badilisha needs 2 args at " + token.loc.to_string());
+                    if (args.size() < 2)
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.badilisha requires 2 arguments (old, new)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string oldv = to_string_value(args[0]);
                     std::string newv = to_string_value(args[1]);
                     std::string out = s_val;
                     size_t pos = out.find(oldv);
                     if (pos != std::string::npos) out.replace(pos, oldv.size(), newv);
-                    return Value{
-                        out};
+                    return Value{ out };
                 });
             }
-
+        
             // badilishaZote(old, new) -> replace all occurrences
             if (prop == "badilishaZote" || prop == "replaceAll") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.size() < 2) throw std::runtime_error("str.badilishaZote needs 2 args at " + token.loc.to_string());
+                    if (args.size() < 2)
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.badilishaZote requires 2 arguments (old, new)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     std::string oldv = to_string_value(args[0]);
                     std::string newv = to_string_value(args[1]);
-                    if (oldv.empty()) return Value{
-                        s_val};  // avoid infinite loop
+                    if (oldv.empty()) return Value{ s_val };  // avoid infinite loop
                     std::string out;
                     size_t pos = 0, prev = 0;
                     while ((pos = s_val.find(oldv, prev)) != std::string::npos) {
@@ -462,11 +516,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         prev = pos + oldv.size();
                     }
                     out.append(s_val, prev, std::string::npos);
-                    return Value{
-                        out};
+                    return Value{ out };
                 });
             }
-
+        
             // orodhesha(separator?) -> split into ArrayPtr
             if (prop == "orodhesha" || prop == "split") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
@@ -478,75 +531,76 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
                     auto out = std::make_shared<ArrayValue>();
                     if (!useSep) {
-                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{
-                            std::string(1, s_val[i])});
-                        return Value{
-                            out};
+                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{ std::string(1, s_val[i]) });
+                        return Value{ out };
                     }
                     if (sep.empty()) {
-                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{
-                            std::string(1, s_val[i])});
-                        return Value{
-                            out};
+                        for (size_t i = 0; i < s_val.size(); ++i) out->elements.push_back(Value{ std::string(1, s_val[i]) });
+                        return Value{ out };
                     }
                     size_t pos = 0, prev = 0;
                     while ((pos = s_val.find(sep, prev)) != std::string::npos) {
-                        out->elements.push_back(Value{
-                            s_val.substr(prev, pos - prev)});
+                        out->elements.push_back(Value{ s_val.substr(prev, pos - prev) });
                         prev = pos + sep.size();
                     }
-                    out->elements.push_back(Value{
-                        s_val.substr(prev)});
-                    return Value{
-                        out};
+                    out->elements.push_back(Value{ s_val.substr(prev) });
+                    return Value{ out };
                 });
             }
-
+        
             // unganisha(other) -> concat and return new string
             if (prop == "unganisha" || prop == "concat") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.unganisha needs atleast one arg at " + token.loc.to_string());
-                    return Value{
-                        s_val + to_string_value(args[0])};
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.unganisha requires at least 1 argument (string to concat)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    return Value{ s_val + to_string_value(args[0]) };
                 });
             }
-
+        
             // rudia(n) -> repeat string n times
             if (prop == "rudia") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.rudia needs 1 argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.rudia requires 1 argument (repeat count)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     long long n = static_cast<long long>(to_number(args[0], token));
-                    if (n <= 0) return Value{
-                        std::string()};
+                    if (n <= 0) return Value{ std::string() };
                     std::string out;
                     out.reserve(s_val.size() * (size_t)n);
                     for (long long i = 0; i < n; ++i) out += s_val;
-                    return Value{
-                        out};
+                    return Value{ out };
                 });
             }
-
+        
             // herufiYa(index) -> charAt (single-char string or empty)
             if (prop == "herufiYa" || prop == "charAt") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("str.herufiKwa needs 1 arg at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
+                    if (args.empty())
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nstr.herufiYa requires 1 argument (index)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     long long idx = static_cast<long long>(to_number(args[0], token));
-                    if (idx < 0 || (size_t)idx >= s_val.size()) return Value{
-                        std::string()};
-                    return Value{
-                        std::string(1, s_val[(size_t)idx])};
+                    if (idx < 0 || (size_t)idx >= s_val.size()) return Value{ std::string() };
+                    return Value{ std::string(1, s_val[(size_t)idx]) };
                 });
             }
-
+        
             // urefu() -> returns string length (same as .herufi property)
             if (prop == "urefu") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-                    return Value{static_cast<double>(s_val.size())};
+                    return Value{ static_cast<double>(s_val.size()) };
                 });
             }
-
+        
             // No matching string property -> fall through to unknown property error below
         }
+
 
         // --- Number methods & properties (place this after string methods, before array methods) ---
         if (std::holds_alternative<double>(objVal)) {
@@ -555,303 +609,156 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
             // ---------- Properties ----------
             if (prop == "siSahihi" || prop == "isNaN") {
-                return Value{
-                    std::isnan(num)};
+                return Value{std::isnan(num)};
             }
             if (prop == "isInf") {
-                return Value{
-                    !std::isfinite(num)};
+                return Value{!std::isfinite(num)};
             }
             if (prop == "niInt" || prop == "isInt") {
-                return Value{
-                    std::isfinite(num) && std::floor(num) == num};
+                return Value{std::isfinite(num) && std::floor(num) == num};
             }
             if (prop == "niDesimali" || prop == "isDecimal") {
-                return Value{
-                    std::isfinite(num) && std::floor(num) != num};
+                return Value{std::isfinite(num) && std::floor(num) != num};
             }
             if (prop == "niChanya") {
-                return Value{
-                    num > 0};
+                return Value{num > 0};
             }
             if (prop == "niHasi") {
-                return Value{
-                    num < 0};
+                return Value{num < 0};
             }
+
             // boolean "is" properties: odd, even, prime
             if (prop == "niWitiri" || prop == "niShufwa" || prop == "niTasa") {
-                // quick guards: must be finite and integer
                 if (!std::isfinite(num) || std::floor(num) != num) {
-                    return Value{
-                        false};
+                    return Value{false};
                 }
-
-                // avoid UB on cast if number too large for signed long long
                 if (num > static_cast<double>(LLONG_MAX) || num < static_cast<double>(LLONG_MIN)) {
-                    return Value{
-                        false};
+                    return Value{false};
                 }
 
-                long long n = static_cast<long long>(std::llround(num));  // safe now
+                long long n = static_cast<long long>(std::llround(num));
 
                 if (prop == "niWitiri") {
-                    // odd
-                    return Value{
-                        (n % 2) != 0};
+                    return Value{(n % 2) != 0};
                 }
-
                 if (prop == "niShufwa") {
-                    // even
-                    return Value{
-                        (n % 2) == 0};
+                    return Value{(n % 2) == 0};
                 }
-
-                // niTasa -> primality (simple trial division)
                 if (prop == "niTasa") {
-                    if (n < 2) return Value{
-                        false};
-                    if (n % 2 == 0) return Value{
-                        n == 2};  // even >2 => composite
-
+                    if (n < 2) return Value{false};
+                    if (n % 2 == 0) return Value{n == 2};
                     long long limit = static_cast<long long>(std::sqrt((long double)n));
                     for (long long i = 3; i <= limit; i += 2) {
-                        if (n % i == 0) return Value{
-                            false};
+                        if (n % i == 0) return Value{false};
                     }
-                    return Value{
-                        true};
+                    return Value{true};
                 }
             }
 
             // ---------- Methods (return FunctionValue) ----------
 
-            // abs -> n.abs()
             if (prop == "abs") {
-                auto native_impl = [num](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-                    return Value{
-                        std::fabs(num)};
+                auto native_impl = [num](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{std::fabs(num)};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.abs"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.abs", native_impl, env, mem->token)};
             }
 
-            // round / kadiria
             if (prop == "kadiria" || prop == "round") {
-                auto native_impl = [num](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-                    return Value{
-                        static_cast<double>(std::round(num))};
+                auto native_impl = [num](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{static_cast<double>(std::round(num))};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.kadiria"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.kadiria", native_impl, env, mem->token)};
             }
+
             if (prop == "kadiriajuu" || prop == "ceil") {
-                auto native_impl = [num](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-                    return Value{
-                        static_cast<double>(std::ceil(num))};
+                auto native_impl = [num](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{static_cast<double>(std::ceil(num))};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.kadiriajuu"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.kadiriajuu", native_impl, env, mem->token)};
             }
+
             if (prop == "kadiriachini" || prop == "floor") {
-                auto native_impl = [num](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-                    return Value{
-                        static_cast<double>(std::floor(num))};
+                auto native_impl = [num](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{static_cast<double>(std::floor(num))};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.kadiriachini"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.kadiriachini", native_impl, env, mem->token)};
             }
 
-            // kipeo / kipeuo: power & nth-root
-            // n.kipeo(b?) => n**b  (default: square if no arg)
-            // n.kipeuo(b?) => nth-root (default: square root if no arg)
             if (prop == "kipeo" || prop == "pow") {
-                auto native_impl = [this,
-                                       num](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) {
-                        return Value{
-                            num * num};  // square by default
-                    }
-                    double b = to_number(args[0], token);
-                    return Value{
-                        std::pow(num, b)};
+                auto native_impl = [this, num](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    double b = args.empty() ? num : to_number(args[0], token);
+                    return Value{args.empty() ? num * num : std::pow(num, b)};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.kipeo"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.kipeo", native_impl, env, mem->token)};
             }
+
             if (prop == "kipeuo" || prop == "root") {
-                auto native_impl = [this,
-                                       num](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    // default: sqrt
-                    if (args.empty()) {
-                        if (num < 0) throw std::runtime_error("Math error at " +  token.loc.to_string() + "\nCan not calculate root of a negative value" + "\nerror at \n --> Traced at: \n" + token.loc.get_line_trace());
-                        return Value{
-                            std::sqrt(num)};
-                    }
-
-                    double b = to_number(args[0], token);
-                    if (b == 0) throw std::runtime_error("Math error at " + token.loc.to_string() + "\nCan not devide by zero" + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                    if (!std::isfinite(b)) throw std::runtime_error("Math error at " +token.loc.to_string()  + "\nroot value is inf" + "\n --> Traced at: \n" + token.loc.get_line_trace());
-
-                    // guard: negative base with negative root degree -> division by zero if num==0
-                    if (num == 0.0 && b < 0.0) throw std::runtime_error("Haiwezekani kupata kipeuo hasi cha sifuri");
-
-                    // helper: decide if b is (almost) an integer
-                    auto is_integer = [](double x) {
-                        return std::isfinite(x) && std::fabs(x - std::round(x)) < 1e-12;
-                    };
-
-                    if (is_integer(b)) {
-                        // safe integer conversion with magnitude check
-                        double rb = std::round(b);
-                        if (rb > static_cast<double>(LLONG_MAX) || rb < static_cast<double>(LLONG_MIN)) {
-                            throw std::runtime_error("Kiwango cha kipeuo kimezidi mipaka");
-                        }
-                        long long ib = static_cast<long long>(rb);
-
-                        // handle special small integer cases for numeric stability
-                        if (ib == 1) return Value{
-                            num};  // 1st root => itself
-                        if (ib == -1) {
-                            // -1 => reciprocal
-                            if (num == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
-                            return Value{
-                                1.0 / num};
-                        }
-                        if (ib == 2) {
-                            // square root
-                            if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha thamani hasi");
-                            return Value{
-                                std::sqrt(num)};
-                        }
-                        if (ib == -2) {
-                            if (num == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
-                            if (num < 0) throw std::runtime_error("Huwezi kupata kipeuo cha thamani hasi");
-                            return Value{
-                                1.0 / std::sqrt(num)};
-                        }
-                        if (ib == 3 || ib == -3) {
-                            // cube root
-                            double root = std::cbrt(std::fabs(num));
-                            if (ib < 0) {
-                                if (num == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
-                                root = 1.0 / root;
-                            }
-                            // cube root of negative is negative
-                            if (num < 0) root = -root;
-                            return Value{
-                                root};
-                        }
-
-                        // For other integer ib:
-                        bool ib_is_odd = (std::llabs(ib) % 2 == 1);
-                        long long abs_ib = llabs(ib);
-
-                        if (!ib_is_odd && num < 0) {
-                            // even root of negative -> non-real
-                            throw std::runtime_error("You can not calculate nth root(kipeuo cha nth cha namba) of a -ve number, when 'n' is even ");
-                        }
-
-                        // compute nth root: sign handling for odd roots
-                        double result = std::pow(std::fabs(num), 1.0 / static_cast<double>(abs_ib));
-                        if (num < 0) result = -result;  // odd ib => negative result allowed
-
-                        if (ib < 0) {
-                            // negative ib => reciprocal
-                            if (result == 0.0) throw std::runtime_error("Haiwezekani kugawa kwa sifuri");
-                            result = 1.0 / result;
-                        }
-
-                        return Value{
-                            result};
-                    }
-
-                    // b is non-integer (fractional root). For real results, base must be >= 0.
-                    if (num < 0) {
-                        throw std::runtime_error("You can not calculate nth root(kipeuo cha nth cha namba) of -ve number(namba hasi) with a non integer(n) (that will produce a complex number — a + bi)");
-                    }
-
-                    // general fractional root: num^(1/b)
-                    double res = std::pow(num, 1.0 / b);
-                    return Value{
-                        res};
+                auto native_impl = [this, num](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    double b = args.empty() ? 2.0 : to_number(args[0], token);
+                    if (b == 0.0) throw std::runtime_error(
+                        "ValueError at " + token.loc.to_string() +
+                        "\nCannot divide by zero" +
+                        "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    if (!std::isfinite(b)) throw std::runtime_error(
+                        "ValueError at " + token.loc.to_string() +
+                        "\nRoot degree value is infinite" +
+                        "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    if (num == 0.0 && b < 0.0) throw std::runtime_error(
+                        "ValueError at " + token.loc.to_string() +
+                        "\nCannot raise 0.0 to a negative power" +
+                        "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    if (num < 0.0 && std::fabs(b - std::round(b)) > 1e-12) throw std::runtime_error(
+                        "ValueError at " + token.loc.to_string() +
+                        "\nCannot compute fractional root of a negative number (would produce a complex result: a + bi)" +
+                        "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    return Value{std::pow(num, 1.0 / b)};
                 };
-
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.kipeuo"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.kipeuo", native_impl, env, mem->token)};
             }
 
-            // n.kubwa / n.ndogo -> compare n to args; single-arg returns number, multi-arg returns new array
             if (prop == "kubwa" || prop == "max" || prop == "ndogo" || prop == "min") {
                 bool wantMax = (prop == "kubwa" || prop == "max");
-
-                auto native_impl = [this,
-                                       num,
-                                       wantMax](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) {
-                        throw std::runtime_error(std::string("n.") + (wantMax ? "kubwa" : "ndogo") +
-                            " needs at least 1 argument at " + token.loc.to_string());
-                    }
-
-                    if (args.size() == 1) {
-                        double a = to_number(args[0]);
-                        return Value{
-                            wantMax ? std::max(num, a) : std::min(num, a)};
-                    }
-
-                    // multiple args -> return array of pairwise comparisons: for each arg return max/min(num, arg)
+                auto native_impl = [this, num, wantMax](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (args.empty()) throw std::runtime_error(
+                        "ValueError at " + token.loc.to_string() +
+                        "\nFunction n." + (wantMax ? "kubwa / max" : "ndogo / min") + " requires at least 1 argument" +
+                        "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    if (args.size() == 1) return Value{wantMax ? std::max(num, to_number(args[0], token)) : std::min(num, to_number(args[0], token))};
                     auto out = std::make_shared<ArrayValue>();
                     out->elements.reserve(args.size());
                     for (const auto& a : args) {
-                        double v = to_number(a);
-                        double res = wantMax ? std::max(num, v) : std::min(num, v);
-                        out->elements.push_back(Value{
-                            res});
+                        double v = to_number(a, token);
+                        out->elements.push_back(Value{wantMax ? std::max(num, v) : std::min(num, v)});
                     }
-                    return Value{
-                        out};
+                    return Value{out};
                 };
-
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.") + prop, native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number." + prop, native_impl, env, mem->token)};
             }
 
-            // toFixed(digits?)
             if (prop == "kadiriaKwa" || prop == "toFixed") {
-                auto native_impl = [this,
-                                       num](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                auto native_impl = [this, num](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                     int digits = 0;
-                    if (!args.empty()) digits = static_cast<int>(to_number(args[0]));
+                    if (!args.empty()) digits = static_cast<int>(to_number(args[0], token));
                     std::ostringstream oss;
                     oss.setf(std::ios::fixed);
                     oss.precision(std::max(0, digits));
                     oss << num;
-                    return Value{
-                        oss.str()};
+                    return Value{oss.str()};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.toFixed"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.toFixed", native_impl, env, mem->token)};
             }
 
-            // kwaKiwango(factor) -> num * factor
             if (prop == "kwaKiwango") {
-                auto native_impl = [this,
-                                       num](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    if (args.empty()) throw std::runtime_error("n.kwaKiwango needs atleast one argument at " + token.loc.to_string());
-                    double factor = to_number(args[0]);
-                    return Value{
-                        num * factor};
+                auto native_impl = [this, num](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (args.empty()) throw std::runtime_error(
+                        "ValueError at " + token.loc.to_string() +
+                        "\nn.kwaKiwango needs at least one argument" +
+                        "\n --> Traced at:\n" + token.loc.get_line_trace());
+                    double factor = to_number(args[0], token);
+                    return Value{num * factor};
                 };
-                auto fn = std::make_shared<FunctionValue>(std::string("native:number.kwaKiwango"), native_impl, env, mem->token);
-                return Value{
-                    fn};
+                return Value{std::make_shared<FunctionValue>("native:number.kwaKiwango", native_impl, env, mem->token)};
             }
 
             // If none matched, fallthrough to unknown prop logic below
@@ -860,37 +767,45 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // Array properties & methods
         if (std::holds_alternative<ArrayPtr>(objVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
-
+        
             // length property
             if (mem->property == "idadi") {
-                return Value{
-                    static_cast<double>(arr ? arr->elements.size() : 0)};
+                return Value{static_cast<double>(arr ? arr->elements.size() : 0)};
             }
-
-            // Accept multiple synonyms for common operations (keeps compatibility)
+        
             const std::string& prop = mem->property;
-
+        
             // Recognized array method names
-            if (prop == "join" || prop == "reduce" || prop == "filter" || prop == "map" || prop == "slice" || prop == "splice" || prop == "includes" || prop == "sort" || prop == "reverse" || prop == "extend" || prop == "unshift" || prop == "insert" || prop == "shift" || prop == "removeAll" || prop == "pop" || prop == "push" || prop == "urefu" || prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" || prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
-                prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" ||
-                prop == "panua" || prop == "badili" || prop == "tafuta" || prop == "kuna" ||
-                prop == "panga" || prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" || prop == "unganisha" || prop == "ondoaZote" || prop == "pachika") {
+            if (prop == "join" || prop == "reduce" || prop == "filter" || prop == "map" ||
+                prop == "slice" || prop == "splice" || prop == "includes" || prop == "sort" ||
+                prop == "reverse" || prop == "extend" || prop == "unshift" || prop == "insert" ||
+                prop == "shift" || prop == "removeAll" || prop == "pop" || prop == "push" ||
+                prop == "urefu" || prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" ||
+                prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
+                prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" || prop == "panua" ||
+                prop == "badili" || prop == "tafuta" || prop == "kuna" || prop == "panga" ||
+                prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" ||
+                prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach") {
+        
                 auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
-
+        
                     // urefu() -> returns array length (same as .idadi property)
                     if (prop == "urefu") {
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-
+        
                     // push: ongeza(value...)
                     if (prop == "ongeza" || prop == "push") {
-                        if (args.empty()) throw std::runtime_error("arr.ongeza needs atleast 1 arg at " + token.loc.to_string());
+                        if (args.empty())
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.ongeza requires at least 1 argument (value to push). Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
                         arr->elements.insert(arr->elements.end(), args.begin(), args.end());
-                        return Value{
-                            static_cast<double>(arr->elements.size())};
+                        return Value{static_cast<double>(arr->elements.size())};
                     }
-
+        
                     // pop (from end) : toa
                     if (prop == "toa" || prop == "pop") {
                         if (arr->elements.empty()) return std::monostate{};
@@ -898,29 +813,33 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         arr->elements.pop_back();
                         return v;
                     }
-
-                    // remove by value: ondoa(value) -> removes first occurrence, returns boolean
+        
+                    // remove by value: ondoa(value)
                     if (prop == "ondoa") {
-                      if(args.empty()) {
-                        throw std::runtime_error("native.array.ondoa() at " + token.loc.to_string() + "\nneeds one argument, an element to remove from an array. \nremoves by value: ondoa(value) -> removes first occurrence, returns bool(kweli|sikweli)");
-                      }
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.ondoa requires 1 argument (element to remove). Returns boolean (kweli|sikweli)." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         auto it = std::find_if(arr->elements.begin(), arr->elements.end(), [&](const Value& elem) {
                             return is_equal(elem, args[0]);
                         });
                         if (it != arr->elements.end()) {
                             arr->elements.erase(it);
-                            return Value{
-                                true};
+                            return Value{true};
                         }
-                        return Value{
-                            false};
+                        return Value{false};
                     }
-
-                    // remove all by value: ondoaZote(value) -> removes all occurrences, returns count removed
+        
+                    // remove all by value: ondoaZote(value)
                     if (prop == "ondoaZote" || prop == "removeAll") {
-                      if(args.empty()) {
-                        throw std::runtime_error("native.array.ondoaZote() at " + token.loc.to_string() + "\nneeds one argument, an element to remove from an array. \nremove all by value: ondoaZote(value) -> removes all occurrences, returns count removed.");
-                      }
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.ondoaZote requires 1 argument (element to remove all occurrences). Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         size_t before = arr->elements.size();
                         arr->elements.erase(
                             std::remove_if(arr->elements.begin(), arr->elements.end(), [&](const Value& elem) {
@@ -928,10 +847,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             }),
                             arr->elements.end());
                         size_t removed = before - arr->elements.size();
-                        return Value{
-                            static_cast<double>(removed)};
+                        return Value{static_cast<double>(removed)};
                     }
-
+        
                     // shift: ondoaMwanzo
                     if (prop == "ondoaMwanzo" || prop == "shift") {
                         if (arr->elements.empty()) return std::monostate{};
@@ -939,297 +857,287 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         arr->elements.erase(arr->elements.begin());
                         return v;
                     }
-
+        
                     // unshift: ongezaMwanzo(...)
                     if (prop == "ongezaMwanzo" || prop == "unshift") {
-                        if (args.empty()) throw std::runtime_error("arr.ongezaMwanzo needs atleast 1 arg at " + token.loc.to_string() + "\nunshift: ongezaMwanzo(...)");
+                        if (args.empty())
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.ongezaMwanzo requires at least 1 argument (value to unshift). Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
                         arr->elements.insert(arr->elements.begin(), args.begin(), args.end());
-                        return Value{
-                            static_cast<double>(arr->elements.size())};
+                        return Value{static_cast<double>(arr->elements.size())};
                     }
-
+        
                     // insert(value, index)
                     if (prop == "ingiza" || prop == "insert") {
-                        if (args.size() < 2) throw std::runtime_error("arr.ingiza needs atleast 2 arguments (value, index) at " + token.loc.to_string());
+                        if (args.size() < 2)
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.ingiza requires 2 arguments (value, index). Got " + std::to_string(args.size()) + "." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
                         const Value& val = args[0];
-                        long long idx = static_cast<long long>(to_number(args[1]));
+                        long long idx = static_cast<long long>(to_number(args[1], token));
                         if (idx < 0) idx = 0;
                         size_t uidx = static_cast<size_t>(std::min<long long>(idx, static_cast<long long>(arr->elements.size())));
                         arr->elements.insert(arr->elements.begin() + uidx, val);
-                        return Value{
-                            static_cast<double>(arr->elements.size())};
+                        return Value{static_cast<double>(arr->elements.size())};
                     }
-
+        
                     // clear: futa()
                     if (prop == "futa") {
                         arr->elements.clear();
                         return std::monostate{};
                     }
-
+        
                     // extend: panua(otherArray)
                     if (prop == "panua" || prop == "extend") {
                         if (args.empty() || !std::holds_alternative<ArrayPtr>(args[0])) {
-                            throw std::runtime_error("arr.panua needs an array as an argument at " + token.loc.to_string());
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.panua expects an array as the first argument. Got " + (args.empty() ? "none" : "a non-array type") + "." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-
                         ArrayPtr other = std::get<ArrayPtr>(args[0]);
-
                         auto out = std::make_shared<ArrayValue>();
-                        if (arr) {
-                            // copy all elements of the current array
-                            out->elements.insert(out->elements.end(), arr->elements.begin(), arr->elements.end());
-                        }
-                        if (other) {
-                            // append all elements of the other array
-                            out->elements.insert(out->elements.end(), other->elements.begin(), other->elements.end());
-                        }
-
-                        return Value{
-                            out};
+                        if (arr) out->elements.insert(out->elements.end(), arr->elements.begin(), arr->elements.end());
+                        if (other) out->elements.insert(out->elements.end(), other->elements.begin(), other->elements.end());
+                        return Value{out};
                     }
-
+        
                     // reverse: geuza()
                     if (prop == "geuza" || prop == "reverse") {
                         std::reverse(arr->elements.begin(), arr->elements.end());
-                        return Value{
-                            arr};
+                        return Value{arr};
                     }
-
+        
                     // sort: panga([comparator])
                     if (prop == "panga" || prop == "sort") {
+                        if (!args.empty() && !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.panga expects a comparator function as the first argument. Got a non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         if (args.empty()) {
-                            // default: lexicographic by to_string_value
                             std::sort(arr->elements.begin(), arr->elements.end(), [this](const Value& A, const Value& B) {
                                 return to_string_value(A) < to_string_value(B);
                             });
                         } else {
-                            if (!std::holds_alternative<FunctionPtr>(args[0])) throw std::runtime_error("arr.panga expects comparator function at " + token.loc.to_string());
                             FunctionPtr cmp = std::get<FunctionPtr>(args[0]);
                             std::sort(arr->elements.begin(), arr->elements.end(), [&](const Value& A, const Value& B) {
                                 Value res = call_function(cmp, {A, B}, token);
-                                // comparator should return number <0,0,>0 similar to JS - we treat negative as A<B
-                                return to_number(res) < 0;
+                                return to_number(res, token) < 0;
                             });
                         }
-                        return Value{
-                            arr};
+                        return Value{arr};
                     }
-
-                    // indexOf: indexOf(value) -> returns index or -1
-                    // indexOf with optional start and backward-search sentinel: indexOf(value, start?)
+        
+                    // indexOf: indexOf(value, start?) -> returns index or -1
                     if (prop == "indexOf" || prop == "indexYa") {
-                        if (args.empty()) throw std::runtime_error("arr.indexOf needs one argument at " + token.loc.to_string());
-
+                        if (args.empty())
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.indexOf requires at least 1 argument (value to search). Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
                         const Value& target = args[0];
                         long long n = static_cast<long long>(arr->elements.size());
-
-                        // empty array -> not found
-                        if (n == 0) return Value{
-                            static_cast<double>(-1)};
-
-                        // parse start if provided
+                        if (n == 0) return Value{static_cast<double>(-1)};
                         long long startNum = 0;
-                        bool backwardMode = false;  // when start == -1 => search backwards from last to first
-
+                        bool backwardMode = false;
                         if (args.size() >= 2) {
-                            startNum = static_cast<long long>(to_number(args[1]));  // cast like other parts of your code
-                            if (startNum == -1) {
-                                backwardMode = true;
-                            }
+                            startNum = static_cast<long long>(to_number(args[1], token));
+                            if (startNum == -1) backwardMode = true;
                         }
-
-                        // Backward search mode: start from last element and move to index 0
                         if (backwardMode) {
                             for (long long i = n - 1; i >= 0; --i) {
-                                if (is_equal(arr->elements[(size_t)i], target)) return Value{
-                                    static_cast<double>(i)};
-                                if (i == 0) break;  // avoid negative wrap when i is unsigned in some contexts
+                                if (is_equal(arr->elements[(size_t)i], target)) return Value{static_cast<double>(i)};
+                                if (i == 0) break;
                             }
-                            return Value{
-                                static_cast<double>(-1)};
+                            return Value{static_cast<double>(-1)};
                         }
-
-                        // Forward search mode:
-                        // Normalize negative start as offset from end (like JS semantics for negative fromIndex)
                         long long startIndex = startNum;
-                        if (args.size() >= 2 && startIndex < 0) {
-                            startIndex = std::max(0LL, n + startIndex);
-                        }
-
-                        // If startIndex is past the end, nothing to search
-                        if (startIndex >= n) return Value{
-                            static_cast<double>(-1)};
-
+                        if (args.size() >= 2 && startIndex < 0) startIndex = std::max(0LL, n + startIndex);
+                        if (startIndex >= n) return Value{static_cast<double>(-1)};
                         for (long long i = startIndex; i < n; ++i) {
-                            if (is_equal(arr->elements[(size_t)i], target)) return Value{
-                                static_cast<double>(i)};
+                            if (is_equal(arr->elements[(size_t)i], target)) return Value{static_cast<double>(i)};
                         }
-
-                        return Value{
-                            static_cast<double>(-1)};
+                        return Value{static_cast<double>(-1)};
                     }
-
-                    // find: tafuta(fn) -> returns first element matching fn(elem, index, arr)
+        
+                    // find: tafuta(fn)
                     if (prop == "tafuta") {
-                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0]))
-                            throw std::runtime_error("arr.tafuta needs a function as an argument at " + token.loc.to_string());
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.tafuta requires a function as its first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
-
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
                             Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
-
-                            if (to_bool(res))
-                                return arr->elements[i];  // return first matching element
+                            if (to_bool(res)) return arr->elements[i];
                         }
-                        return std::monostate{};  // like JS undefined when no match
+                        return std::monostate{};
                     }
-
-                    // findIndex: tafutaKwanza(fn) -> returns index of first match or -1
+        
+                    // findIndex: tafutaIndex(fn)
                     if (prop == "tafutaIndex") {
-                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0]))
-                            throw std::runtime_error("arr.tafutaIndex needs a function as argument at " + token.loc.to_string());
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.tafutaIndex requires a function as its first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
-
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
                             Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
-
-                            if (to_bool(res))
-                                return Value{
-                                    static_cast<double>(i)};
+                            if (to_bool(res)) return Value{static_cast<double>(i)};
                         }
-                        return Value{
-                            static_cast<double>(-1)};
+                        return Value{static_cast<double>(-1)};
                     }
-
+        
                     // includes: kuna(value)
                     if (prop == "kuna" || prop == "includes") {
-                        if (args.empty()) throw std::runtime_error("arr.kuna needs 1 args at " + token.loc.to_string());
-                        for (const auto& e : arr->elements)
-                            if (is_equal(e, args[0])) return Value{
-                                true};
-                        return Value{
-                            false};
+                        if (args.empty())
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.kuna requires 1 argument (value to check). Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        for (const auto& e : arr->elements) if (is_equal(e, args[0])) return Value{true};
+                        return Value{false};
                     }
-
-                    // slice: slesi(start?, end?) or slice
+        
+                    // slice: slesi(start?, end?)
                     if (prop == "slesi" || prop == "slice") {
                         long long n = static_cast<long long>(arr->elements.size());
                         long long start = 0;
                         long long end = n;
-                        if (args.size() >= 1) start = static_cast<long long>(to_number(args[0]));
-                        if (args.size() >= 2) end = static_cast<long long>(to_number(args[1]));
-                        // normalize negative
+                        if (args.size() >= 1) start = static_cast<long long>(to_number(args[0], token));
+                        if (args.size() >= 2) end = static_cast<long long>(to_number(args[1], token));
                         if (start < 0) start = std::max(0LL, n + start);
                         if (end < 0) end = std::max(0LL, n + end);
                         start = std::min(std::max(0LL, start), n);
                         end = std::min(std::max(0LL, end), n);
                         auto out = std::make_shared<ArrayValue>();
                         for (long long i = start; i < end; ++i) out->elements.push_back(arr->elements[(size_t)i]);
-                        return Value{
-                            out};
+                        return Value{out};
                     }
-
+        
                     // splice: pachika(start, deleteCount, ...items)
                     if (prop == "pachika" || prop == "splice") {
-                        if (args.size() < 2)
-                            throw std::runtime_error("arr.pachika needs at least 2 args at " + token.loc.to_string() + "\nsplice: pachika(start, deleteCount, ...items)");
-
-                        long long start = static_cast<long long>(to_number(args[0]));
-                        long long delCount = static_cast<long long>(to_number(args[1]));
-
+                        if (args.size() < 2) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.pachika requires at least 2 arguments (start, deleteCount). Got " + std::to_string(args.size()) + "." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        long long start = static_cast<long long>(to_number(args[0], token));
+                        long long delCount = static_cast<long long>(to_number(args[1], token));
                         if (start < 0) start = std::max(0LL, (long long)arr->elements.size() + start);
                         start = std::min(start, (long long)arr->elements.size());
                         delCount = std::max(0LL, std::min(delCount, (long long)arr->elements.size() - start));
-
                         auto out = std::make_shared<ArrayValue>();
-                        out->elements.insert(out->elements.end(),
-                            arr->elements.begin() + start,
-                            arr->elements.begin() + start + delCount);
-
-                        // erase deleted
-                        arr->elements.erase(arr->elements.begin() + start,
-                            arr->elements.begin() + start + delCount);
-
-                        // insert new items if any
-                        if (args.size() > 2) {
-                            arr->elements.insert(arr->elements.begin() + start, args.begin() + 2, args.end());
-                        }
-
-                        return Value{out};  // return deleted elements
+                        out->elements.insert(out->elements.end(), arr->elements.begin() + start, arr->elements.begin() + start + delCount);
+                        arr->elements.erase(arr->elements.begin() + start, arr->elements.begin() + start + delCount);
+                        if (args.size() > 2) arr->elements.insert(arr->elements.begin() + start, args.begin() + 2, args.end());
+                        return Value{out};
                     }
-
+        
                     // map: badili(fn)
                     if (prop == "badili" || prop == "map") {
-                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) throw std::runtime_error("arr.badili needs a function as an argument at " + token.loc.to_string());
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.badili requires a function as the first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         FunctionPtr mapper = std::get<FunctionPtr>(args[0]);
                         auto out = std::make_shared<ArrayValue>();
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
                             Value res = call_function(mapper, {arr->elements[i], Value{static_cast<double>(i)}}, token);
                             out->elements.push_back(res);
                         }
-                        return Value{
-                            out};
+                        return Value{out};
                     }
-
-                    // filter: chambua(fn) -> returns new array with elements where fn(elem, index, arr) is truthy
+        
+                    // forEach : kwaKila(fn)
+                    if (prop == "kwaKila" || prop == "forEach") {
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.kwaKila requires a function argument. Syntax: arr.kwaKila(fn), fn(elem, index?, array?)" +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+        
+                        FunctionPtr fn = std::get<FunctionPtr>(args[0]);
+                        for (size_t i = 0; i < arr->elements.size(); ++i) {
+                            call_function(fn, { arr->elements[i], Value{ static_cast<double>(i) }, Value{ arr } }, token);
+                        }
+                        return std::monostate{};
+                    }
+        
+                    // filter: chambua(fn)
                     if (prop == "chambua" || prop == "filter") {
-                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0]))
-                            throw std::runtime_error("arr.chambua needs a filter function as an argument at " + token.loc.to_string());
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.chambua requires a filter function as the first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
-
                         auto out = std::make_shared<ArrayValue>();
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
                             Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
                             if (to_bool(res)) out->elements.push_back(arr->elements[i]);
                         }
-                        return Value{
-                            out};
+                        return Value{out};
                     }
-
-                    // reduce: punguza(fn, initial?) -> reduce array to single value
+        
+                    // reduce: punguza(fn, initial?)
                     if (prop == "punguza" || prop == "reduce") {
-                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0]))
-                            throw std::runtime_error("arr.punguza needs a function as an argument at " + token.loc.to_string());
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.punguza requires a reducer function as the first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
                         FunctionPtr reducer = std::get<FunctionPtr>(args[0]);
-
                         size_t startIndex = 0;
                         Value acc;
-
                         if (args.size() >= 2) {
-                            // initial provided
                             acc = args[1];
                             startIndex = 0;
                         } else {
-                            // no initial: use first element as acc (JS-like). If empty -> error.
-                            if (arr->elements.empty()) throw std::runtime_error("arr.punguza on empty array without initial at " + token.loc.to_string());
+                            if (arr->elements.empty())
+                                throw std::runtime_error(
+                                    "TypeError at " + token.loc.to_string() +
+                                    "\narr.punguza called on empty array without initial value." +
+                                    "\n --> Traced at:\n" + token.loc.get_line_trace());
                             acc = arr->elements[0];
                             startIndex = 1;
                         }
-
                         for (size_t i = startIndex; i < arr->elements.size(); ++i) {
                             acc = call_function(reducer, {acc, arr->elements[i], Value{static_cast<double>(i)}}, token);
                         }
                         return acc;
                     }
-
-                    // join: unganisha(separator?) -> returns string (elements coerced to string)
+        
+                    // join: unganisha(separator?)
                     if (prop == "unganisha" || prop == "join") {
                         std::string sep = ",";
-                        if (!args.empty()) sep = to_string_value(args[0]);  // coerce separator to string
-
+                        if (!args.empty()) sep = to_string_value(args[0]);
                         std::ostringstream oss;
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
                             if (i) oss << sep;
                             oss << to_string_value(arr->elements[i]);
                         }
-                        return Value{
-                            oss.str()};
+                        return Value{oss.str()};
                     }
-
-                    // default fallback
+        
                     return std::monostate{};
                 };
-
+        
                 auto fn = std::make_shared<FunctionValue>(std::string("native:array.") + prop, native_impl, env, mem->token);
                 return Value{fn};
             }
@@ -1238,213 +1146,239 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
             const std::string& prop = mem->property;
-            
-            if(prop == "__proto__") {
-              auto obj = std::make_shared<ObjectValue>();
-              obj->properties["object_size"] = {Value(static_cast<double>(op ? op->properties.size() : 0)), false, false, true, Token()};
-              {
-                auto arr = std::make_shared<ArrayValue>();
-                  for (auto& key : op->properties) {
-                      arr->elements.push_back(key.first);
-                  }
-                obj->properties["properties"] = {Value(arr), false, false, true, Token()};
-              }
-              {
-                
-                auto set_private__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
-                  if(args.empty()) {
-                    throw std::runtime_error("__proto__.set_private requires an object key as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  std::string name = to_string_value(args[0]);
-                  auto it = op->properties.find(name);
-                  if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have named property `" + to_string_value(args[0], true)+"` to set to private at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  PropertyDescriptor& desc = it->second;
-                  desc.is_private = true;
-                  return Value(bool(desc.is_private));
-                };
-                
-                auto set_private = std::make_shared<FunctionValue>("__proto__set_private",set_private__proto, env, Token{});
-                obj->properties["set_private"] = {
-                  set_private,
-                  false,
-                  false,
-                  true,
-                  Token()
-                };
-              }
-              {
-                
-                auto set_lock__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
-                  if(args.empty()) {
-                    throw std::runtime_error("__proto__.set_lock requires an object key as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  std::string name = to_string_value(args[0]);
-                  auto it = op->properties.find(name);
-                  if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have a named property `" + to_string_value(args[0], true)+"` to set a lock at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  
-                  PropertyDescriptor& desc = it->second;
-                  desc.is_locked = true;
-                  return Value(bool(desc.is_locked));
-                };
-                
-                auto set_lock= std::make_shared<FunctionValue>("__proto__set_lock",set_lock__proto, env, Token{});
-                obj->properties["set_lock"] = {
-                  set_lock,
-                  false,
-                  false,
-                  true,
-                  Token()
-                };
-              }
-              {
-                
-                auto delete__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
-                  if(args.empty()) {
-                    throw std::runtime_error("__proto___delete requires a property key to delete as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  if(op->is_frozen) throw std::runtime_error("Can not delete, add no more or modify properties of a frozen object at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  std::string name = to_string_value(args[0]);
-                  auto it = op->properties.find(name);
-                  if(it == op->properties.end()) {
-                    throw std::runtime_error("Object doesn't have a key named `" + to_string_value(args[0], true) + "` to delete at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  
-                  
-                  PropertyDescriptor& desc = it->second;
-                  if(desc.is_private && !is_private_access_allowed(op, env)) {
-                    throw std::runtime_error("Can not delete a private member from outside the object at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  if(desc.is_locked && !is_private_access_allowed(op, env)) {
-                    throw std::runtime_error("Can not delete a locked member from outside the object at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  
-                  auto itp = op->properties.find(name);
-                  if(itp != op->properties.end()) {
-                    op->properties.erase(itp);
-                    return Value(bool(true));
-                  }
-                  
-                  return Value(bool(false));
-                  
-                };
-                
-                auto delete_prop = std::make_shared<FunctionValue>("__proto__delete", delete__proto, env, Token{});
-                obj->properties["delete"] = {
-                  delete_prop,
-                  false,
-                  false,
-                  true,
-                  Token()
-                };
-              }
-              {
-                auto freeze__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
-                  bool freeze = true;
-                  if(!args.empty()) {
-                    freeze = to_bool(args[0]);
-                  }
-                  op->is_frozen = freeze;
-                  return Value(op->is_frozen);
-                };
-                
-                auto freeze = std::make_shared<FunctionValue>("__proto__freeze", freeze__proto, env, Token{});
-                obj->properties["freeze"] = {
-                  freeze,
-                  false,
-                  false,
-                  true,
-                  Token()
-                };
-              }
-              {
-                auto has__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
-                  if(args.empty()) {
-                    throw std::runtime_error("__proto__has requires a key as an argument at " + token.loc.to_string() + "\n --> Traced at: \n" + token.loc.get_line_trace());
-                  }
-                  std::string key = to_string_value(args[0]);
-                  auto it = op->properties.find(key);
-                  if(it != op->properties.end()) {
-                    return Value(bool(true));
-                  }
-                  return Value(bool(false));
-                };
-                
-                auto has = std::make_shared<FunctionValue>("__proto__has", has__proto, env, Token{});
-                obj->properties["has"] = {
-                  has,
-                  false,
-                  false,
-                  true,
-                  Token()
-                };
-              }
-              {
-                auto is_frozen_fn = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
-                  return Value(op->is_frozen);
-                };
-                
-                auto is_frozen = std::make_shared<FunctionValue>("__proto__is_frozen", is_frozen_fn, env, Token{});
-                obj->properties["is_frozen"] = {
-                  is_frozen,
-                  false,
-                  true,
-                  true,
-                  Token()
-                };
-              }
-              return Value(obj);
+        
+            if (prop == "__proto__") {
+                auto obj = std::make_shared<ObjectValue>();
+                obj->properties["object_size"] = {Value(static_cast<double>(op ? op->properties.size() : 0)), false, false, true, Token()};
+                {
+                    auto arr = std::make_shared<ArrayValue>();
+                    for (auto& key : op->properties) {
+                        arr->elements.push_back(key.first);
+                    }
+                    obj->properties["properties"] = {Value(arr), false, false, true, Token()};
+                }
+                {
+                    auto set_private__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\n__proto__.set_private requires an object key (string) as its first argument. Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        std::string name = to_string_value(args[0]);
+                        auto it = op->properties.find(name);
+                        if (it == op->properties.end()) {
+                            throw std::runtime_error(
+                                "ReferenceError at " + token.loc.to_string() +
+                                "\nCannot set property to private: object does not have a property named `" + to_string_value(args[0], true) + "`." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        PropertyDescriptor& desc = it->second;
+                        desc.is_private = true;
+                        return Value(bool(desc.is_private));
+                    };
+        
+                    auto set_private = std::make_shared<FunctionValue>("__proto__set_private", set_private__proto, env, Token{});
+                    obj->properties["set_private"] = {
+                        set_private,
+                        false,
+                        false,
+                        true,
+                        Token()};
+                }
+                {
+                    auto set_lock__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\n__proto__.set_lock requires an object key (string) as its first argument. Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        std::string name = to_string_value(args[0]);
+                        auto it = op->properties.find(name);
+                        if (it == op->properties.end()) {
+                            throw std::runtime_error(
+                                "ReferenceError at " + token.loc.to_string() +
+                                "\nCannot set lock: object does not have a property named `" + to_string_value(args[0], true) + "`." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+        
+                        PropertyDescriptor& desc = it->second;
+                        desc.is_locked = true;
+                        return Value(bool(desc.is_locked));
+                    };
+        
+                    auto set_lock = std::make_shared<FunctionValue>("__proto__set_lock", set_lock__proto, env, Token{});
+                    obj->properties["set_lock"] = {
+                        set_lock,
+                        false,
+                        false,
+                        true,
+                        Token()};
+                }
+                {
+                    auto delete__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\n__proto__.delete requires a property key (string) to delete as its first argument. Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        if (op->is_frozen) throw std::runtime_error(
+                            "PermissionError at " + token.loc.to_string() +
+                            "\nCannot delete properties: object is frozen (no deletions/modifications allowed)." +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        std::string name = to_string_value(args[0]);
+                        auto it = op->properties.find(name);
+                        if (it == op->properties.end()) {
+                            throw std::runtime_error(
+                                "ReferenceError at " + token.loc.to_string() +
+                                "\nCannot delete property: object does not have a key named `" + to_string_value(args[0], true) + "`." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+        
+                        PropertyDescriptor& desc = it->second;
+                        if (desc.is_private && !is_private_access_allowed(op, env)) {
+                            throw std::runtime_error(
+                                "PermissionError at " + token.loc.to_string() +
+                                "\nCannot delete a private member from outside the object." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        if (desc.is_locked && !is_private_access_allowed(op, env)) {
+                            throw std::runtime_error(
+                                "PermissionError at " + token.loc.to_string() +
+                                "\nCannot delete a locked member from outside the object." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+        
+                        auto itp = op->properties.find(name);
+                        if (itp != op->properties.end()) {
+                            op->properties.erase(itp);
+                            return Value(bool(true));
+                        }
+        
+                        return Value(bool(false));
+                    };
+        
+                    auto delete_prop = std::make_shared<FunctionValue>("__proto__delete", delete__proto, env, Token{});
+                    obj->properties["delete"] = {
+                        delete_prop,
+                        false,
+                        false,
+                        true,
+                        Token()};
+                }
+                {
+                    auto freeze__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                        bool freeze = true;
+                        if (!args.empty()) {
+                            freeze = to_bool(args[0]);
+                        }
+                        op->is_frozen = freeze;
+                        return Value(op->is_frozen);
+                    };
+        
+                    auto freeze = std::make_shared<FunctionValue>("__proto__freeze", freeze__proto, env, Token{});
+                    obj->properties["freeze"] = {
+                        freeze,
+                        false,
+                        false,
+                        true,
+                        Token()};
+                }
+                {
+                    auto has__proto = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\n__proto__.has requires a property key (string) as its first argument. Got 0 arguments." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        std::string key = to_string_value(args[0]);
+                        auto it = op->properties.find(key);
+                        if (it != op->properties.end()) {
+                            return Value(bool(true));
+                        }
+                        return Value(bool(false));
+                    };
+        
+                    auto has = std::make_shared<FunctionValue>("__proto__has", has__proto, env, Token{});
+                    obj->properties["has"] = {
+                        has,
+                        false,
+                        false,
+                        true,
+                        Token()};
+                }
+                {
+                    auto is_frozen_fn = [&](const std::vector<Value>& args, EnvPtr env, const Token& token) {
+                        return Value(op->is_frozen);
+                    };
+        
+                    auto is_frozen = std::make_shared<FunctionValue>("__proto__is_frozen", is_frozen_fn, env, Token{});
+                    obj->properties["is_frozen"] = {
+                        is_frozen,
+                        false,
+                        true,
+                        true,
+                        Token()};
+                }
+                return Value(obj);
             }
             return get_object_property(op, mem->property, env);
         }
         // For other non-array/non-string objects, return undefined for unknown props
-        throw std::runtime_error("Unknown property '" + mem->property + "' on value at " + mem->token.loc.to_string() + "\n --> Traced at: \n" + mem->token.loc.get_line_trace());
+        throw std::runtime_error(
+            "ReferenceError at " + mem->token.loc.to_string() +
+            "\nUnknown property '" + mem->property + "' on value." +
+            "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
+
     }
 
     // Indexing: obj[index]
     if (auto idx = dynamic_cast<IndexExpressionNode*>(expr)) {
         // Evaluate receiver first.
         Value objVal = evaluate_expression(idx->object.get(), env);
-
+    
         // Optional chaining: if receiver is nullish and this is an optional index,
         // short-circuit and return undefined without evaluating the index expression.
         if (idx->is_optional && is_nullish(objVal)) {
             return std::monostate{};
         }
-
+    
         // Ensure index expression exists
         if (!idx->index) {
-            throw std::runtime_error("Index expression missing at " + idx->token.loc.to_string());
+            throw std::runtime_error(
+                "TypeError at " + idx->token.loc.to_string() +
+                "\nIndex expression missing." +
+                "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
         }
-
+    
         // Now safe to evaluate the index expression.
         Value indexVal = evaluate_expression(idx->index.get(), env);
-
+    
         // Array indexing uses numeric interpretation of indexVal
         if (std::holds_alternative<ArrayPtr>(objVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
             if (!arr) return std::monostate{};
-
+    
             long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
             if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
                 return std::monostate{};
             }
             return arr->elements[(size_t)rawIndex];
         }
-
+    
         // String indexing: return single-char string (optional)
         if (std::holds_alternative<std::string>(objVal)) {
             std::string s = std::get<std::string>(objVal);
-            long long rawIndex = static_cast<long long>(to_number(indexVal));
+            long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
             if (rawIndex < 0 || (size_t)rawIndex >= s.size()) {
                 return std::monostate{};
             }
             return Value{std::string(1, s[(size_t)rawIndex])};
         }
-
+    
         // Objects: use stringified index as key, go through unified getter (privacy/getter enforced)
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
@@ -1452,17 +1386,26 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             std::string key = to_string_value(indexVal);
             return get_object_property(op, key, env);
         }
-
-        throw std::runtime_error("Attempted to index non-array value at " + idx->token.loc.to_string());
+    
+        throw std::runtime_error(
+            "TypeError at " + idx->token.loc.to_string() +
+            "\nAttempted to index a non-array/non-string/non-object value." +
+            "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
     }
+
 
     if (auto u = dynamic_cast<UnaryExpressionNode*>(expr)) {
         Value operand = evaluate_expression(u->operand.get(), env);
-        if (u->op == "!" || u->op == "si") return Value{
-            !to_bool(operand)};
-        if (u->op == "-") return Value{
-            -to_number(operand)};
-
+    
+        if (u->op == "!" || u->op == "si") {
+            return Value{ !to_bool(operand) };
+        }
+    
+        if (u->op == "-") {
+            // ensure to_number receives token for accurate traced errors
+            return Value{ -to_number(operand, u->token) };
+        }
+    
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
         if (u->op == "aina") {
             std::string t = "unknown";
@@ -1482,10 +1425,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 t = "object";
             else if (std::holds_alternative<ClassPtr>(operand))
                 t = "muundo";
-            return Value{t};
+            return Value{ t };
         }
-
-        throw std::runtime_error("Unknown unary operator '" + u->op + "' at " + u->token.loc.to_string());
+    
+        throw std::runtime_error(
+            "SyntaxError at " + u->token.loc.to_string() +
+            "\nUnknown unary operator '" + u->op + "'." +
+            "\n --> Traced at:\n" + u->token.loc.get_line_trace());
     }
 
     if (auto b = dynamic_cast<BinaryExpressionNode*>(expr)) {
@@ -1503,13 +1449,16 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     auto it = walk->values.find(leftIdent->name);
                     if (it != walk->values.end()) {
                         if (it->second.is_constant) {
-                            throw std::runtime_error("Cannot assign to constant '" + leftIdent->name + "' at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
+                            throw std::runtime_error(
+                                "TypeError at " + b->token.loc.to_string() +
+                                "\nCannot assign to constant '" + leftIdent->name + "'." +
+                                "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                         }
-
+    
                         // IMPORTANT: avoid converting stored value to number until we know
                         // we're on the numeric path. For += we must first check string concat.
                         if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
-                            double oldv = to_number(it->second.value);
+                            double oldv = to_number(it->second.value, b->token);
                             double newv = oldv;
                             if (b->token.type == TokenType::INCREMENT)
                                 newv = oldv + 1.0;
@@ -1518,7 +1467,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             it->second.value = Value{newv};
                             return Value{newv};
                         }
-
+    
                         if (b->token.type == TokenType::PLUS_ASSIGN) {
                             Value rightVal = evaluate_expression(b->right.get(), env);
                             // string concat if either side is string
@@ -1529,18 +1478,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 return Value{out};
                             }
                             // numeric path
-                            double oldv = to_number(it->second.value);
-                            double rv = to_number(rightVal);
+                            double oldv = to_number(it->second.value, b->token);
+                            double rv = to_number(rightVal, b->token);
                             double newv = oldv + rv;
                             it->second.value = Value{newv};
                             return Value{newv};
                         }
-
+    
                         // other compound ops: numeric-only
                         {
                             Value rightVal = evaluate_expression(b->right.get(), env);
-                            double oldv = to_number(it->second.value);
-                            double rv = to_number(rightVal);
+                            double oldv = to_number(it->second.value, b->token);
+                            double rv = to_number(rightVal, b->token);
                             double newv = oldv;
                             if (b->token.type == TokenType::MINUS_ASSIGN)
                                 newv = oldv - rv;
@@ -1554,7 +1503,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
                     walk = walk->parent;
                 }
-
+    
                 // Not found in any parent -> create in current env (same behavior as assignment).
                 // For += with string RHS create a string, otherwise create numeric start value.
                 if (b->token.type == TokenType::PLUS_ASSIGN) {
@@ -1563,13 +1512,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     if (std::holds_alternative<std::string>(rightVal)) {
                         var.value = to_string_value(rightVal);
                     } else {
-                        var.value = to_number(rightVal);
+                        var.value = Value{ to_number(rightVal, b->token) };
                     }
                     var.is_constant = false;
                     env->set(leftIdent->name, var);
                     return var.value;
                 }
-
+    
                 // compute start value (treat missing as 0 for numeric ops)
                 double start = 0.0;
                 if (b->token.type == TokenType::INCREMENT)
@@ -1581,38 +1530,45 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     start = 0.0;
                 } else {
                     Value rightVal = evaluate_expression(b->right.get(), env);
-                    double rv = to_number(rightVal);
+                    double rv = to_number(rightVal, b->token);
                     start = (b->token.type == TokenType::MINUS_ASSIGN) ? -rv : rv;
                 }
                 Environment::Variable var;
                 var.value = start;
                 var.is_constant = false;
                 env->set(leftIdent->name, var);
-                return Value{
-                    start};
+                return Value{ start };
             }
-
+    
             // Case B: left is an index expression (arr[idx]++ or arr[idx] += ...)
             if (auto idx = dynamic_cast<IndexExpressionNode*>(b->left.get())) {
                 // Evaluate the object expression (this will return ArrayPtr or ObjectPtr)
                 Value objVal = evaluate_expression(idx->object.get(), env);
                 Value indexVal = evaluate_expression(idx->index.get(), env);
-
+    
                 // --- ARRAY PATH ---
                 if (std::holds_alternative<ArrayPtr>(objVal)) {
                     ArrayPtr arr = std::get<ArrayPtr>(objVal);
                     if (!arr) {
-                        throw std::runtime_error("Cannot assign into null array at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
+                        throw std::runtime_error(
+                            "TypeError at " + b->token.loc.to_string() +
+                            "\nCannot assign into null array." +
+                            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                     }
-
-                    long long rawIndex = static_cast<long long>(to_number(indexVal));
-                    if (rawIndex < 0) throw std::runtime_error("Negative array index not supported at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
+    
+                    long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
+                    if (rawIndex < 0) {
+                        throw std::runtime_error(
+                            "RangeError at " + idx->token.loc.to_string() +
+                            "\nNegative array index not supported." +
+                            "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
+                    }
                     size_t uidx = static_cast<size_t>(rawIndex);
                     if (uidx >= arr->elements.size()) arr->elements.resize(uidx + 1);
-
+    
                     // Avoid converting element to number until numeric path chosen.
                     if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
-                        double oldv = to_number(arr->elements[uidx]);
+                        double oldv = to_number(arr->elements[uidx], b->token);
                         double newv = oldv;
                         if (b->token.type == TokenType::INCREMENT)
                             newv = oldv + 1.0;
@@ -1621,7 +1577,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         arr->elements[uidx] = Value{newv};
                         return Value{newv};
                     }
-
+    
                     if (b->token.type == TokenType::PLUS_ASSIGN) {
                         Value rightVal = evaluate_expression(b->right.get(), env);
                         if (std::holds_alternative<std::string>(arr->elements[uidx]) ||
@@ -1630,18 +1586,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             arr->elements[uidx] = Value{out};
                             return Value{out};
                         }
-                        double oldv = to_number(arr->elements[uidx]);
-                        double rv = to_number(rightVal);
+                        double oldv = to_number(arr->elements[uidx], b->token);
+                        double rv = to_number(rightVal, b->token);
                         double newv = oldv + rv;
                         arr->elements[uidx] = Value{newv};
                         return Value{newv};
                     }
-
+    
                     // other compound ops: numeric-only
                     {
                         Value rightVal = evaluate_expression(b->right.get(), env);
-                        double oldv = to_number(arr->elements[uidx]);
-                        double rv = to_number(rightVal);
+                        double oldv = to_number(arr->elements[uidx], b->token);
+                        double rv = to_number(rightVal, b->token);
                         double newv = oldv;
                         if (b->token.type == TokenType::MINUS_ASSIGN)
                             newv = oldv - rv;
@@ -1653,19 +1609,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         return Value{newv};
                     }
                 }
-
+    
                 // --- OBJECT PATH (obj[key]++ / obj[key] += v / obj[key] *= v) ---
                 if (std::holds_alternative<ObjectPtr>(objVal)) {
                     ObjectPtr op = std::get<ObjectPtr>(objVal);
                     if (!op) {
-                        throw std::runtime_error("Cannot operate on null object at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
+                        throw std::runtime_error(
+                            "TypeError at " + b->token.loc.to_string() +
+                            "\nCannot operate on null object." +
+                            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                     }
-
+    
                     // convert indexVal -> property key string
                     std::string prop = to_string_value(indexVal);
-
+    
                     auto it = op->properties.find(prop);
-
+    
                     // If property exists, enforce privacy/read-only rules
                     if (it != op->properties.end()) {
                         if (it->second.is_private) {
@@ -1681,17 +1640,23 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 }
                             }
                             if (!allowed) {
-                                throw std::runtime_error("Cannot assign to private property '" + prop + "' from outside at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
+                                throw std::runtime_error(
+                                    "PermissionError at " + idx->token.loc.to_string() +
+                                    "\nCannot assign to private property '" + prop + "' from outside the owning object." +
+                                    "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
                             }
                         }
-
+    
                         if (it->second.is_readonly) {
-                            throw std::runtime_error("Cannot assign to read-only property '" + prop + "' at " + idx->token.loc.to_string() + "\n --> Traced at: \n" + idx->token.loc.get_line_trace());
+                            throw std::runtime_error(
+                                "TypeError at " + idx->token.loc.to_string() +
+                                "\nCannot assign to read-only property '" + prop + "'." +
+                                "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
                         }
-
+    
                         // Avoid converting to number until numeric path is chosen.
                         if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
-                            double oldv = to_number(it->second.value);
+                            double oldv = to_number(it->second.value, b->token);
                             double newv = oldv;
                             if (b->token.type == TokenType::INCREMENT)
                                 newv = oldv + 1.0;
@@ -1701,7 +1666,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             it->second.token = idx->token;
                             return Value{newv};
                         }
-
+    
                         if (b->token.type == TokenType::PLUS_ASSIGN) {
                             Value rightVal = evaluate_expression(b->right.get(), env);
                             if (std::holds_alternative<std::string>(it->second.value) ||
@@ -1711,19 +1676,19 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 it->second.token = idx->token;
                                 return Value{out};
                             }
-                            double oldv = to_number(it->second.value);
-                            double rv = to_number(rightVal);
+                            double oldv = to_number(it->second.value, b->token);
+                            double rv = to_number(rightVal, b->token);
                             double newv = oldv + rv;
                             it->second.value = Value{newv};
                             it->second.token = idx->token;
                             return Value{newv};
                         }
-
+    
                         // other compound ops: numeric-only
                         {
                             Value rightVal = evaluate_expression(b->right.get(), env);
-                            double oldv = to_number(it->second.value);
-                            double rv = to_number(rightVal);
+                            double oldv = to_number(it->second.value, b->token);
+                            double rv = to_number(rightVal, b->token);
                             double newv = oldv;
                             if (b->token.type == TokenType::MINUS_ASSIGN)
                                 newv = oldv - rv;
@@ -1736,7 +1701,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             return Value{newv};
                         }
                     }
-
+    
                     // Property does not exist -> create public property:
                     // If += with string RHS create string property; otherwise create numeric property
                     if (b->token.type == TokenType::PLUS_ASSIGN) {
@@ -1745,7 +1710,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         if (std::holds_alternative<std::string>(rightVal)) {
                             desc.value = Value{to_string_value(rightVal)};
                         } else {
-                            desc.value = Value{to_number(rightVal)};
+                            desc.value = Value{ to_number(rightVal, b->token) };
                         }
                         desc.is_private = false;
                         desc.is_readonly = false;
@@ -1753,7 +1718,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         op->properties[prop] = std::move(desc);
                         return op->properties[prop].value;
                     }
-
+    
                     // Create numeric property starting from 0 and apply op
                     double oldv = 0.0;
                     double newv = oldv;
@@ -1763,33 +1728,34 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         newv = oldv - 1.0;
                     else if (b->token.type == TokenType::TIMES_ASSIGN) {
                         Value rightVal = evaluate_expression(b->right.get(), env);
-                        double rv = to_number(rightVal);
+                        double rv = to_number(rightVal, b->token);
                         newv = oldv * rv;
                     } else {
                         Value rightVal = evaluate_expression(b->right.get(), env);
-                        double rv = to_number(rightVal);
+                        double rv = to_number(rightVal, b->token);
                         newv = oldv + ((b->token.type == TokenType::MINUS_ASSIGN) ? -rv : rv);
                     }
-
+    
                     PropertyDescriptor desc;
-                    desc.value = Value{
-                        newv};
+                    desc.value = Value{ newv };
                     desc.is_private = false;
                     desc.is_readonly = false;
                     desc.token = idx->token;
                     op->properties[prop] = std::move(desc);
-                    return Value{
-                        newv};
+                    return Value{ newv };
                 }
-
+    
                 // Fallback: not array nor object
-                throw std::runtime_error("Indexed target is not an array or object at " + b->token.loc.to_string() + "\n --> Traced at: \n" + b->token.loc.get_line_trace());
+                throw std::runtime_error(
+                    "TypeError at " + b->token.loc.to_string() +
+                    "\nIndexed target is not an array or object." +
+                    "\n --> Traced at:\n" + b->token.loc.get_line_trace());
             }
         }
         // --- Normal binary evaluation path (short-circuit logicals returning operands) ---
         Value left = evaluate_expression(b->left.get(), env);
         const std::string& op = b->op;
-
+    
         // Logical AND: short-circuit; return operand (left or right) instead of boolean.
         if (op == "&&" || op == "na") {
             // If left is falsy -> return left (no RHS evaluation).
@@ -1797,7 +1763,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // Otherwise evaluate RHS and return the RHS value (preserve identity).
             return evaluate_expression(b->right.get(), env);
         }
-
+    
         // Logical OR: short-circuit; return operand (left or right).
         if (op == "||" || op == "au") {
             // If left is truthy -> return left (no RHS evaluation).
@@ -1805,59 +1771,60 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // Otherwise evaluate RHS and return it.
             return evaluate_expression(b->right.get(), env);
         }
-
+    
         // For all other binary operators evaluate RHS now (both operands required)
         Value right = evaluate_expression(b->right.get(), env);
-
+    
         if (op == "+") {
             // --- string concatenation if either is string ---
             if (std::holds_alternative<std::string>(left) || std::holds_alternative<std::string>(right)) {
-                return Value{
-                    to_string_value(left) + to_string_value(right)};
+                return Value{ to_string_value(left) + to_string_value(right) };
             }
-
+    
             // --- array concatenation if both are arrays ---
             if (std::holds_alternative<ArrayPtr>(left) && std::holds_alternative<ArrayPtr>(right)) {
                 ArrayPtr a1 = std::get<ArrayPtr>(left);
                 ArrayPtr a2 = std::get<ArrayPtr>(right);
-
+    
                 if (!a1 || !a2) {
-                    throw std::runtime_error("Cannot concatenate null arrays at " + b->token.loc.to_string());
+                    throw std::runtime_error(
+                        "TypeError at " + b->token.loc.to_string() +
+                        "\nCannot concatenate null arrays." +
+                        "\n --> Traced at:\n" + b->token.loc.get_line_trace());
                 }
-
+    
                 auto result = std::make_shared<ArrayValue>();
                 result->elements.reserve(a1->elements.size() + a2->elements.size());
                 result->elements.insert(result->elements.end(), a1->elements.begin(), a1->elements.end());
                 result->elements.insert(result->elements.end(), a2->elements.begin(), a2->elements.end());
-
-                return Value{
-                    result};
+    
+                return Value{ result };
             }
-
+    
             // --- fallback numeric addition ---
-            return Value{
-                to_number(left) + to_number(right)};
+            return Value{ to_number(left, b->token) + to_number(right, b->token) };
         }
-
-        if (op == "-") return Value{
-            to_number(left) - to_number(right)};
-        if (op == "*") return Value{
-            to_number(left) * to_number(right)};
+    
+        if (op == "-") return Value{ to_number(left, b->token) - to_number(right, b->token) };
+        if (op == "*") return Value{ to_number(left, b->token) * to_number(right, b->token) };
         if (op == "/") {
-            double r = to_number(right);
-            if (r == 0.0) throw std::runtime_error("Division by zero at " + b->token.loc.to_string());
-            return Value{
-                to_number(left) / r};
+            double r = to_number(right, b->token);
+            if (r == 0.0) throw std::runtime_error(
+                "MathError at " + b->token.loc.to_string() +
+                "\nDivision by zero." +
+                "\n --> Traced at:\n" + b->token.loc.get_line_trace());
+            return Value{ to_number(left, b->token) / r };
         }
         if (op == "%") {
-            double r = to_number(right);
-            if (r == 0.0) throw std::runtime_error("Modulo by zero at " + b->token.loc.to_string());
-            return Value{
-                std::fmod(to_number(left), r)};
+            double r = to_number(right, b->token);
+            if (r == 0.0) throw std::runtime_error(
+                "MathError at " + b->token.loc.to_string() +
+                "\nModulo by zero." +
+                "\n --> Traced at:\n" + b->token.loc.get_line_trace());
+            return Value{ std::fmod(to_number(left, b->token), r) };
         }
-        if (op == "**") return Value{
-            std::pow(to_number(left), to_number(right))};
-
+        if (op == "**") return Value{ std::pow(to_number(left, b->token), to_number(right, b->token)) };
+    
         if (op == "===") {
             return Value(to_bool(Value(is_strict_equal(left, right))));
         }
@@ -1865,35 +1832,36 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return Value(!is_strict_equal(left, right));
         }
         if (op == "==" || op == "sawa") {
-            return Value{
-                is_equal(left, right)};
+            return Value{ is_equal(left, right) };
         }
         if (op == "!=" || op == "sisawa") {
-            return Value{
-                !is_equal(left, right)};
+            return Value{ !is_equal(left, right) };
         }
-
+    
         bool bothStrings = std::holds_alternative<std::string>(left) && std::holds_alternative<std::string>(right);
         if (bothStrings) {
             const std::string& ls = std::get<std::string>(left);
             const std::string& rs = std::get<std::string>(right);
-
+    
             if (op == ">") return Value{ls > rs};
             if (op == "<") return Value{ls < rs};
             if (op == ">=") return Value{ls >= rs};
             if (op == "<=") return Value{ls <= rs};
         } else {
             // Numeric fallback (preserve existing behavior for mixed or non-string values).
-            double ln = to_number(left);
-            double rn = to_number(right);
-
+            double ln = to_number(left, b->token);
+            double rn = to_number(right, b->token);
+    
             if (op == ">") return Value{ln > rn};
             if (op == "<") return Value{ln < rn};
             if (op == ">=") return Value{ln >= rn};
             if (op == "<=") return Value{ln <= rn};
         }
-
-        throw std::runtime_error("Unknown binary operator '" + op + "' at " + b->token.loc.to_string());
+    
+        throw std::runtime_error(
+            "SyntaxError at " + b->token.loc.to_string() +
+            "\nUnknown binary operator '" + op + "'." +
+            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
     }
 
     if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
@@ -1908,7 +1876,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                 if (auto spread = dynamic_cast<SpreadElementNode*>(argPtr.get())) {
                     if (!spread->argument) {
-                        throw std::runtime_error("Spread argument missing expression at " + spread->token.loc.to_string());
+                        throw std::runtime_error(
+                            "SyntaxError at " + spread->token.loc.to_string() + "\n" +
+                            "Missing expression after spread operator" +
+                            "\n --> Traced at:\n" + 
+                            spread->token.loc.get_line_trace()
+                        );
                     }
                     Value v = evaluate_expression(spread->argument.get(), env);
 
@@ -1927,7 +1900,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         continue;
                     }
 
-                    throw std::runtime_error("Spread in call expects array or string at " + spread->token.loc.to_string());
+                    throw SwaziError(
+                        "TypeError",
+                        "Invalid spread operation — expected iterable value (array or string).",
+                        spread->token.loc);
                 }
 
                 out.push_back(evaluate_expression(argPtr.get(), env));
@@ -1949,7 +1925,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             eval_args(args);
             return call_function(std::get<FunctionPtr>(calleeVal), args, call->token);
         }
-        throw std::runtime_error("Attempted to call a non-function value at " + call->token.loc.to_string());
+        throw SwaziError(
+            "TypeError",
+            "Attempted to call a non-function value.",
+            call->token.loc
+        );
     }
 
     if (auto t = dynamic_cast<TernaryExpressionNode*>(expr)) {
@@ -2005,7 +1985,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // Evaluate callee to find class (callee is usually an IdentifierNode)
         Value calleeVal = evaluate_expression(ne->callee.get(), env);
         if (!std::holds_alternative<ClassPtr>(calleeVal)) {
-            throw std::runtime_error("Attempt to instantiate non-class at " + ne->token.loc.to_string());
+          throw SwaziError(
+              "TypeError",
+              "Attempted to instantiate a non-class value.",
+              ne->token.loc
+          );
         }
         ClassPtr cls = std::get<ClassPtr>(calleeVal);
 
@@ -2162,7 +2146,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
     if (auto se = dynamic_cast<SuperExpressionNode*>(expr)) {
         if (!current_class_context) {
-            throw std::runtime_error("super(...) may only be called inside a constructor at " + se->token.loc.to_string());
+            throw SwaziError(
+                "ContextError",
+                "'super/supa(...)' may only be invoked inside a class constructor.",
+                se->token.loc
+            );
         }
         // find the instance from env via $
         EnvPtr walk = env;
@@ -2177,7 +2165,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
             walk = walk->parent;
         }
-        if (!receiver) throw std::runtime_error("No '$' found for super(...) call at " + se->token.loc.to_string());
+        if (!receiver) {
+            throw SwaziError(
+                "ReferenceError",
+                "No '$' receiver found for 'super(...)' call — must be called within a class instance.",
+                se->token.loc
+            );
+        }
 
         ClassPtr parent = current_class_context->super;
         if (!parent) return std::monostate{};  // no-op if no super
@@ -2282,5 +2276,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         return std::monostate{};
     }
 
-    throw std::runtime_error("Unhandled expression node in evaluator");
+    throw SwaziError(
+        "InternalError",
+        "Unhandled expression node encountered in evaluator — this is likely a bug in the interpreter.",
+        expr->token.loc  // if expr has a token; otherwise pass a default/fake location
+    );
 }

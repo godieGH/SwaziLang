@@ -1,10 +1,11 @@
 BasedOnStyle: Google
 IndentWidth: 4
-ColumnLimit: 0                  # optional, 0 = no automatic wrapping
-BreakBeforeBraces: Attach       # ← opening brace stays on same line
-AllowShortFunctionsOnASingleLine: false
-BinPackArguments: false         # keep args readable
-BinPackParameters: false
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: All       # <-- lets short lambdas stay inline
+BinPackArguments: true
+BinPackParameters: true
+AllowShortBlocksOnASingleLine: true
+ColumnLimit: 0
 AlignAfterOpenBracket: DontAlign
 AlignOperands: false
 DerivePointerAlignment: false
