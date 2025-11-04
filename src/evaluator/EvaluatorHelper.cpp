@@ -194,6 +194,19 @@ bool Evaluator::to_bool(const Value& v) {
     return false;
 }
 
+
+// ----------------------
+// Globals / proxy helpers
+// ----------------------
+
+// Keys we treat as protected when writing via globals() proxy.
+// These are builtin/module metadata and core objects that should not be overwritten by user code through globals().
+static const std::unordered_set<std::string> g_protected_global_keys = {
+    "__name__", "__file__", "__dir__", "__main__",
+    "Object", "Hesabu", "swazi", "Orodha", "Bool", "Namba", "Neno"
+};
+
+
 // Deep/equivalence comparator used by array helpers (indexOf/includes/remove-by-value)
 bool Evaluator::is_equal(const Value& a, const Value& b) {
     // both undefined
@@ -322,6 +335,23 @@ bool Evaluator::is_private_access_allowed(ObjectPtr obj, EnvPtr env) {
 Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvPtr env) {
     if (!obj) return std::monostate{};
 
+    // --- Env-proxy handling: live view into an Environment ---
+    if (obj->is_env_proxy) {
+        if (!obj->proxy_env) return std::monostate{};
+        // If the environment has the name, return its value; otherwise undefined.
+        if (obj->proxy_env->has(key)) {
+            try {
+                Environment::Variable& var = obj->proxy_env->get(key);
+                return var.value;
+            } catch (...) {
+                // If lookup throws unexpectedly, fall back to undefined
+                return std::monostate{};
+            }
+        }
+        return std::monostate{};
+    }
+
+    // --- existing object property behavior follows ---
     auto it = obj->properties.find(key);
     if (it == obj->properties.end()) {
         // missing property -> undefined (or throw if you prefer)
@@ -349,13 +379,48 @@ Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvP
     // normal return
     return desc.value;
 }
-
 void Evaluator::set_object_property(ObjectPtr obj, const std::string& key, const Value& val, EnvPtr env, const Token& assignToken) {
     if (!obj) throw std::runtime_error(
         "TypeError at " + assignToken.loc.to_string() +
         "\nAttempt to assign a property on a undefined object." +
         "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
     );
+
+    // Env-proxy assignment => forward to underlying Environment
+    if (obj->is_env_proxy) {
+        if (!obj->proxy_env) throw std::runtime_error(
+            "TypeError at " + assignToken.loc.to_string() +
+            "\nInvalid globals() proxy (no backing environment)." +
+            "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+        );
+
+        // Protect certain keys from being overwritten through the proxy
+        if (g_protected_global_keys.find(key) != g_protected_global_keys.end()) {
+            throw std::runtime_error(
+                "PermissionError at " + assignToken.loc.to_string() +
+                "\nCannot overwrite protected global '" + key + "' via globals()." +
+                "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+            );
+        }
+
+        // If variable exists and is constant, disallow assignment
+        if (obj->proxy_env->has(key)) {
+            Environment::Variable& existing = obj->proxy_env->get(key);
+            if (existing.is_constant) {
+                throw std::runtime_error(
+                    "TypeError at " + assignToken.loc.to_string() +
+                    "\nCannot assign to constant global '" + key + "'." +
+                    "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
+                );
+            }
+        }
+
+        Environment::Variable var;
+        var.value = val;
+        var.is_constant = false;  // assignments via globals() create/overwrite as non-constant
+        obj->proxy_env->set(key, var);
+        return;
+    }
 
     if (obj->is_frozen) return;
 
@@ -406,7 +471,6 @@ void Evaluator::set_object_property(ObjectPtr obj, const std::string& key, const
     desc.token = assignToken;
     obj->properties[key] = std::move(desc);
 }
-
 void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& value, EnvPtr env, bool is_constant, const Token& declToken) {
     if (!pattern) return;
 
@@ -770,8 +834,63 @@ std::string Evaluator::print_object(
     if (!obj) return "{}";
 
     bool use_color = supports_color();
-    // std::unordered_set<const ObjectValue*> visited;
 
+    // If this object is an environment proxy, render its backing Environment's variables.
+    if (obj->is_env_proxy) {
+        if (!obj->proxy_env) return "{}";
+
+        // Collect visible entries from the Environment
+        std::vector<std::pair<std::string, Value>> props;
+        props.reserve(obj->proxy_env->values.size());
+        for (const auto &kv : obj->proxy_env->values) {
+            const std::string& name = kv.first;
+            const Environment::Variable& v = kv.second;
+            props.emplace_back(name, v.value);
+        }
+
+        if (props.empty()) return "{}";
+
+        // Try inline representation if all values are simple and few in number
+        bool inline_ok = true;
+        if ((int)props.size() > INLINE_MAX_PROPS) inline_ok = false;
+        for (const auto &p : props) if (!is_simple_value(p.second)) { inline_ok = false; break; }
+
+        if (inline_ok) {
+            std::ostringstream oss;
+            oss << "{";
+            for (size_t i = 0; i < props.size(); ++i) {
+                if (i) oss << ", ";
+                if (use_color) oss << Color::white;
+                oss << props[i].first;
+                if (use_color) oss << Color::reset;
+                oss << ": " << print_value(props[i].second, indent + 1);
+            }
+            oss << "}";
+            std::string s = oss.str();
+            if ((int)s.size() <= INLINE_MAX_LEN) return s;
+            // otherwise fallthrough to expanded form
+        }
+
+        // Expanded multi-line representation
+        std::ostringstream oss;
+        std::string ind(indent, ' ');
+        oss << "{\n";
+        for (size_t i = 0; i < props.size(); ++i) {
+            const auto &key = props[i].first;
+            const auto &val = props[i].second;
+            oss << ind << "  ";
+            if (use_color) oss << Color::white;
+            oss << key;
+            if (use_color) oss << Color::reset;
+            oss << ": ";
+            oss << print_value(val, indent + 2);
+            if (i + 1 < props.size()) oss << ",\n"; else oss << "\n";
+        }
+        oss << ind << "}";
+        return oss.str();
+    }
+
+    // ---------- existing object printing below remains (unchanged) ----------
     // Decide inline vs expanded:
     auto should_inline = [&](ObjectPtr o) -> bool {
         if (!o) return true;
@@ -812,8 +931,6 @@ std::string Evaluator::print_object(
             if (kv.second.is_private) continue;
 
             // Hide constructor/destructor methods:
-            // If this property is a function and its name matches the instance's class name,
-            // skip it from the printed property list.
             if (!class_name.empty() && std::holds_alternative<FunctionPtr>(kv.second.value)) {
                 FunctionPtr f = std::get<FunctionPtr>(kv.second.value);
                 if (f && f->name == class_name) continue;
@@ -826,12 +943,10 @@ std::string Evaluator::print_object(
 
         bool inline_ok = should_inline(o);
         if (inline_ok) {
-            // Build inline: {a: 1, b: "x"}
             std::ostringstream oss;
             oss << "{";
             for (size_t i = 0; i < props.size(); ++i) {
                 if (i) oss << ", ";
-                // key in white
                 if (use_color) oss << Color::white;
                 oss << props[i].first;
                 if (use_color) oss << Color::reset;
@@ -841,10 +956,8 @@ std::string Evaluator::print_object(
             oss << "}";
             std::string s = oss.str();
             if ((int)s.size() <= INLINE_MAX_LEN) return s;
-            // otherwise fallthrough to expanded representation
         }
 
-        // Expanded multi-line representation
         std::ostringstream oss;
         std::string ind(depth, ' ');
         oss << "{\n";
@@ -853,13 +966,11 @@ std::string Evaluator::print_object(
             const auto& desc = *props[i].second;
 
             oss << ind << "  ";
-            // key color (white)
             if (use_color) oss << Color::white;
             oss << key;
             if (use_color) oss << Color::reset;
             oss << ": ";
 
-            // Functions as short label
             if (std::holds_alternative<FunctionPtr>(desc.value)) {
                 FunctionPtr f = std::get<FunctionPtr>(desc.value);
                 std::string nm = f->name.empty() ? "<lambda>" : f->name;
@@ -867,11 +978,9 @@ std::string Evaluator::print_object(
                 std::ostringstream label;
 
                 if (desc.is_readonly) {
-                    // getter: only show [getter]
                     label << "[getter]";
                     if (use_color) oss << Color::bright_magenta;
                 } else {
-                    // normal function: show [tabia name]
                     label << "[tabia " << nm << "]";
                     if (use_color) oss << Color::bright_cyan;
                 }
@@ -880,7 +989,6 @@ std::string Evaluator::print_object(
                 if (use_color) oss << Color::reset;
 
             } else {
-                // recurse for other values (arrays/objects/primitive)
                 oss << print_value(desc.value, depth + 2, visited);
             }
 

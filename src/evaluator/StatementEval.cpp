@@ -217,65 +217,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             // object property path: o[key] = rhs
             if (std::holds_alternative<ObjectPtr>(objVal)) {
-                ObjectPtr op = std::get<ObjectPtr>(objVal);
-                std::string prop = to_property_key(indexVal, idx->token);  // your helper to convert index to string
-                if (op->is_frozen) return;
-                auto it = op->properties.find(prop);
-                if (it != op->properties.end()) {
-                    if (it->second.is_private) {
-                        // only allow if current '$' / '$this' equals the same object
-                        bool allowed = false;
-                        if (env) {
-                            if (env->has("$")) {
-                                Value thisVal = env->get("$").value;
-                                if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) allowed = true;
-                            }
-                        }
-                        if (!allowed) {
-                            throw std::runtime_error(
-                                "PermissionError at " + idx->token.loc.to_string() +
-                                "\nCannot assign to private property '" + prop + "' from outside the owning object." +
-                                "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
-                        }
-                    }
-                    if (it->second.is_readonly) {
-                        throw std::runtime_error(
-                            "TypeError at " + idx->token.loc.to_string() +
-                            "\nCannot assign to read-only property '" + prop + "'." +
-                            "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
-                    }
-
-                    if (it->second.is_locked) {
-                        bool isInternal = false;
-                        if (env && env->has("$")) {
-                            Value thisVal = env->get("$").value;
-                            if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) {
-                                isInternal = true;
-                            }
-                        }
-
-                        if (!isInternal) {
-                            throw std::runtime_error(
-                                "PermissionError at " + idx->token.loc.to_string() +
-                                "\nCannot overwrite locked property '" + prop + "' from outside the owning object." +
-                                "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
-                        }
-                    }
-
-                    it->second.value = rhs;
-                    it->second.token = idx->token;
-                } else {
-                    // new public property
-                    PropertyDescriptor desc;
-                    desc.value = rhs;
-                    desc.is_private = false;
-                    desc.is_readonly = false;
-                    desc.token = idx->token;
-                    op->properties[prop] = std::move(desc);
-                }
-                return;
-            }
-
+    ObjectPtr op = std::get<ObjectPtr>(objVal);
+    std::string prop = to_property_key(indexVal, idx->token);  // convert index -> property key
+    // Delegate creation/permission checks/frozen/proxy handling to the helper
+    set_object_property(op, prop, rhs, env, idx->token);
+    return;
+}
             throw std::runtime_error(
                 "TypeError at " + idx->token.loc.to_string() +
                 "\nAttempted index assignment on non-array/non-object value." +
@@ -283,87 +230,34 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         }
 
         if (auto mem = dynamic_cast<MemberExpressionNode*>(an->target.get())) {
-            Value objVal = evaluate_expression(mem->object.get(), env);
+    Value objVal = evaluate_expression(mem->object.get(), env);
 
-            if (std::holds_alternative<ClassPtr>(objVal)) {
-                ClassPtr cls = std::get<ClassPtr>(objVal);
-                if (!cls) {
-                    throw std::runtime_error(
-                        "TypeError at " + mem->token.loc.to_string() +
-                        "\nMember assignment on null class." +
-                        "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-                }
-                set_object_property(cls->static_table, mem->property, rhs, env, mem->token);
-                return;
-            }
-            if (!std::holds_alternative<ObjectPtr>(objVal)) {
-                throw std::runtime_error(
-                    "TypeError at " + mem->token.loc.to_string() +
-                    "\nMember assignment on non-object value." +
-                    "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-            }
-            ObjectPtr op = std::get<ObjectPtr>(objVal);
-            if (op->is_frozen) return;
-            // use the rhs already evaluated earlier: Value rhs = evaluate_expression(an->value.get(), env);
-            auto it = op->properties.find(mem->property);
-            if (it != op->properties.end()) {
-                // existing property - enforce privacy / readonly
-                if (it->second.is_private) {
-                    // allow only when current '$' / '$this' points to the same object
-                    bool allowed = false;
-                    if (env) {
-                        if (env->has("$")) {
-                            Value thisVal = env->get("$").value;
-                            if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) allowed = true;
-                        }
-                    }
-                    if (!allowed) {
-                        throw std::runtime_error(
-                            "PermissionError at " + mem->token.loc.to_string() +
-                            "\nCannot assign to private property '" + mem->property + "' from outside the owning object." +
-                            "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-                    }
-                }
-
-                if (it->second.is_readonly) {
-                    throw std::runtime_error(
-                        "TypeError at " + mem->token.loc.to_string() +
-                        "\nCannot assign to read-only property '" + mem->property + "'." +
-                        "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-                }
-
-                if (it->second.is_locked) {
-                    bool isInternal = false;
-                    if (env && env->has("$")) {
-                        Value thisVal = env->get("$").value;
-                        if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) {
-                            isInternal = true;
-                        }
-                    }
-
-                    if (!isInternal) {
-                        throw std::runtime_error(
-                            "PermissionError at " + mem->token.loc.to_string() +
-                            "\nCannot overwrite locked property '" + mem->property + "' from outside the owning object." +
-                            "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-                    }
-                }
-
-                it->second.value = rhs;
-                it->second.token = mem->token;
-                return;
-            } else {
-                // not found -> create new public property (external code must not create private '@' properties)
-                PropertyDescriptor desc;
-                desc.value = rhs;
-                desc.is_private = false;
-                desc.is_readonly = false;
-                desc.token = mem->token;
-                op->properties[mem->property] = std::move(desc);
-                return;
-            }
+    // class static member assignment
+    if (std::holds_alternative<ClassPtr>(objVal)) {
+        ClassPtr cls = std::get<ClassPtr>(objVal);
+        if (!cls) {
+            throw std::runtime_error(
+                "TypeError at " + mem->token.loc.to_string() +
+                "\nMember assignment on null class." +
+                "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
         }
+        set_object_property(cls->static_table, mem->property, rhs, env, mem->token);
+        return;
+    }
 
+    // normal object member assignment (centralized)
+    if (std::holds_alternative<ObjectPtr>(objVal)) {
+        ObjectPtr op = std::get<ObjectPtr>(objVal);
+        set_object_property(op, mem->property, rhs, env, mem->token);
+        return;
+    }
+
+    // clearer error for non-object/non-class member assignment
+    throw std::runtime_error(
+        "TypeError at " + mem->token.loc.to_string() +
+        "\nMember assignment on non-object value." +
+        "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
+}
         throw std::runtime_error(
             "TypeError at " + an->token.loc.to_string() +
             "\nUnsupported assignment target." +

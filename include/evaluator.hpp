@@ -52,6 +52,12 @@ struct ObjectValue {
         PropertyDescriptor>
         properties;
     bool is_frozen = false;
+
+    // When true this ObjectValue is a proxy for an Environment (live view).
+    // Reads/writes/enumeration should forward to `proxy_env->values`.
+    // This is used by the builtin globals() to expose a live global/module env.
+    bool is_env_proxy = false;
+    EnvPtr proxy_env = nullptr;
 };
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {

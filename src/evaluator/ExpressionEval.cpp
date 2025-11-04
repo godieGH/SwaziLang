@@ -1852,89 +1852,135 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     }
 
     if (auto call = dynamic_cast<CallExpressionNode*>(expr)) {
-        auto eval_args = [&](std::vector<Value>& out) {
-            out.clear();
-            out.reserve(call->arguments.size());
-            for (auto& argPtr : call->arguments) {
-                if (!argPtr) {
-                    out.push_back(std::monostate{});
+    // --- special-case: obj.instanceOf(Class) member-call ---
+    if (auto mem = dynamic_cast<MemberExpressionNode*>(call->callee.get())) {
+        if (mem->property == "instanceOf") {
+            // evaluate the object expression (left side of the member)
+            Value objVal = evaluate_expression(mem->object.get(), env);
+
+            // require at least one argument
+            if (call->arguments.empty()) {
+                throw SwaziError(
+                    "TypeError", "obj.instanceOf expects a class as its first argument.", call->token.loc);
+            }
+
+            // evaluate the first argument (expected to be a Class)
+            Value arg0 = evaluate_expression(call->arguments[0].get(), env);
+
+            if (!std::holds_alternative<ClassPtr>(arg0)) {
+                throw SwaziError(
+                    "TypeError",
+                    "instanceOf expects a class value as its first argument.", call->arguments[0]->token.loc);
+            }
+
+            ClassPtr targetClass = std::get<ClassPtr>(arg0);
+            if (!targetClass) return Value{false};
+
+            // If left side is not an object, return false (not an instance)
+            if (!std::holds_alternative<ObjectPtr>(objVal)) {
+                return Value{false};
+            }
+
+            ObjectPtr inst = std::get<ObjectPtr>(objVal);
+            if (!inst) return Value{false};
+
+            // Look for __class__ link on the instance
+            auto it = inst->properties.find("__class__");
+            if (it == inst->properties.end()) return Value{false};
+            const PropertyDescriptor& pd = it->second;
+            if (!std::holds_alternative<ClassPtr>(pd.value)) return Value{false};
+            ClassPtr objClass = std::get<ClassPtr>(pd.value);
+
+            // Strict identity check (no subclass traversal)
+            bool result = (objClass == targetClass);
+            return Value{result};
+        }
+    }
+
+    // --- fallback: original call handling (unchanged) ---
+    auto eval_args = [&](std::vector<Value>& out) {
+        out.clear();
+        out.reserve(call->arguments.size());
+        for (auto& argPtr : call->arguments) {
+            if (!argPtr) {
+                out.push_back(std::monostate{});
+                continue;
+            }
+
+            if (auto spread = dynamic_cast<SpreadElementNode*>(argPtr.get())) {
+                if (!spread->argument) {
+                    throw std::runtime_error(
+                        "SyntaxError at " + spread->token.loc.to_string() + "\n" +
+                        "Missing expression after spread operator" +
+                        "\n --> Traced at:\n" +
+                        spread->token.loc.get_line_trace());
+                }
+                Value v = evaluate_expression(spread->argument.get(), env);
+
+                if (std::holds_alternative<ArrayPtr>(v)) {
+                    ArrayPtr src = std::get<ArrayPtr>(v);
+                    if (src) {
+                        for (auto& e : src->elements) out.push_back(e);
+                    }
                     continue;
                 }
 
-                if (auto spread = dynamic_cast<SpreadElementNode*>(argPtr.get())) {
-                    if (!spread->argument) {
-                        throw std::runtime_error(
-                            "SyntaxError at " + spread->token.loc.to_string() + "\n" +
-                            "Missing expression after spread operator" +
-                            "\n --> Traced at:\n" +
-                            spread->token.loc.get_line_trace());
-                    }
-                    Value v = evaluate_expression(spread->argument.get(), env);
-
-                    if (std::holds_alternative<ArrayPtr>(v)) {
-                        ArrayPtr src = std::get<ArrayPtr>(v);
-                        if (src) {
-                            for (auto& e : src->elements) out.push_back(e);
-                        }
-                        continue;
-                    }
-
-                    if (std::holds_alternative<std::string>(v)) {
-                        std::string s = std::get<std::string>(v);
-                        for (char c : s) out.push_back(Value{
-                            std::string(1, c)});
-                        continue;
-                    }
-
-                    throw SwaziError(
-                        "TypeError",
-                        "Invalid spread operation — expected iterable value (array or string).",
-                        spread->token.loc);
+                if (std::holds_alternative<std::string>(v)) {
+                    std::string s = std::get<std::string>(v);
+                    for (char c : s) out.push_back(Value{
+                        std::string(1, c)});
+                    continue;
                 }
 
-                out.push_back(evaluate_expression(argPtr.get(), env));
-            }
-        };
-
-        // Evaluate callee first (receiver/computed parts inside callee are handled
-        // by their own node logic; those nodes must also short-circuit when optional).
-        Value calleeVal = evaluate_expression(call->callee.get(), env);
-
-        // If this was an optional call and the callee is nullish, short-circuit without
-        // evaluating call arguments.
-        if (call->is_optional && is_nullish(calleeVal)) {
-            return std::monostate{};
-        }
-
-        if (std::holds_alternative<FunctionPtr>(calleeVal)) {
-            std::vector<Value> args;
-            eval_args(args);
-
-            // Compute an effective token to pass to the callee:
-            // - If the AST call node has a token, use it.
-            // - Else if the FunctionValue has a token with a filename, use that.
-            // - Else synthesize a builtin token using the function name so errors are informative.
-            Token effectiveTok = call->token;
-            FunctionPtr fn = std::get<FunctionPtr>(calleeVal);
-            if (effectiveTok.loc.filename.empty() && fn) {
-                if (!fn->token.loc.filename.empty()) {
-                    effectiveTok = fn->token;
-                } else {
-                    // synthesize a helpful builtin token (line/col set to 1)
-                    effectiveTok.loc.filename = std::string("<builtin:") + (fn->name.empty() ? "<anonymous>" : fn->name) + ">";
-                    effectiveTok.loc.line = 1;
-                    effectiveTok.loc.col = 1;
-                }
+                throw SwaziError(
+                    "TypeError",
+                    "Invalid spread operation — expected iterable value (array or string).",
+                    spread->token.loc);
             }
 
-            return call_function(fn, args, effectiveTok);
+            out.push_back(evaluate_expression(argPtr.get(), env));
         }
-        throw SwaziError(
-            "TypeError",
-            "Attempted to call a non-function value.",
-            call->token.loc);
+    };
+
+    // Evaluate callee first (receiver/computed parts inside callee are handled
+    // by their own node logic; those nodes must also short-circuit when optional).
+    Value calleeVal = evaluate_expression(call->callee.get(), env);
+
+    // If this was an optional call and the callee is nullish, short-circuit without
+    // evaluating call arguments.
+    if (call->is_optional && is_nullish(calleeVal)) {
+        return std::monostate{};
     }
 
+    if (std::holds_alternative<FunctionPtr>(calleeVal)) {
+        std::vector<Value> args;
+        eval_args(args);
+
+        // Compute an effective token to pass to the callee:
+        // - If the AST call node has a token, use it.
+        // - Else if the FunctionValue has a token with a filename, use that.
+        // - Else synthesize a builtin token using the function name so errors are informative.
+        Token effectiveTok = call->token;
+        FunctionPtr fn = std::get<FunctionPtr>(calleeVal);
+        if (effectiveTok.loc.filename.empty() && fn) {
+            if (!fn->token.loc.filename.empty()) {
+                effectiveTok = fn->token;
+            } else {
+                // synthesize a helpful builtin token (line/col set to 1)
+                effectiveTok.loc.filename = std::string("<builtin:") + (fn->name.empty() ? "<anonymous>" : fn->name) + ">";
+                effectiveTok.loc.line = 1;
+                effectiveTok.loc.col = 1;
+            }
+        }
+
+        return call_function(fn, args, effectiveTok);
+    }
+    throw SwaziError(
+        "TypeError",
+        "Attempted to call a non-function value.",
+        call->token.loc);
+}
+    
     if (auto t = dynamic_cast<TernaryExpressionNode*>(expr)) {
         // Evaluate condition first
         Value condVal = evaluate_expression(t->condition.get(), env);

@@ -161,6 +161,17 @@ static Value builtin_object_keys(const std::vector<Value>& args, EnvPtr env, con
     if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) return arr;
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    if (!obj) return arr;
+
+    // If this object is an env-proxy, enumerate the backing Environment's names.
+    if (obj->is_env_proxy && obj->proxy_env) {
+        for (const auto &kv : obj->proxy_env->values) {
+            arr->elements.push_back(kv.first);
+        }
+        return arr;
+    }
+
+    // fallback: enumerate object properties map
     for (auto& pair : obj->properties) {
         arr->elements.push_back(pair.first);  // push key as string
     }
@@ -172,6 +183,16 @@ static Value builtin_object_values(const std::vector<Value>& args, EnvPtr env, c
     if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) return arr;
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    if (!obj) return arr;
+
+    // env-proxy: return the underlying variable values
+    if (obj->is_env_proxy && obj->proxy_env) {
+        for (const auto &kv : obj->proxy_env->values) {
+            arr->elements.push_back(kv.second.value);
+        }
+        return arr;
+    }
+
     for (auto& pair : obj->properties) {
         arr->elements.push_back(pair.second.value);
     }
@@ -183,6 +204,19 @@ static Value builtin_object_entry(const std::vector<Value>& args, EnvPtr env, co
     if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) return arr;
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    if (!obj) return arr;
+
+    // env-proxy: produce [key, value] pairs from the Environment map (in insertion/unordered map order)
+    if (obj->is_env_proxy && obj->proxy_env) {
+        for (const auto &kv : obj->proxy_env->values) {
+            auto entry = std::make_shared<ArrayValue>();
+            entry->elements.push_back(kv.first);         // key
+            entry->elements.push_back(kv.second.value);  // value
+            arr->elements.push_back(entry);
+        }
+        return arr;
+    }
+
     for (auto& pair : obj->properties) {
         auto entry = std::make_shared<ArrayValue>();
         entry->elements.push_back(pair.first);         // key
@@ -684,6 +718,24 @@ void init_globals(EnvPtr env) {
         env->set(name, var);
     };
 
+
+
+
+    // --- globals() builtin: returns a live proxy object for the passed environment `env` ---
+    add_fn("globals", [env](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
+        auto proxy = std::make_shared<ObjectValue>();
+        proxy->is_env_proxy = true;
+        proxy->proxy_env = env;
+        return Value{proxy};
+    });
+
+    // Optional convenience: module_globals() alias for module-local view (same as globals() here)
+    add_fn("module_globals", [env](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
+        auto proxy = std::make_shared<ObjectValue>();
+        proxy->is_env_proxy = true;
+        proxy->proxy_env = env;  // currently resolves to same env passed to init_globals
+        return Value{proxy};
+    });
     // Existing builtins
     add_fn("ainaya", builtin_ainaya);
     add_fn("Orodha", builtin_orodha);
