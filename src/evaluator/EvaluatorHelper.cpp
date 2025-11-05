@@ -52,6 +52,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<ArrayPtr>(v)) return "orodha";
     if (std::holds_alternative<ObjectPtr>(v)) return "object";
     if (std::holds_alternative<ClassPtr>(v)) return "muundo";
+    if (std::holds_alternative<HoleValue>(v)) return "emptyhole";
     return "unknown";
 }
 
@@ -124,6 +125,10 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         return use_color ? Color::bright_magenta + s + Color::reset : s;
     }
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
+    if (std::holds_alternative<HoleValue>(v)) {
+        // use a compact display for a hole when converted to string
+        return std::string( use_color ? (Color::bright_black + "<empty>" + Color::reset) : "<empty>");
+    }
     if (std::holds_alternative<FunctionPtr>(v)) {
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string name = fn->name.empty() ? "<lambda>" : fn->name;
@@ -149,30 +154,24 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             ss << "[muundo <null>]";
             return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
         }
-
-        // label only
         std::string label = "[muundo " + cp->name + "]";
-
         std::string out;
         if (use_color)
             out = Color::bright_blue + label + Color::reset;
         else
             out = label;
-
-        // Render static table inline if it has visible properties (print_object already adds its own coloring)
         if (cp->static_table) {
-            // Use a local visited set so nested print_object/print_value calls share the same cycle-tracking.
             std::unordered_set<const ObjectValue*> visited;
             std::string static_repr = print_object(cp->static_table, 0, visited);
             if (!static_repr.empty() && static_repr != "{}") {
                 out += " " + static_repr;
             }
         }
-
         return out;
     }
     return "";
 }
+
 
 bool Evaluator::to_bool(const Value& v) {
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v);
@@ -560,10 +559,12 @@ static constexpr int INLINE_MAX_LEN = 150;
 
 // Helper: are we a primitive-ish value that can be inlined simply?
 static bool is_simple_value(const Value& v) {
-    return std::holds_alternative<std::monostate>(v) ||
-        std::holds_alternative<double>(v) ||
-        std::holds_alternative<std::string>(v) ||
-        std::holds_alternative<bool>(v);
+    if (std::holds_alternative<std::monostate>(v)) return true;
+    if (std::holds_alternative<double>(v)) return true;
+    if (std::holds_alternative<std::string>(v)) return true;
+    if (std::holds_alternative<bool>(v)) return true;
+    if (std::holds_alternative<HoleValue>(v)) return true; // hole is simple for printing decisions
+    return false;
 }
 
 // Try to render an object inline. Returns std::nullopt if not suitable for inline.
@@ -677,38 +678,6 @@ std::string Evaluator::print_value(
     std::unordered_set<const ArrayValue*> arrvisited) {
     bool use_color = supports_color();
 
-    if (std::holds_alternative<std::monostate>(v)) {
-        return use_color ? (Color::bright_black + std::string("null") + Color::reset) : std::string("null");
-    }
-
-    if (std::holds_alternative<double>(v)) {
-        std::ostringstream ss;
-        double d = std::get<double>(v);
-        if (std::fabs(d - std::round(d)) < 1e-12)
-            ss << (long long)std::llround(d);
-        else
-            ss << d;
-        return use_color ? (Color::yellow + ss.str() + Color::reset) : ss.str();
-    }
-
-    if (std::holds_alternative<bool>(v)) {
-        std::string s = std::get<bool>(v) ? "kweli" : "sikweli";
-        return use_color ? (Color::bright_magenta + s + Color::reset) : s;
-    }
-
-    if (std::holds_alternative<std::string>(v)) {
-        const std::string& s = std::get<std::string>(v);
-        return quote_and_color(s, use_color);
-    }
-
-    if (std::holds_alternative<FunctionPtr>(v)) {
-        FunctionPtr fn = std::get<FunctionPtr>(v);
-        std::string nm = fn->name.empty() ? "<lambda>" : fn->name;
-        std::ostringstream ss;
-        ss << "[kazi " << nm << "]";
-        return use_color ? (Color::bright_cyan + ss.str() + Color::reset) : ss.str();
-    }
-
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr arr = std::get<ArrayPtr>(v);
         if (!arr) return "[]";
@@ -717,7 +686,26 @@ std::string Evaluator::print_value(
         if (arrvisited.count(p)) return "[/*cycle*/]";
         arrvisited.insert(p);
 
-        // try compact inline if small and elements simple
+        // Check if the array consists entirely of holes
+        bool allHoles = true;
+        for (const auto& el : arr->elements) {
+            if (!std::holds_alternative<HoleValue>(el)) {
+                allHoles = false;
+                break;
+            }
+        }
+        if (allHoles) {
+            std::ostringstream ss;
+            if(use_color) {
+                ss << "[" << Color::bright_black << "<" << arr->elements.size() << " empty holes" << ">" << Color::reset  << "]";
+            } else {
+                ss << "[" << "<" << arr->elements.size() << " empty holes" << ">" << "]";
+            }
+            arrvisited.erase(p);
+            return ss.str();
+        }
+
+        // otherwise try compact inline if small and elements simple
         bool can_inline = (arr->elements.size() <= (size_t)(15));
         if (can_inline) {
             for (const auto& e : arr->elements) {
@@ -732,58 +720,38 @@ std::string Evaluator::print_value(
             ss << "[";
             for (size_t i = 0; i < arr->elements.size(); ++i) {
                 if (i) ss << ", ";
-                ss << print_value(arr->elements[i], depth + 1, visited, arrvisited);
+                // If hole — print "<empty>"
+                if (std::holds_alternative<HoleValue>(arr->elements[i])) {
+                    ss << (use_color ? (Color::bright_black + "<empty>" + Color::reset) : "<empty>");
+                } else {
+                    ss << print_value(arr->elements[i], depth + 1, visited, arrvisited);
+                }
             }
             ss << "]";
+            arrvisited.erase(p);
             return ss.str();
         } else {
             // multi-line array
             ss << "[\n";
             std::string ind(depth + 2, ' ');
             for (size_t i = 0; i < arr->elements.size(); ++i) {
-                ss << ind << print_value(arr->elements[i], depth + 2, visited, arrvisited);
+                ss << ind;
+                if (std::holds_alternative<HoleValue>(arr->elements[i])) {
+                    ss << (use_color ? (Color::bright_black + "<empty>" + Color::reset) : "<empty>");
+                } else {
+                    ss << print_value(arr->elements[i], depth + 2, visited, arrvisited);
+                }
                 if (i + 1 < arr->elements.size()) ss << ",\n";
             }
             ss << "\n"
                << std::string(depth, ' ') << "]";
+            arrvisited.erase(p);
             return ss.str();
         }
     }
 
-    if (std::holds_alternative<ObjectPtr>(v)) {
-        ObjectPtr op = std::get<ObjectPtr>(v);
-        if (!op) return "{}";
-        return print_object(op, depth, visited);
-    }
-
-    if (std::holds_alternative<ClassPtr>(v)) {
-        ClassPtr cp = std::get<ClassPtr>(v);
-        if (!cp) {
-            std::ostringstream ss;
-            ss << "[muundo " << "<null>" << "]";
-            return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
-        }
-
-        // label only
-        std::string label = "[muundo " + cp->name + "]";
-        std::string out;
-        if (use_color)
-            out = Color::bright_blue + label + Color::reset;
-        else
-            out = label;
-
-        // Append static table representation (use the same 'visited' set so cycles are detected)
-        if (cp->static_table) {
-            std::string static_repr = print_object(cp->static_table, depth, visited);
-            if (!static_repr.empty() && static_repr != "{}") {
-                out += " " + static_repr;
-            }
-        }
-
-        return out;
-    }
-
-    return "<?>";  // fallback
+    // fallthrough to earlier single-value handling for non-array types (kept unchanged elsewhere)
+    return to_string_value(v);
 }
 
 std::string Evaluator::print_object(

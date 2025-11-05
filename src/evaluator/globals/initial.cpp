@@ -97,6 +97,7 @@ static Value builtin_ainaya(const std::vector<Value>& args, EnvPtr env, const To
 
     if (std::holds_alternative<double>(v)) return std::string("namba");
     if (std::holds_alternative<std::monostate>(v)) return std::string("null");
+    if (std::holds_alternative<HoleValue>(v)) return std::string("<empty>");
     if (std::holds_alternative<bool>(v)) return std::string("bool");
     if (std::holds_alternative<std::string>(v)) return std::string("neno");
     if (std::holds_alternative<ObjectPtr>(v)) return std::string("object");
@@ -113,14 +114,31 @@ static Value builtin_orodha(const std::vector<Value>& args, EnvPtr env, const To
         return arr;
     }
 
+    // backward-compatible single numeric behavior: Orodha(5) -> array of length 5 filled with null
+    // New optional second argument: if boolean true -> fill with holes instead of nulls
+    bool fillWithHoles = true;
+    /*if (args.size() >= 2) {
+        if (std::holds_alternative<bool>(args[1])) {
+            fillWithHoles = std::get<bool>(args[1]);
+        } else if (std::holds_alternative<std::string>(args[1])) {
+            // allow string flags like "holes"
+            fillWithHoles = (std::get<std::string>(args[1]) == "holes");
+        }
+    }*/
+
     if (args.size() == 1) {
         const Value& first = args[0];
 
         if (std::holds_alternative<double>(first)) {
-            // case: Orodha(5) -> array of length 5, filled with empty values
+            // case: Orodha(5) -> array of length 5, filled with empty values (previous behavior)
             int len = static_cast<int>(std::get<double>(first));
             if (len < 0) len = 0;
-            arr->elements.resize(len);  // default-constructed Values (monostate)
+            arr->elements.resize(len);
+            if (fillWithHoles) {
+                for (int i = 0; i < len; ++i) arr->elements[i] = HoleValue{};
+            } else {
+                for (int i = 0; i < len; ++i) arr->elements[i] = std::monostate{};
+            }
             return arr;
         }
 
@@ -132,7 +150,8 @@ static Value builtin_orodha(const std::vector<Value>& args, EnvPtr env, const To
         }
     }
 
-    // default case: Orodha(6,8,5,8) or any other list of arguments
+    // default case: Orodha(6,8,5,8) or any other list of arguments -> treat args as elements
+    // No holes in this construction path (unless caller explicitly passes HoleValue which is possible via native means)
     arr->elements = args;
     return arr;
 }

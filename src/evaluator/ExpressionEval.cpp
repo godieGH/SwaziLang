@@ -329,6 +329,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 t = "object";
             else if (std::holds_alternative<ClassPtr>(objVal))
                 t = "muundo";
+            else if(std::holds_alternative<HoleValue>(objVal))
+                t = "<empty>";
             return Value{
                 t};
         }
@@ -774,7 +776,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" || prop == "panua" ||
                 prop == "badili" || prop == "tafuta" || prop == "kuna" || prop == "panga" ||
                 prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" ||
-                prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach") {
+                prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach" || prop == "fill") {
                 auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
 
@@ -1123,6 +1125,20 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
                         return Value{oss.str()};
                     }
+                    
+                  if (prop == "fill") {
+                      if (args.empty()) {
+                          throw std::runtime_error(
+                              "TypeError at " + token.loc.to_string() +
+                              "\narr.fill requires 1 argument (value to fill)." +
+                              "\n --> Traced at:\n" + token.loc.get_line_trace());
+                      }
+                      const Value& fillVal = args[0];
+                      for (size_t i = 0; i < arr->elements.size(); ++i) {
+                          arr->elements[i] = fillVal;
+                      }
+                      return Value{arr};
+                  }
 
                     return std::monostate{};
                 };

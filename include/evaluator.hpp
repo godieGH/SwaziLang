@@ -29,12 +29,18 @@ using ClassPtr = std::shared_ptr<ClassValue>;
 struct ObjectValue;
 using ObjectPtr = std::shared_ptr<ObjectValue>;
 
+// New: sentinel type to represent a JavaScript-like "hole" (an empty slot).
+// It's an empty struct used only to distinguish holes from `null`/`undefined`.
+struct HoleValue {};
+
+// Value union: add HoleValue so arrays can hold explicit holes distinct from null/undefined.
 using Value = std::variant<
     std::monostate,
     double,
     std::string,
     bool,
     FunctionPtr,
+    HoleValue,
     ArrayPtr,
     ObjectPtr,
     ClassPtr>;
@@ -61,6 +67,8 @@ struct ObjectValue {
 };
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
+    // We keep simple contiguous vector storage, but elements can now be HoleValue
+    // to indicate an empty slot (a "hole") which differs from std::monostate/null.
     std::vector<Value> elements;
 };
 
