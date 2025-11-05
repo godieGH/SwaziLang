@@ -1,5 +1,12 @@
-
 #include "repl.hpp"
+
+// Improved REPL indentation/block handling
+// - More robust comment detection
+// - Explicit "waiting for body indent" semantics for ':' blocks (Python-like)
+// - Proper nested dedent handling: pop frames only when the user actually dedents
+// - Safety: limit maximum nesting depth to avoid pathological input DoS
+// - Clear and conservative behavior: do not silently pop a colon-frame that hasn't received a body
+//   (this avoids creating implicit empty blocks). Let the parser detect real syntax errors.
 
 static bool is_likely_incomplete_input(const std::string& err) {
     // Treat parser expectations that mean "unterminated input" as incomplete so REPL continues.
@@ -27,31 +34,19 @@ static int count_leading_indent_spaces(const std::string& line) {
 }
 
 static bool is_comment_line(const std::string& s) {
-    bool met_char = false;
-    bool met_slash = false;
-    bool comment = false;
-    for (unsigned char c : s) {
-        met_char = !std::isspace(c);
-        if (met_char) {
-            if (c == '#') {
-                comment = true;
-                break;
-            }
-            if (c == '/') {
-                met_slash = true;
-                continue;
-            }
-            if (met_slash && c == '/' || c == '*') {
-                comment = true;
-                break;
-            }
+    // Find first non-space character and decide if it's a comment starter.
+    size_t i = 0;
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+    if (i == s.size()) return false;
+    if (s[i] == '#') return true;
+    if (s[i] == '/') {
+        if (i + 1 < s.size()) {
+            if (s[i + 1] == '/' || s[i + 1] == '*') return true;
         }
-    }
-    if (met_char && comment) {
-        return true;
     }
     return false;
 }
+
 static bool is_blank_or_spaces(const std::string& s) {
     for (unsigned char c : s)
         if (!std::isspace(c)) return false;
@@ -137,16 +132,38 @@ static int unclosed_brackets_depth(const std::string& s) {
 }
 
 // --- REPL: colon-block tracking + brace continuation ---
-// Behavior:
-//  - If a line ends with ':'    -> push indent level and continue reading (colon block).
-//  - If a line ends with '{'    -> continue reading (brace block) but DO NOT push indent level.
-//  - If inside colon blocks: typing a line with indent <= top-of-stack dedents and triggers parse+exec.
-//  - Parser-driven incomplete input (unclosed paren, expected '}', etc.) still handled by exception check.
+//
+// Behavior implemented here aims to follow Python's interactive semantics for ':' blocks:
+//
+// Frames (IndentFrame) track:
+//  - base_indent: indentation of the line that ended with ':'
+//  - body_indent: indentation used by the first non-blank non-comment line after the ':' (unknown initially)
+//  - waiting_for_body: true until a non-blank non-comment line establishes the block body indent
+//
+// Rules:
+//  - A new colon line pushes a frame with waiting_for_body = true.
+//  - While waiting_for_body:
+//      - ignore blank lines and comments
+//      - the first real line with indent > base_indent establishes body_indent and waiting_for_body = false
+//      - a non-indented real line (indent <= base_indent) will be allowed to fall through to parsing
+//        (the parser will detect missing block/body if that's invalid). We intentionally do not
+//        implicitly pop the waiting frame to avoid creating an implicit empty block that hides errors.
+//  - While not waiting_for_body:
+//      - A line with indent >= current frame.body_indent is considered inside the current block (cont.)
+ //    - A line with indent < current frame.body_indent dedents out: pop frames until the
+//        indent is within the enclosing frame (or no frames remain).
+//
+// The implementation also enforces a maximum nesting depth to prevent pathological input from
+// exhausting memory/CPU (simple DoS protection).
 
-// Cross-platform helper to find a suitable user home directory.
-// On Unix: $HOME
-// On Windows: %USERPROFILE% or %HOMEDRIVE%%HOMEPATH%
-// Returns empty optional if none found.
+struct IndentFrame {
+    int base_indent;          // indent of the line that ended with ':'
+    int body_indent;          // indent of first body line (set after first real body line)
+    bool waiting_for_body;    // true until body_indent is set
+};
+
+static const size_t MAX_REPL_INDENT_NESTING = 1024;
+
 static std::optional<fs::path> get_home_dir() {
 #ifdef _WIN32
     const char* userprofile = std::getenv("USERPROFILE");
@@ -157,7 +174,6 @@ static std::optional<fs::path> get_home_dir() {
         std::string combined = std::string(homedrive) + std::string(homepath);
         if (!combined.empty()) return fs::path(combined);
     }
-    // As a last resort, try HOMESHARE (rare)
     const char* homeshare = std::getenv("HOMESHARE");
     if (homeshare && homeshare[0] != '\0') return fs::path(homeshare);
     return std::nullopt;
@@ -168,38 +184,24 @@ static std::optional<fs::path> get_home_dir() {
 #endif
 }
 
-// Build a cross-platform history file path in the user's home directory.
-// Falls back to current directory "/.swazi_history" if no home is found.
 static fs::path history_file_in_home() {
     auto home = get_home_dir();
     if (home.has_value()) {
         return home.value() / ".swazi_history";
     }
-    // fallback: current directory
     return fs::current_path() / ".swazi_history";
 }
 
-// Important note:
-// Many linenoise implementations (and terminals) don't handle multi-byte or
-// wide characters gracefully when computing cursor positions for the prompt.
-// The original REPL used fancy Unicode arrows which can make the cursor appear
-// "unstable" or misplaced in some linnoise/terminal combinations. To avoid
-// cursor misplacement we use a plain ASCII prompt here (no hidden ANSI codes,
-// no multi-byte glyphs). If you prefer the fancier Unicode prompt, enable it
-// only after verifying your linenoise/terminal combo correctly supports UTF-8
-// prompt length calculations.
 void run_repl_mode() {
     std::string buffer;
     Evaluator evaluator;
     evaluator.set_entry_point("");  // REPL: sets __name__ to "<repl>" and __main__ true
-    std::vector<int> colon_indent_stack;
+    std::vector<IndentFrame> indent_stack;
 
     std::cout << "swazi v" << SWAZI_VERSION << " | built on " << __DATE__ << "\n";
     std::cout << "Swazi REPL — type 'exit' or 'quit' or Ctrl-D to quit\n";
 
-    // Initialize linenoise history and callbacks (best-effort)
     fs::path history_path = history_file_in_home();
-    // Ensure parent dir exists (usually the home dir exists already).
     try {
         fs::path parent = history_path.parent_path();
         if (!parent.empty() && !fs::exists(parent)) {
@@ -209,26 +211,15 @@ void run_repl_mode() {
         // ignore; creating history directory is best-effort
     }
 
-    // linenoise API expects C-string path
     linenoiseHistoryLoad(history_path.string().c_str());
 
-    // Track the last history entry we added in this session to avoid immediate duplicates.
-    // Some linenoise builds do not expose history iteration APIs (linenoiseHistoryLength/Get),
-    // so we avoid calling those and maintain the value locally.
     std::string last_added_history;
 
-// If your linenoise supports a multi-line editing mode, you can enable it here.
-// We try calling it in a guarded way (some builds export it, some do not).
-// Uncomment the following lines if your linenoise has linenoiseSetMultiLine:
-//
 #ifdef LINENOISE_MULTILINE
     linenoiseSetMultiLine(1);
 #endif
-    //
-    // We keep it commented out to remain portable.
 
     while (true) {
-        // Use plain ASCII prompts to avoid cursor misplacement bugs in some terminals.
         std::string prompt = buffer.empty() ? ">>> " : "... ";
         char* raw = linenoise(prompt.c_str());
         if (!raw) {  // EOF (Ctrl-D) or error
@@ -239,11 +230,11 @@ void run_repl_mode() {
         std::string line(raw);
         linenoiseFree(raw);
 
+        // Normalise tabs early so all indent calculations are consistent.
         line = expand_tabs(line, 4);
 
         if (line == "exit" || line == "quit") break;
 
-        // Save non-empty lines to history (avoid immediate duplicates)
         if (!line.empty()) {
             if (line != last_added_history) {
                 linenoiseHistoryAdd(line.c_str());
@@ -251,43 +242,116 @@ void run_repl_mode() {
             }
         }
 
-        // Append line to buffer and continue with your continuation logic
+        // Append line to buffer; we'll attempt parse when continuation conditions are not met.
         buffer += line;
         buffer.push_back('\n');
 
-        // ---- continuation checks (unchanged) ----
+        // ---- continuation checks ----
+
+        // If the line ends with ':' we begin a waiting colon frame (like Python).
         if (ends_with_colon(line)) {
+            if (indent_stack.size() >= MAX_REPL_INDENT_NESTING) {
+                std::cerr << "Error: too many nested blocks (limit " << MAX_REPL_INDENT_NESTING << ")\n";
+                // Clear buffer and stack to recover to a clean state.
+                buffer.clear();
+                indent_stack.clear();
+                continue;
+            }
             int base_indent = count_leading_indent_spaces(line);
-            colon_indent_stack.push_back(base_indent);
-            continue;  // keep reading for colon-blocks (pythonic)
+            IndentFrame frame;
+            frame.base_indent = base_indent;
+            frame.body_indent = -1;
+            frame.waiting_for_body = true;
+            indent_stack.push_back(frame);
+            continue;  // definitely continue reading for the block body
         }
 
+        // If the line ends with '{' (brace-block), keep reading until matching '}'.
         if (ends_with_open_brace(line)) {
             continue;
         }
 
+        // If there are unclosed bracket tokens, continue reading (user likely typed a multiline list/expr).
         if (unclosed_brackets_depth(buffer) > 0) {
             continue;
         }
 
-        if (!colon_indent_stack.empty()) {
-            if (is_comment_line(line)) continue;
-            int leading = count_leading_indent_spaces(line);
-            if (leading > 0 && is_blank_or_spaces(line)) continue;
-            if (leading > colon_indent_stack.back()) {
+        // If we're inside colon-driven blocks, decide whether to continue or dedent/pop frames.
+        if (!indent_stack.empty()) {
+            // ignore comments/blank lines for continuation/dedent decisions in many cases
+            if (is_comment_line(line)) {
+                // Do not treat a pure-comment line as ending a waiting-for-body frame.
+                // Example:
+                // if cond:
+                //    # comment
+                //    <body>
+                // So we continue reading without modifying frames.
                 continue;
-            } else if (!colon_indent_stack.empty() && leading == colon_indent_stack.back() && colon_indent_stack.back() != 0) {
-                colon_indent_stack.pop_back();
-                continue;
-            } else {
-                while (!colon_indent_stack.empty() && leading < colon_indent_stack.back()) {
-                    // if(leading colon_indent_stack.back())
-                    colon_indent_stack.pop_back();
-                }
-
-                // fall through -> attempt parse+evaluate
             }
-        }
+
+            int leading = count_leading_indent_spaces(line);
+
+            // If this line has only spaces (and some indent), keep waiting for a real body line.
+            if (leading > 0 && is_blank_or_spaces(line)) {
+                continue;
+            }
+
+            // Now examine the topmost frame and decide behavior.
+            // We will pop frames when the current leading indent dedents out of them.
+            // BUT if the top frame is waiting_for_body and the current line has indent > base_indent,
+            // that establishes the frame's body_indent (we stay in block).
+            IndentFrame &top = indent_stack.back();
+
+            if (top.waiting_for_body) {
+                // If the user provides a real body line with indent > base_indent, set the body's indent.
+                if (leading > top.base_indent) {
+                    top.body_indent = leading;
+                    top.waiting_for_body = false;
+                    // We're inside the body now, so continue reading (more block content may follow).
+                    continue;
+                }
+                // If leading <= base_indent then user did not provide a body; allow parse attempt.
+                // We intentionally do NOT pop the waiting frame here — let the parser diagnose missing block
+                // (so we don't mask real syntax errors). Fall through to parsing attempt.
+            } else {
+                // Not waiting_for_body: determine if this line is inside this frame or dedents out.
+                if (leading >= top.body_indent) {
+                    // still inside the current block (includes same indentation level for sibling statements)
+                    continue;
+                } else {
+                    // Dedent: pop frames while the leading indent is less than the effective indent of the frame.
+                    while (!indent_stack.empty()) {
+                        IndentFrame &cur = indent_stack.back();
+                        int effective = cur.waiting_for_body ? cur.base_indent + 1 : cur.body_indent;
+                        // For waiting frames, treat effective as base_indent+1 so that a dedent to base_indent
+                        // is considered outside; but do not pop waiting frames blindly if leading is <= base_indent.
+                        if (cur.waiting_for_body) {
+                            if (leading <= cur.base_indent) {
+                                // We dedented out of a waiting frame without establishing a body:
+                                // popping it is safe here because the user explicitly dedented outside of it.
+                                indent_stack.pop_back();
+                                continue;
+                            } else {
+                                // leading > base_indent: this should have been captured earlier (waiting->body)
+                                // but to be safe, set body_indent and stay in block.
+                                cur.body_indent = leading;
+                                cur.waiting_for_body = false;
+                                break;
+                            }
+                        } else {
+                            if (leading < cur.body_indent) {
+                                indent_stack.pop_back();
+                                continue;
+                            } else {
+                                // leading >= cur.body_indent => we are inside this frame
+                                break;
+                            }
+                        }
+                    } // end while
+                    // After popping, we fall through to attempt parse+evaluate if no conditions require further continuation.
+                }
+            }
+        } // end indent_stack handling
 
         // ---- Try lex/parse/evaluate the accumulated buffer ----
         try {
@@ -312,9 +376,9 @@ void run_repl_mode() {
 
             if (!did_auto_print) evaluator.evaluate(ast.get());
 
-            // success: clear buffer and colon-indent stack
+            // success: clear buffer and indentation stack
             buffer.clear();
-            colon_indent_stack.clear();
+            indent_stack.clear();
         } catch (const std::exception& e) {
             std::string msg = e.what();
             if (is_likely_incomplete_input(msg)) {
@@ -323,14 +387,13 @@ void run_repl_mode() {
             }
             std::cerr << "Error: " << msg << std::endl;
             buffer.clear();
-            colon_indent_stack.clear();
+            indent_stack.clear();
         } catch (...) {
             std::cerr << "Unknown fatal error\n";
             buffer.clear();
-            colon_indent_stack.clear();
+            indent_stack.clear();
         }
     }
 
-    // Save history on exit
     linenoiseHistorySave(history_path.string().c_str());
 }
