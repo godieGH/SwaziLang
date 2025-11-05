@@ -329,7 +329,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 t = "object";
             else if (std::holds_alternative<ClassPtr>(objVal))
                 t = "muundo";
-            else if(std::holds_alternative<HoleValue>(objVal))
+            else if (std::holds_alternative<HoleValue>(objVal))
                 t = "<empty>";
             return Value{
                 t};
@@ -1125,20 +1125,53 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
                         return Value{oss.str()};
                     }
-                    
-                  if (prop == "fill") {
-                      if (args.empty()) {
-                          throw std::runtime_error(
-                              "TypeError at " + token.loc.to_string() +
-                              "\narr.fill requires 1 argument (value to fill)." +
-                              "\n --> Traced at:\n" + token.loc.get_line_trace());
-                      }
-                      const Value& fillVal = args[0];
-                      for (size_t i = 0; i < arr->elements.size(); ++i) {
-                          arr->elements[i] = fillVal;
-                      }
-                      return Value{arr};
-                  }
+
+                    if (prop == "fill") {
+                        if (args.empty()) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.fill requires at least 1 argument (value to fill)." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+
+                        const Value& fillVal = args[0];
+                        size_t arrSize = arr->elements.size();
+
+                        // Default start = 0, end = array length
+                        int64_t start = 0;
+                        int64_t end = static_cast<int64_t>(arrSize);
+
+                        // Parse start index (args[1])
+                        if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                            start = static_cast<int64_t>(std::get<double>(args[1]));
+                            // Handle negative indices
+                            if (start < 0) {
+                                start = std::max(static_cast<int64_t>(0),
+                                    static_cast<int64_t>(arrSize) + start);
+                            } else {
+                                start = std::min(start, static_cast<int64_t>(arrSize));
+                            }
+                        }
+
+                        // Parse end index (args[2])
+                        if (args.size() >= 3 && std::holds_alternative<double>(args[2])) {
+                            end = static_cast<int64_t>(std::get<double>(args[2]));
+                            // Handle negative indices
+                            if (end < 0) {
+                                end = std::max(static_cast<int64_t>(0),
+                                    static_cast<int64_t>(arrSize) + end);
+                            } else {
+                                end = std::min(end, static_cast<int64_t>(arrSize));
+                            }
+                        }
+
+                        // Fill the range [start, end)
+                        for (int64_t i = start; i < end; ++i) {
+                            arr->elements[i] = fillVal;
+                        }
+
+                        return Value{arr};
+                    }
 
                     return std::monostate{};
                 };

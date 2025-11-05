@@ -150,16 +150,16 @@ static int unclosed_brackets_depth(const std::string& s) {
 //        implicitly pop the waiting frame to avoid creating an implicit empty block that hides errors.
 //  - While not waiting_for_body:
 //      - A line with indent >= current frame.body_indent is considered inside the current block (cont.)
- //    - A line with indent < current frame.body_indent dedents out: pop frames until the
+//    - A line with indent < current frame.body_indent dedents out: pop frames until the
 //        indent is within the enclosing frame (or no frames remain).
 //
 // The implementation also enforces a maximum nesting depth to prevent pathological input from
 // exhausting memory/CPU (simple DoS protection).
 
 struct IndentFrame {
-    int base_indent;          // indent of the line that ended with ':'
-    int body_indent;          // indent of first body line (set after first real body line)
-    bool waiting_for_body;    // true until body_indent is set
+    int base_indent;        // indent of the line that ended with ':'
+    int body_indent;        // indent of first body line (set after first real body line)
+    bool waiting_for_body;  // true until body_indent is set
 };
 
 static const size_t MAX_REPL_INDENT_NESTING = 1024;
@@ -300,7 +300,7 @@ void run_repl_mode() {
             // We will pop frames when the current leading indent dedents out of them.
             // BUT if the top frame is waiting_for_body and the current line has indent > base_indent,
             // that establishes the frame's body_indent (we stay in block).
-            IndentFrame &top = indent_stack.back();
+            IndentFrame& top = indent_stack.back();
 
             if (top.waiting_for_body) {
                 // If the user provides a real body line with indent > base_indent, set the body's indent.
@@ -321,7 +321,7 @@ void run_repl_mode() {
                 } else {
                     // Dedent: pop frames while the leading indent is less than the effective indent of the frame.
                     while (!indent_stack.empty()) {
-                        IndentFrame &cur = indent_stack.back();
+                        IndentFrame& cur = indent_stack.back();
                         int effective = cur.waiting_for_body ? cur.base_indent + 1 : cur.body_indent;
                         // For waiting frames, treat effective as base_indent+1 so that a dedent to base_indent
                         // is considered outside; but do not pop waiting frames blindly if leading is <= base_indent.
@@ -347,11 +347,11 @@ void run_repl_mode() {
                                 break;
                             }
                         }
-                    } // end while
+                    }  // end while
                     // After popping, we fall through to attempt parse+evaluate if no conditions require further continuation.
                 }
             }
-        } // end indent_stack handling
+        }  // end indent_stack handling
 
         // ---- Try lex/parse/evaluate the accumulated buffer ----
         try {

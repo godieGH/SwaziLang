@@ -127,7 +127,7 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
     if (std::holds_alternative<HoleValue>(v)) {
         // use a compact display for a hole when converted to string
-        return std::string( use_color ? (Color::bright_black + "<empty>" + Color::reset) : "<empty>");
+        return std::string(use_color ? (Color::bright_black + "<empty>" + Color::reset) : "<empty>");
     }
     if (std::holds_alternative<FunctionPtr>(v)) {
         FunctionPtr fn = std::get<FunctionPtr>(v);
@@ -171,7 +171,6 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     }
     return "";
 }
-
 
 bool Evaluator::to_bool(const Value& v) {
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v);
@@ -563,7 +562,7 @@ static bool is_simple_value(const Value& v) {
     if (std::holds_alternative<double>(v)) return true;
     if (std::holds_alternative<std::string>(v)) return true;
     if (std::holds_alternative<bool>(v)) return true;
-    if (std::holds_alternative<HoleValue>(v)) return true; // hole is simple for printing decisions
+    if (std::holds_alternative<HoleValue>(v)) return true;  // hole is simple for printing decisions
     return false;
 }
 
@@ -696,8 +695,8 @@ std::string Evaluator::print_value(
         }
         if (allHoles) {
             std::ostringstream ss;
-            if(use_color) {
-                ss << "[" << Color::bright_black << "<" << arr->elements.size() << " empty holes" << ">" << Color::reset  << "]";
+            if (use_color) {
+                ss << "[" << Color::bright_black << "<" << arr->elements.size() << " empty holes" << ">" << Color::reset << "]";
             } else {
                 ss << "[" << "<" << arr->elements.size() << " empty holes" << ">" << "]";
             }
