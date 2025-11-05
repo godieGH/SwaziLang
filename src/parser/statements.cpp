@@ -51,11 +51,10 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
             value = parse_expression();
         } else {
             // experimental but worth it.
-            if(peek().type != TokenType::SEMICOLON && peek().type != TokenType::NEWLINE) {
-              throw std::runtime_error("Terminate variable declaration with a \";\" or with a newline if not initialized at" + peek().loc.to_string() + "\n--> Traced at, bad code practice:\n" + peek_next(-1).loc.get_line_trace());
+            if (peek().type != TokenType::SEMICOLON && peek().type != TokenType::NEWLINE) {
+                throw std::runtime_error("Terminate variable declaration with a \";\" or with a newline if not initialized at" + peek().loc.to_string() + "\n--> Traced at, bad code practice:\n" + peek_next(-1).loc.get_line_trace());
             }
         }
-        
     }
 
     if (peek().type == TokenType::SEMICOLON) consume();
@@ -964,8 +963,7 @@ std::unique_ptr<StatementNode> Parser::parse_continue_statement() {
 
 std::unique_ptr<CaseNode> Parser::parse_switch_case() {
     auto caseNode = std::make_unique<CaseNode>();
-    
-    
+
     if (match(TokenType::IKIWA)) {
         caseNode->test = parse_expression();
     } else if (match(TokenType::KAIDA)) {
@@ -1006,7 +1004,7 @@ std::unique_ptr<CaseNode> Parser::parse_switch_case() {
             caseNode->body.push_back(std::move(stmt));
         }
         expect(TokenType::CLOSEBRACE, "Expected '}' to close case body");
-        if(peek().type == TokenType::NEWLINE) {
+        if (peek().type == TokenType::NEWLINE) {
             consume();
         }
     } else {
@@ -1061,8 +1059,8 @@ std::unique_ptr<StatementNode> Parser::parse_switch_statement() {
 std::unique_ptr<StatementNode> Parser::parse_try_catch() {
     // caller already consumed 'jaribu' (JARIBU)
     if (position == 0) {
-        throw std::runtime_error("Internal parser error: at "  + peek().loc.to_string() + " \n --> Parse_try_catch called with position == 0" +
-        "\n --> Traced around: \n" + peek().loc.get_line_trace());
+        throw std::runtime_error("Internal parser error: at " + peek().loc.to_string() + " \n --> Parse_try_catch called with position == 0" +
+            "\n --> Traced around: \n" + peek().loc.get_line_trace());
     }
 
     auto node = std::make_unique<TryCatchNode>();

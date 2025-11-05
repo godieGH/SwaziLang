@@ -217,12 +217,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             // object property path: o[key] = rhs
             if (std::holds_alternative<ObjectPtr>(objVal)) {
-    ObjectPtr op = std::get<ObjectPtr>(objVal);
-    std::string prop = to_property_key(indexVal, idx->token);  // convert index -> property key
-    // Delegate creation/permission checks/frozen/proxy handling to the helper
-    set_object_property(op, prop, rhs, env, idx->token);
-    return;
-}
+                ObjectPtr op = std::get<ObjectPtr>(objVal);
+                std::string prop = to_property_key(indexVal, idx->token);  // convert index -> property key
+                // Delegate creation/permission checks/frozen/proxy handling to the helper
+                set_object_property(op, prop, rhs, env, idx->token);
+                return;
+            }
             throw std::runtime_error(
                 "TypeError at " + idx->token.loc.to_string() +
                 "\nAttempted index assignment on non-array/non-object value." +
@@ -230,34 +230,34 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         }
 
         if (auto mem = dynamic_cast<MemberExpressionNode*>(an->target.get())) {
-    Value objVal = evaluate_expression(mem->object.get(), env);
+            Value objVal = evaluate_expression(mem->object.get(), env);
 
-    // class static member assignment
-    if (std::holds_alternative<ClassPtr>(objVal)) {
-        ClassPtr cls = std::get<ClassPtr>(objVal);
-        if (!cls) {
+            // class static member assignment
+            if (std::holds_alternative<ClassPtr>(objVal)) {
+                ClassPtr cls = std::get<ClassPtr>(objVal);
+                if (!cls) {
+                    throw std::runtime_error(
+                        "TypeError at " + mem->token.loc.to_string() +
+                        "\nMember assignment on null class." +
+                        "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
+                }
+                set_object_property(cls->static_table, mem->property, rhs, env, mem->token);
+                return;
+            }
+
+            // normal object member assignment (centralized)
+            if (std::holds_alternative<ObjectPtr>(objVal)) {
+                ObjectPtr op = std::get<ObjectPtr>(objVal);
+                set_object_property(op, mem->property, rhs, env, mem->token);
+                return;
+            }
+
+            // clearer error for non-object/non-class member assignment
             throw std::runtime_error(
                 "TypeError at " + mem->token.loc.to_string() +
-                "\nMember assignment on null class." +
+                "\nMember assignment on non-object value." +
                 "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
         }
-        set_object_property(cls->static_table, mem->property, rhs, env, mem->token);
-        return;
-    }
-
-    // normal object member assignment (centralized)
-    if (std::holds_alternative<ObjectPtr>(objVal)) {
-        ObjectPtr op = std::get<ObjectPtr>(objVal);
-        set_object_property(op, mem->property, rhs, env, mem->token);
-        return;
-    }
-
-    // clearer error for non-object/non-class member assignment
-    throw std::runtime_error(
-        "TypeError at " + mem->token.loc.to_string() +
-        "\nMember assignment on non-object value." +
-        "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-}
         throw std::runtime_error(
             "TypeError at " + an->token.loc.to_string() +
             "\nUnsupported assignment target." +

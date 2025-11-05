@@ -42,15 +42,14 @@ std::unique_ptr<StatementNode> Parser::parse_if_statement() {
         position--;  // rewind one token so parse_block sees OPENBRACE
         auto thenBody = parse_block(true);
         ifNode->then_body = std::move(thenBody);
-       
-       // experimental , but working it is for ignoring any white new line after } to reach vinginevyo
-        while(peek().type == TokenType::NEWLINE) {
-          consume();
+
+        // experimental , but working it is for ignoring any white new line after } to reach vinginevyo
+        while (peek().type == TokenType::NEWLINE) {
+            consume();
         }
     } else {
         expect(TokenType::COLON, "Expected ':' or '{' to begin 'kama' body");
     }
-    
 
     // optional else (vinginevyo)
     if (peek().type == TokenType::VINGINEVYO) {
@@ -84,25 +83,22 @@ std::unique_ptr<StatementNode> Parser::parse_if_statement() {
 std::unique_ptr<StatementNode> Parser::parse_for_statement() {
     consume();
     Token forTok = tokens[position - 1];
-    
-    
+
     if (match(TokenType::KILA)) {
-          return parse_for_in_statement(forTok);
-    }
-    else if(peek().type == TokenType::IDENTIFIER || 
-    (peek().type == TokenType::OPENPARENTHESIS && peek_next().type == TokenType::IDENTIFIER && peek_next(2).type == TokenType::CLOSEPARENTHESIS) ||
-    (peek().type == TokenType::OPENPARENTHESIS && peek_next().type == TokenType::IDENTIFIER && peek_next(2).type == TokenType::COMMA && peek_next(3).type == TokenType::IDENTIFIER && peek_next(4).type == TokenType::CLOSEPARENTHESIS)) {
-      return parse_for_in_statement(forTok);
-    }
-    else {
+        return parse_for_in_statement(forTok);
+    } else if (peek().type == TokenType::IDENTIFIER ||
+        (peek().type == TokenType::OPENPARENTHESIS && peek_next().type == TokenType::IDENTIFIER && peek_next(2).type == TokenType::CLOSEPARENTHESIS) ||
+        (peek().type == TokenType::OPENPARENTHESIS && peek_next().type == TokenType::IDENTIFIER && peek_next(2).type == TokenType::COMMA && peek_next(3).type == TokenType::IDENTIFIER && peek_next(4).type == TokenType::CLOSEPARENTHESIS)) {
+        return parse_for_in_statement(forTok);
+    } else {
         return parse_for_classic_statement(forTok);
     }
 }
 
 std::unique_ptr<StatementNode> Parser::parse_for_in_statement(Token kwaTok) {
     // value variable
-    if(peek().type == TokenType::IDENTIFIER) {
-      expect(TokenType::IDENTIFIER, "Expected identifier after 'kila'");
+    if (peek().type == TokenType::IDENTIFIER) {
+        expect(TokenType::IDENTIFIER, "Expected identifier after 'kila'");
     }
     Token valTok = tokens[position - 1];
 

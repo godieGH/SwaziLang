@@ -173,7 +173,7 @@ class Evaluator {
     EnvPtr global_env;
     EnvPtr main_module_env;
     EnvPtr repl_env;
-    
+
     std::vector<std::string> cli_args;
 
     ClassPtr current_class_context = nullptr;

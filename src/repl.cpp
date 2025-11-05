@@ -27,37 +27,36 @@ static int count_leading_indent_spaces(const std::string& line) {
 }
 
 static bool is_comment_line(const std::string& s) {
-  bool met_char = false;
-  bool met_slash = false;
-  bool comment = false;
-  for(unsigned char c : s ) {
-    met_char = !std::isspace(c);
-    if(met_char) {
-      if(c == '#') {
-        comment = true;
-        break;
-      }
-      if(c == '/') {
-        met_slash = true;
-        continue;
-      }
-      if(met_slash && c == '/' || c == '*') {
-        comment = true;
-        break;
-      }
+    bool met_char = false;
+    bool met_slash = false;
+    bool comment = false;
+    for (unsigned char c : s) {
+        met_char = !std::isspace(c);
+        if (met_char) {
+            if (c == '#') {
+                comment = true;
+                break;
+            }
+            if (c == '/') {
+                met_slash = true;
+                continue;
+            }
+            if (met_slash && c == '/' || c == '*') {
+                comment = true;
+                break;
+            }
+        }
     }
-  }
-  if(met_char && comment) {
-    return true;
-  }
-  return false;
+    if (met_char && comment) {
+        return true;
+    }
+    return false;
 }
 static bool is_blank_or_spaces(const std::string& s) {
     for (unsigned char c : s)
         if (!std::isspace(c)) return false;
     return true;
 }
-
 
 static char last_non_ws_char(const std::string& line) {
     for (int i = (int)line.size() - 1; i >= 0; --i) {
@@ -277,18 +276,15 @@ void run_repl_mode() {
             if (leading > 0 && is_blank_or_spaces(line)) continue;
             if (leading > colon_indent_stack.back()) {
                 continue;
-            } 
-            else if(!colon_indent_stack.empty() && leading == colon_indent_stack.back() && colon_indent_stack.back()  != 0 ) {
-              colon_indent_stack.pop_back();
-              continue;
-            }
-            else {
-                
+            } else if (!colon_indent_stack.empty() && leading == colon_indent_stack.back() && colon_indent_stack.back() != 0) {
+                colon_indent_stack.pop_back();
+                continue;
+            } else {
                 while (!colon_indent_stack.empty() && leading < colon_indent_stack.back()) {
-                    //if(leading colon_indent_stack.back())
+                    // if(leading colon_indent_stack.back())
                     colon_indent_stack.pop_back();
                 }
-                
+
                 // fall through -> attempt parse+evaluate
             }
         }

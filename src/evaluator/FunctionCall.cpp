@@ -4,8 +4,8 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
+#include "SwaziError.hpp"
 #include "evaluator.hpp"
 
 Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
@@ -13,8 +13,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
         throw SwaziError(
             "TypeError",
             "Attempt to call a null function.",
-            callToken.loc
-        );
+            callToken.loc);
     }
 
     // Native function: call the C++ implementation directly.
@@ -23,8 +22,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             throw SwaziError(
                 "TypeError",
                 "Native function has no implementation.",
-                callToken.loc
-            );
+                callToken.loc);
         }
         // Pass the dynamic caller environment (caller_env) so native_impl can inspect
         // and operate on the environment where the call happened (module/repl/main).
@@ -54,8 +52,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
         throw SwaziError(
             "TypeError",
             ss.str(),
-            callToken.loc
-        );
+            callToken.loc);
     }
 
     // create local environment whose parent is the function's closure
@@ -84,8 +81,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
                     throw SwaziError(
                         "TypeError",
                         ss.str(),
-                        callToken.loc
-                    );
+                        callToken.loc);
                 }
                 for (size_t k = 0; k < p->rest_required_count; ++k) {
                     arr->elements.push_back(args[argIndex++]);
@@ -115,8 +111,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
                 throw SwaziError(
                     "TypeError",
                     ss.str(),
-                    callToken.loc
-                );
+                    callToken.loc);
             }
         }
         var.is_constant = false;
@@ -139,8 +134,7 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
         throw SwaziError(
             "TypeError",
             "Attempt to call a null function.",
-            callToken.loc
-        );
+            callToken.loc);
     }
 
     // Native function case: forward (native_impl receives caller_env so it can inspect $ if needed)
@@ -149,8 +143,7 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
             throw SwaziError(
                 "TypeError",
                 "Native function has no implementation.",
-                callToken.loc
-            );
+                callToken.loc);
         }
         return fn->native_impl(args, caller_env, callToken);
     }
@@ -176,8 +169,7 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
         throw SwaziError(
             "TypeError",
             ss.str(),
-            callToken.loc
-        );
+            callToken.loc);
     }
 
     // create local environment whose parent is the function's closure

@@ -1,8 +1,8 @@
 #include "lexer.hpp"
 
 #include <algorithm>
-#include <iostream>
 #include <cctype>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -39,7 +39,6 @@ char Lexer::advance() {
     }
     return c;
 }
-
 
 void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length) {
     int len = tok_length >= 0 ? tok_length : static_cast<int>(value.size());
@@ -209,9 +208,11 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
     std::ostringstream ss;
     ss << "Unterminated template literal in file '" << (filename.empty() ? "<repl>" : filename)
        << "' starting at line " << tok_line << ", col " << tok_col;
-       std::stringstream sd;
-       sd  << " * " << tok_line << " | ";
-       ss << "\n --> Traced at: \n" << sd.str() << linestr[tok_line] << "\n" << std::string(sd.str().size() + (tok_col - 6), ' ') << "~~~^~~~";
+    std::stringstream sd;
+    sd << " * " << tok_line << " | ";
+    ss << "\n --> Traced at: \n"
+       << sd.str() << linestr[tok_line] << "\n"
+       << std::string(sd.str().size() + (tok_col - 6), ' ') << "~~~^~~~";
     throw std::runtime_error(ss.str());
 }
 
@@ -258,9 +259,8 @@ void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size
                 val.resize(saved_len);
                 break;  // stop scanning number here
             }
-        } 
-        else if(c == '_' && std::isdigit((unsigned char)peek_next()) && !seen_dot) {
-          advance();
+        } else if (c == '_' && std::isdigit((unsigned char)peek_next()) && !seen_dot) {
+            advance();
         } else {
             break;
         }
@@ -336,10 +336,10 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"null", TokenType::NULL_LITERAL},  // null token
         {"nan", TokenType::NAN_LITERAL},
         {"inf", TokenType::INF_LITERAL},
-        
+
         {"__block__", TokenType::BLOCK_DU},
         {"__line__", TokenType::LINE_DU},
-      
+
     };
 
     auto it = keywords.find(id);
@@ -499,13 +499,14 @@ void Lexer::handle_newline(std::vector<Token>& out) {
                 ss << "Indentation error in file '"
                    << (filename.empty() ? "<repl>" : filename)
                    << "' at line " << line;
-                   
-                   ss << "\n --> Traced at: \n";
-                   std::stringstream sd;
-                   sd << " * " << line << " | ";
-                   
-                   ss << sd.str() << linestr[line] << "\n" << std::string(sd.str().size() + col, ' ') << "^";
-                   
+
+                ss << "\n --> Traced at: \n";
+                std::stringstream sd;
+                sd << " * " << line << " | ";
+
+                ss << sd.str() << linestr[line] << "\n"
+                   << std::string(sd.str().size() + col, ' ') << "^";
+
                 throw std::runtime_error(ss.str());
             }
         }
@@ -528,17 +529,17 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
-    
-    if(c == '=' && peek_next() == '>' && peek(2) == '>') {
-      advance();
-      advance();
-      advance();
-      add_token(out, TokenType::OPENBRACE, "{", line, col, 1);
-      while(peek() != '\n') {
-        scan_token(out);
-      }
-      add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1);
-      return;
+
+    if (c == '=' && peek_next() == '>' && peek(2) == '>') {
+        advance();
+        advance();
+        advance();
+        add_token(out, TokenType::OPENBRACE, "{", line, col, 1);
+        while (peek() != '\n') {
+            scan_token(out);
+        }
+        add_token(out, TokenType::CLOSEBRACE, "}", line, col, 1);
+        return;
     }
 
     if (c == '\n') {
@@ -598,7 +599,6 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
-    
 
     // two-char operators
     if (c == '*' && peek_next() == '*') {
@@ -842,10 +842,10 @@ std::vector<Token> Lexer::tokenize() {
 
     // final EOF token
     add_token(out, TokenType::EOF_TOKEN, "", line, col, 0);
-    
-    for(auto& tok: out) {
-      tok.loc.set_map_linestr(linestr);
+
+    for (auto& tok : out) {
+        tok.loc.set_map_linestr(linestr);
     }
-    
+
     return out;
 }

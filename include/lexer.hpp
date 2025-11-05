@@ -1,22 +1,23 @@
 #pragma once
 
-#include "token.hpp"
+#include <map>
 #include <string>
 #include <vector>
-#include <map>
+
+#include "token.hpp"
 
 class Lexer {
-public:
+   public:
     Lexer(const std::string& source, const std::string& filename = "");
     std::vector<Token> tokenize();
 
-private:
+   private:
     const std::string src;
     const std::string filename;
     size_t i = 0;
     int line = 1;
     int col = 1;
-    
+
     std::string linechunk;
     std::map<int, std::string> linestr;
 
@@ -31,7 +32,7 @@ private:
     char peek(size_t offset = 0) const;
     char peek_next() const;
     char advance();
-    
+
     // Add token: optional explicit length (if -1, length is value.size()).
     void add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length = -1);
 

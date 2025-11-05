@@ -118,8 +118,6 @@ void Evaluator::set_entry_point(const std::string& filename) {
     populate_module_metadata(main_module_env, resolved, name, true);
 }
 
-
-
 void Evaluator::set_cli_args(const std::vector<std::string>& args) {
     // store copy locally (if you need it later)
     this->cli_args = args;
@@ -127,7 +125,7 @@ void Evaluator::set_cli_args(const std::vector<std::string>& args) {
     // Build ArrayValue of strings
     auto arr = std::make_shared<ArrayValue>();
     arr->elements.reserve(args.size());
-    for (const auto &s : args) {
+    for (const auto& s : args) {
         arr->elements.push_back(Value{std::string(s)});
     }
 

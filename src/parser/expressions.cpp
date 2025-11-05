@@ -857,7 +857,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
             // normal identifier param (with optional default)
             Token id = consume();
             if (id.type != TokenType::IDENTIFIER) {
-                throw std::runtime_error("Expected parameter name at " + id.loc.to_string() +"\n --> Traced at: \n" + id.loc.get_line_trace());
+                throw std::runtime_error("Expected parameter name at " + id.loc.to_string() + "\n --> Traced at: \n" + id.loc.get_line_trace());
             }
 
             auto pnode = std::make_unique<ParameterNode>();
@@ -973,7 +973,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         node->token = s;
         return node;
     }
-    
+
     if (t.type == TokenType::NULL_LITERAL) {
         return std::make_unique<NullNode>(consume());
     }
@@ -985,11 +985,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
     if (t.type == TokenType::INF_LITERAL) {
         return std::make_unique<InfNode>(consume());
     }
-    
-    if(t.type == TokenType::BLOCK_DU)  {
+
+    if (t.type == TokenType::BLOCK_DU) {
         return std::make_unique<NullNode>(consume());
     }
-    if(t.type == TokenType::LINE_DU)  {
+    if (t.type == TokenType::LINE_DU) {
         return std::make_unique<LineNode>(consume());
     }
 

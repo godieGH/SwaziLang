@@ -1,19 +1,17 @@
 #pragma once
-#include <iostream>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
-#include <optional>
-#include <cstdlib>
 
-#include "lexer.hpp"
-#include "parser.hpp"
 #include "evaluator.hpp"
-
-#include <filesystem>
+#include "lexer.hpp"
 #include "linenoise.h"
+#include "parser.hpp"
 namespace fs = std::filesystem;
-
 
 void run_repl_mode();

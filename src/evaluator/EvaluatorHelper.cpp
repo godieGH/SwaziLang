@@ -9,8 +9,8 @@
 #include <stdexcept>
 #include <unordered_set>
 
-#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
+#include "SwaziError.hpp"
 #include "evaluator.hpp"
 
 bool supports_color() {
@@ -56,7 +56,7 @@ static std::string value_type_name(const Value& v) {
 }
 
 std::string Evaluator::type_name(const Value& v) {
-  return value_type_name(v);
+    return value_type_name(v);
 }
 
 double Evaluator::to_number(const Value& v, Token token) {
@@ -79,8 +79,7 @@ double Evaluator::to_number(const Value& v, Token token) {
                 throw std::runtime_error(
                     "ValueError at " + token.loc.to_string() +
                     "\nCannot convert string '" + s + "' to number: no digits found" +
-                    "\n --> Traced at:\n" + token.loc.get_line_trace()
-                );
+                    "\n --> Traced at:\n" + token.loc.get_line_trace());
             }
 
             // if only part of the string was parsed
@@ -88,8 +87,7 @@ double Evaluator::to_number(const Value& v, Token token) {
                 throw std::runtime_error(
                     "ValueError at " + token.loc.to_string() +
                     "\nCannot convert string '" + s + "' to number: contains invalid characters after position " + std::to_string(idx) +
-                    "\n --> Traced at:\n" + token.loc.get_line_trace()
-                );
+                    "\n --> Traced at:\n" + token.loc.get_line_trace());
             }
 
             return d;
@@ -97,8 +95,7 @@ double Evaluator::to_number(const Value& v, Token token) {
             throw std::runtime_error(
                 "ValueError at " + token.loc.to_string() +
                 "\nCannot convert string '" + s + "' to number(" + e.what() + ")" +
-                "\n --> Traced at:\n" + token.loc.get_line_trace()
-            );
+                "\n --> Traced at:\n" + token.loc.get_line_trace());
         }
     }
 
@@ -106,13 +103,12 @@ double Evaluator::to_number(const Value& v, Token token) {
     throw std::runtime_error(
         "TypeError at " + token.loc.to_string() +
         "\nCannot convert value of type `" + value_type_name(v) + "` to a number" +
-        "\n --> Traced at:\n" + token.loc.get_line_trace()
-    );
+        "\n --> Traced at:\n" + token.loc.get_line_trace());
 }
 
 std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     static bool use_color = supports_color();
-    if(no_color) use_color = false;
+    if (no_color) use_color = false;
     if (std::holds_alternative<std::monostate>(v)) return use_color ? Color::bright_black + "null" + Color::reset : "null";
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
@@ -131,7 +127,7 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<FunctionPtr>(v)) {
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string name = fn->name.empty() ? "<lambda>" : fn->name;
-        std::string s = use_color ? (Color::bright_cyan + "[kazi " + name + "]" + Color::reset): "[kazi " + name + "]";
+        std::string s = use_color ? (Color::bright_cyan + "[kazi " + name + "]" + Color::reset) : "[kazi " + name + "]";
         return s;
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
@@ -165,7 +161,9 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
 
         // Render static table inline if it has visible properties (print_object already adds its own coloring)
         if (cp->static_table) {
-            std::string static_repr = print_object(cp->static_table, 0, std::unordered_set<const ObjectValue*>{});
+            // Use a local visited set so nested print_object/print_value calls share the same cycle-tracking.
+            std::unordered_set<const ObjectValue*> visited;
+            std::string static_repr = print_object(cp->static_table, 0, visited);
             if (!static_repr.empty() && static_repr != "{}") {
                 out += " " + static_repr;
             }
@@ -194,7 +192,6 @@ bool Evaluator::to_bool(const Value& v) {
     return false;
 }
 
-
 // ----------------------
 // Globals / proxy helpers
 // ----------------------
@@ -203,9 +200,8 @@ bool Evaluator::to_bool(const Value& v) {
 // These are builtin/module metadata and core objects that should not be overwritten by user code through globals().
 static const std::unordered_set<std::string> g_protected_global_keys = {
     "__name__", "__file__", "__dir__", "__main__",
-    "__builtins__",        
-    "Object", "Hesabu", "swazi", "Orodha", "Bool", "Namba", "Neno"
-};
+    "__builtins__",
+    "Object", "Hesabu", "swazi", "Orodha", "Bool", "Namba", "Neno"};
 
 // Deep/equivalence comparator used by array helpers (indexOf/includes/remove-by-value)
 bool Evaluator::is_equal(const Value& a, const Value& b) {
@@ -375,7 +371,7 @@ void Evaluator::set_object_property(ObjectPtr op, const std::string& prop, const
         throw SwaziError("TypeError", "Attempted to set property on null object.", token.loc);
     }
 
-        // Special-case: environment proxy — write into the proxied Environment
+    // Special-case: environment proxy — write into the proxied Environment
     if (op->is_env_proxy && op->proxy_env) {
         // Disallow writing protected global/module keys via the env-proxy.
         if (g_protected_global_keys.find(prop) != g_protected_global_keys.end()) {
@@ -410,7 +406,7 @@ void Evaluator::set_object_property(ObjectPtr op, const std::string& prop, const
         }
         return;
     }
-    
+
     // --- Normal object property semantics ---
 
     // If property exists, enforce permission/lock/private rules
@@ -451,8 +447,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             throw SwaziError(
                 "TypeError",
                 "Cannot destructure a non-array value.",
-                declToken.loc
-            );
+                declToken.loc);
         }
         ArrayPtr src = std::get<ArrayPtr>(value);
         size_t srcLen = src ? src->elements.size() : 0;
@@ -471,16 +466,14 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
                     throw SwaziError(
                         "SyntaxError",
                         "Invalid rest target in array pattern — missing argument.",
-                        spread->token.loc
-                    );
+                        spread->token.loc);
                 }
                 auto idTarget = dynamic_cast<IdentifierNode*>(spread->argument.get());
                 if (!idTarget) {
                     throw SwaziError(
                         "SyntaxError",
                         "Only an identifier is allowed as the rest target in an array pattern.",
-                        spread->token.loc
-                    );
+                        spread->token.loc);
                 }
                 // collect remaining elements starting at current index
                 auto restArr = std::make_shared<ArrayValue>();
@@ -511,8 +504,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             throw SwaziError(
                 "SyntaxError",
                 "Unsupported element in array destructuring pattern.",
-                arrPat->token.loc
-            );
+                arrPat->token.loc);
         }
         return;
     }
@@ -523,8 +515,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             throw SwaziError(
                 "TypeError",
                 "Cannot destructure a non-object value.",
-                declToken.loc
-            );
+                declToken.loc);
         }
         ObjectPtr src = std::get<ObjectPtr>(value);
 
@@ -537,8 +528,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
                 throw SwaziError(
                     "SyntaxError",
                     "Only identifier targets are supported in object patterns.",
-                    propPtr->value->token.loc
-                );
+                    propPtr->value->token.loc);
             }
 
             // Use existing getter to respect privacy/getters (get_object_property is a member)
@@ -562,8 +552,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
     throw SwaziError(
         "SyntaxError",
         "Unsupported pattern node in destructuring assignment.",
-        pattern->token.loc
-    );
+        pattern->token.loc);
 }
 // Tune these to control "small object" inline behavior:
 static constexpr int INLINE_MAX_PROPS = 5;
@@ -675,10 +664,10 @@ static std::string quote_and_color(const std::string& s, bool use_color) {
     return ss.str();
 }
 std::string Evaluator::cerr_colored(const std::string& s) {
-  bool use_color = supports_color();
-  std::string err_str = use_color ? (Color::bright_red + "Error: " + Color::reset) : "Error: ";
-  std::string ss = use_color ? (Color::bright_black + s + Color::reset) : s;
-  return err_str + ss;
+    bool use_color = supports_color();
+    std::string err_str = use_color ? (Color::bright_red + "Error: " + Color::reset) : "Error: ";
+    std::string ss = use_color ? (Color::bright_black + s + Color::reset) : s;
+    return err_str + ss;
 }
 
 std::string Evaluator::print_value(
@@ -723,11 +712,11 @@ std::string Evaluator::print_value(
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr arr = std::get<ArrayPtr>(v);
         if (!arr) return "[]";
-        
+
         const ArrayValue* p = arr.get();
         if (arrvisited.count(p)) return "[/*cycle*/]";
         arrvisited.insert(p);
-        
+
         // try compact inline if small and elements simple
         bool can_inline = (arr->elements.size() <= (size_t)(15));
         if (can_inline) {
@@ -783,9 +772,9 @@ std::string Evaluator::print_value(
         else
             out = label;
 
-        // append static table representation (print_object handles its own coloring and hides private props)
+        // Append static table representation (use the same 'visited' set so cycles are detected)
         if (cp->static_table) {
-            std::string static_repr = print_object(cp->static_table, 0, std::unordered_set<const ObjectValue*>{});
+            std::string static_repr = print_object(cp->static_table, depth, visited);
             if (!static_repr.empty() && static_repr != "{}") {
                 out += " " + static_repr;
             }
@@ -820,7 +809,7 @@ std::string Evaluator::print_object(
         // Collect visible entries from the Environment
         std::vector<std::pair<std::string, Value>> props;
         props.reserve(obj->proxy_env->values.size());
-        for (const auto &kv : obj->proxy_env->values) {
+        for (const auto& kv : obj->proxy_env->values) {
             const std::string& name = kv.first;
             const Environment::Variable& v = kv.second;
             props.emplace_back(name, v.value);
@@ -835,7 +824,11 @@ std::string Evaluator::print_object(
         // Try inline representation if all values are simple and few in number
         bool inline_ok = true;
         if ((int)props.size() > INLINE_MAX_PROPS) inline_ok = false;
-        for (const auto &p : props) if (!is_simple_value(p.second)) { inline_ok = false; break; }
+        for (const auto& p : props)
+            if (!is_simple_value(p.second)) {
+                inline_ok = false;
+                break;
+            }
 
         if (inline_ok) {
             std::ostringstream oss;
@@ -861,15 +854,18 @@ std::string Evaluator::print_object(
         std::string ind(indent, ' ');
         oss << "{\n";
         for (size_t i = 0; i < props.size(); ++i) {
-            const auto &key = props[i].first;
-            const auto &val = props[i].second;
+            const auto& key = props[i].first;
+            const auto& val = props[i].second;
             oss << ind << "  ";
             if (use_color) oss << Color::white;
             oss << key;
             if (use_color) oss << Color::reset;
             oss << ": ";
             oss << print_value(val, indent + 2, visited);
-            if (i + 1 < props.size()) oss << ",\n"; else oss << "\n";
+            if (i + 1 < props.size())
+                oss << ",\n";
+            else
+                oss << "\n";
         }
         oss << ind << "}";
 
