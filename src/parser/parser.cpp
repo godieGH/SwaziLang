@@ -526,6 +526,10 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
         consume();  // consume 'rudisha'
         return parse_return_statement();
     }
+    if (p.type == TokenType::THROW) {
+        consume();  // consume 'throw/tupa'
+        return parse_throw_statement();
+    }
     if (p.type == TokenType::ENDELEA) {
         consume();
         return parse_continue_statement();

@@ -489,6 +489,46 @@ static Value builtin_throw(const std::vector<Value>& args, EnvPtr env, const Tok
     // Use SwaziError when explicit location is provided
     throw SwaziError(type, msg, userLoc);
 }
+static Value builtin_Error(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    // default type and message
+    std::string type = "Error";
+    std::string msg = "Error";
+
+    if (args.empty()) {
+        // no args: use default message and include call token location in the runtime_error text
+        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
+        return out;
+    }
+
+    // One argument: treat as message
+    if (args.size() == 1) {
+        msg = value_to_string(args[0]);
+        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
+        return out;
+    }
+
+    // Two arguments: first is type, second is message
+    if (args.size() == 2) {
+        type = value_to_string(args[0]);
+        msg = value_to_string(args[1]);
+        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
+        return out;
+    }
+
+    // Three or more: first type, second message, third is location object to build TokenLocation
+    type = value_to_string(args[0]);
+    msg = value_to_string(args[1]);
+    const Value& locVal = args[2];
+
+    TokenLocation userLoc = build_location_from_value(locVal, tok.loc);
+    
+    ObjectPtr errObjVal = std::make_shared<ObjectValue>();
+    errObjVal->is_frozen = true;
+    errObjVal->properties["errortype"] = {type, false,false,true, tok};
+    errObjVal->properties["message"] = {msg, false, false, true, tok};
+    errObjVal->properties["loc"] = {locVal, false, false, true, tok};
+    return errObjVal;
+}
 static Value builtin_thibitisha(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     bool ok = args.empty() ? false : value_to_bool(args[0]);
     if (!ok) {
@@ -794,6 +834,7 @@ void init_globals(EnvPtr env) {
     add_fn("Neno", builtin_neno);
     add_fn("soma", builtin_ingiza);
     add_fn("Makosa", builtin_throw);
+    add_fn("Error", builtin_Error);
     add_fn("thibitisha", builtin_thibitisha);
     add_fn("assert", builtin_thibitisha);
 

@@ -762,6 +762,16 @@ struct ReturnStatementNode : public StatementNode {
         return n;
     }
 };
+struct ThrowStatementNode : public StatementNode {
+    std::unique_ptr<ExpressionNode> value;  // expression to throw normally a string or an object / string returned from Error()
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<ThrowStatementNode>();
+        n->token = token;
+        n->value = value ? value->clone() : nullptr;
+        return n;
+    }
+};
 
 struct ThisExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> clone() const override {

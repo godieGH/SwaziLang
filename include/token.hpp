@@ -138,6 +138,11 @@ enum class TokenType {
     OR,
     NOT,
     AINA,
+    
+    // -----------------------
+    // errors & throws
+    // -----------------------
+    THROW,
 
     // -----------------------
     // Comparison

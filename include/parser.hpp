@@ -60,6 +60,7 @@ class Parser {
     std::unique_ptr<StatementNode> parse_statement();
     std::unique_ptr<StatementNode> parse_variable_declaration();
     std::unique_ptr<StatementNode> parse_print_statement(bool newline);
+    std::unique_ptr<StatementNode> parse_throw_statement();
     std::unique_ptr<StatementNode> parse_assignment_or_expression_statement();
     std::unique_ptr<StatementNode> parse_try_catch();
 

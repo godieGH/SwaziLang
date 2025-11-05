@@ -1181,3 +1181,12 @@ std::unique_ptr<StatementNode> Parser::parse_try_catch() {
 
     return std::unique_ptr<StatementNode>(std::move(node));
 }
+
+std::unique_ptr<StatementNode> Parser::parse_throw_statement() {
+  // throw logic will stay here
+  // what it should check.
+  // Syntax should be like throw <expression>
+  // an expression that resolves to a string (error message) or an error object what Makosa actually call when calling SwaziError();
+  // 
+  return nullptr;
+}
