@@ -1190,11 +1190,11 @@ std::unique_ptr<StatementNode> Parser::parse_throw_statement() {
     node->token = throwTok;
 
     // throw requires an expression (no bare 'throw' allowed)
-    if (peek().type == TokenType::SEMICOLON || 
-        peek().type == TokenType::NEWLINE || 
+    if (peek().type == TokenType::SEMICOLON ||
+        peek().type == TokenType::NEWLINE ||
         peek().type == TokenType::EOF_TOKEN) {
         throw std::runtime_error(
-            "SyntaxError at " + throwTok.loc.to_string() + 
+            "SyntaxError at " + throwTok.loc.to_string() +
             ": 'throw' requires an expression (error message, Error(...), or other callable)" +
             "\n --> Traced at:\n" + throwTok.loc.get_line_trace());
     }

@@ -311,6 +311,97 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // --- Universal properties ---
         const std::string& prop = mem->property;
 
+        if (prop == "toStr") {
+            auto make_fn = [this, objVal, env, mem]() -> Value {
+                // Create a native function that converts the value to string
+                auto native_impl = [this, objVal](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    // Handle numbers with optional radix parameter
+                    if (std::holds_alternative<double>(objVal)) {
+                        double num = std::get<double>(objVal);
+
+                        // Check if radix argument is provided
+                        if (!args.empty()) {
+                            int radix = static_cast<int>(to_number(args[0], token));
+
+                            // Validate radix range (2-36, like JavaScript)
+                            if (radix < 2 || radix > 36) {
+                                throw std::runtime_error(
+                                    "RangeError at " + token.loc.to_string() +
+                                    "\nRadix must be between 2 and 36. Got: " + std::to_string(radix) +
+                                    "\n --> Traced at:\n" + token.loc.get_line_trace());
+                            }
+
+                            // Only support radix conversion for integers
+                            if (std::floor(num) != num) {
+                                throw std::runtime_error(
+                                    "TypeError at " + token.loc.to_string() +
+                                    "\nRadix conversion only works with integers. Got: " + std::to_string(num) +
+                                    "\n --> Traced at:\n" + token.loc.get_line_trace());
+                            }
+
+                            // Convert to integer and then to string with radix
+                            long long intNum = static_cast<long long>(num);
+                            bool negative = intNum < 0;
+                            if (negative) intNum = -intNum;
+
+                            std::string result;
+                            const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+                            if (intNum == 0) {
+                                result = "0";
+                            } else {
+                                while (intNum > 0) {
+                                    result = digits[intNum % radix] + result;
+                                    intNum /= radix;
+                                }
+                            }
+
+                            if (negative) result = "-" + result;
+                            return Value{result};
+                        }
+
+                        // No radix provided, use default string conversion
+                        return Value{to_string_value(objVal, true)};
+                    }
+
+                    // Handle other simple types (no radix support)
+                    if (std::holds_alternative<std::monostate>(objVal) ||
+                        std::holds_alternative<std::string>(objVal) ||
+                        std::holds_alternative<bool>(objVal)) {
+                        return Value{to_string_value(objVal, true)};
+                    }
+
+                    // Handle complex types - return type representation
+                    std::string type_repr;
+                    if (std::holds_alternative<ArrayPtr>(objVal)) {
+                        type_repr = "[orodha]";
+                    } else if (std::holds_alternative<ObjectPtr>(objVal)) {
+                        type_repr = "[object]";
+                    } else if (std::holds_alternative<FunctionPtr>(objVal)) {
+                        FunctionPtr fn = std::get<FunctionPtr>(objVal);
+                        std::string name = fn->name.empty() ? "<lambda>" : fn->name;
+                        type_repr = "[kazi " + name + "]";
+                    } else if (std::holds_alternative<ClassPtr>(objVal)) {
+                        ClassPtr cp = std::get<ClassPtr>(objVal);
+                        std::string name = cp ? cp->name : "<null>";
+                        type_repr = "[muundo " + name + "]";
+                    } else {
+                        type_repr = "[unknown]";
+                    }
+
+                    return Value{type_repr};
+                };
+
+                auto fn = std::make_shared<FunctionValue>(
+                    std::string("native:universal.toStr"),
+                    native_impl,
+                    env,
+                    mem->token);
+                return Value{fn};
+            };
+            return make_fn();
+        }
+
         // aina -> type name
         if (prop == "aina" || prop == "type") {
             std::string t = "unknown";  // default

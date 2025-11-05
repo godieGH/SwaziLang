@@ -108,8 +108,9 @@ double Evaluator::to_number(const Value& v, Token token) {
 }
 
 std::string Evaluator::to_string_value(const Value& v, bool no_color) {
-    static bool use_color = supports_color();
-    if (no_color) use_color = false;
+    static bool supports_colors = supports_color();
+    bool use_color = supports_colors && !no_color;
+
     if (std::holds_alternative<std::monostate>(v)) return use_color ? Color::bright_black + "null" + Color::reset : "null";
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
@@ -816,8 +817,6 @@ std::string Evaluator::print_value(
 
     return "<?>";  // fallback
 }
-
-
 
 std::string Evaluator::print_object(
     ObjectPtr obj,
