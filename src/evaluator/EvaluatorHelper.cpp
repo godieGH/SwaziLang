@@ -203,9 +203,9 @@ bool Evaluator::to_bool(const Value& v) {
 // These are builtin/module metadata and core objects that should not be overwritten by user code through globals().
 static const std::unordered_set<std::string> g_protected_global_keys = {
     "__name__", "__file__", "__dir__", "__main__",
+    "__builtins__",        
     "Object", "Hesabu", "swazi", "Orodha", "Bool", "Namba", "Neno"
 };
-
 
 // Deep/equivalence comparator used by array helpers (indexOf/includes/remove-by-value)
 bool Evaluator::is_equal(const Value& a, const Value& b) {
@@ -332,144 +332,114 @@ bool Evaluator::is_private_access_allowed(ObjectPtr obj, EnvPtr env) {
     return false;
 }
 
-Value Evaluator::get_object_property(ObjectPtr obj, const std::string& key, EnvPtr env) {
-    if (!obj) return std::monostate{};
+Value Evaluator::get_object_property(ObjectPtr op, const std::string& prop, EnvPtr accessorEnv) {
+    if (!op) return std::monostate{};
 
-    // --- Env-proxy handling: live view into an Environment ---
-    if (obj->is_env_proxy) {
-        if (!obj->proxy_env) return std::monostate{};
-        // If the environment has the name, return its value; otherwise undefined.
-        if (obj->proxy_env->has(key)) {
-            try {
-                Environment::Variable& var = obj->proxy_env->get(key);
-                return var.value;
-            } catch (...) {
-                // If lookup throws unexpectedly, fall back to undefined
-                return std::monostate{};
+    // Special-case: environment proxy. Map property access to environment lookup.
+    if (op->is_env_proxy && op->proxy_env) {
+        EnvPtr walk = op->proxy_env;
+        while (walk) {
+            auto it = walk->values.find(prop);
+            if (it != walk->values.end()) {
+                return it->second.value;
             }
+            walk = walk->parent;
         }
+        // Not found -> undefined
         return std::monostate{};
     }
 
-    // --- existing object property behavior follows ---
-    auto it = obj->properties.find(key);
-    if (it == obj->properties.end()) {
-        // missing property -> undefined (or throw if you prefer)
-        return std::monostate{};
-    }
+    // --- Existing object semantics ---
+    auto it = op->properties.find(prop);
+    if (it == op->properties.end()) return std::monostate{};
 
     const PropertyDescriptor& desc = it->second;
 
-    // private property -> not allowed unless we are inside the same object's context ($ bound)
-    if (desc.is_private && !is_private_access_allowed(obj, env)) {
+    // Enforce private access rules (same as before)
+    if (desc.is_private && !is_private_access_allowed(op, accessorEnv)) {
         throw std::runtime_error(
-            "PermissionError at " + desc.token.loc.to_string() +
-            "\nCannot access private property '" + key + "' from outside the owning object." +
-            "\n --> Traced at:\n" + desc.token.loc.get_line_trace()
-        );
+            "PermissionError: Cannot access private property '" + prop + "'.");
     }
 
-    // If property is a readonly getter and value is a function -> call it and return its result
+    // If property is readonly and stores a function, treat as getter and call it
     if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
         FunctionPtr getter = std::get<FunctionPtr>(desc.value);
-        // Call with zero args, preserving token for error messages
-        return call_function(getter, {}, desc.token);
+        // Call with zero args, passing the accessor environment as caller env
+        return call_function(getter, {}, accessorEnv, desc.token);
     }
 
-    // normal return
     return desc.value;
 }
-void Evaluator::set_object_property(ObjectPtr obj, const std::string& key, const Value& val, EnvPtr env, const Token& assignToken) {
-    if (!obj) throw std::runtime_error(
-        "TypeError at " + assignToken.loc.to_string() +
-        "\nAttempt to assign a property on a undefined object." +
-        "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-    );
+void Evaluator::set_object_property(ObjectPtr op, const std::string& prop, const Value& val, EnvPtr accessorEnv, const Token& token) {
+    if (!op) {
+        throw SwaziError("TypeError", "Attempted to set property on null object.", token.loc);
+    }
 
-    // Env-proxy assignment => forward to underlying Environment
-    if (obj->is_env_proxy) {
-        if (!obj->proxy_env) throw std::runtime_error(
-            "TypeError at " + assignToken.loc.to_string() +
-            "\nInvalid globals() proxy (no backing environment)." +
-            "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-        );
-
-        // Protect certain keys from being overwritten through the proxy
-        if (g_protected_global_keys.find(key) != g_protected_global_keys.end()) {
-            throw std::runtime_error(
-                "PermissionError at " + assignToken.loc.to_string() +
-                "\nCannot overwrite protected global '" + key + "' via globals()." +
-                "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-            );
+        // Special-case: environment proxy — write into the proxied Environment
+    if (op->is_env_proxy && op->proxy_env) {
+        // Disallow writing protected global/module keys via the env-proxy.
+        if (g_protected_global_keys.find(prop) != g_protected_global_keys.end()) {
+            throw SwaziError(
+                "PermissionError",
+                "Cannot assign to protected module/builtin name '" + prop + "' via globals().",
+                token.loc);
         }
 
-        // If variable exists and is constant, disallow assignment
-        if (obj->proxy_env->has(key)) {
-            Environment::Variable& existing = obj->proxy_env->get(key);
-            if (existing.is_constant) {
-                throw std::runtime_error(
-                    "TypeError at " + assignToken.loc.to_string() +
-                    "\nCannot assign to constant global '" + key + "'." +
-                    "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-                );
+        // If variable already exists in proxied environment chain, update the nearest defining env.
+        // Otherwise, create the variable in the proxied environment itself (module-level behavior).
+        EnvPtr walk = op->proxy_env;
+        EnvPtr defining_env = nullptr;
+        while (walk) {
+            auto it = walk->values.find(prop);
+            if (it != walk->values.end()) {
+                defining_env = walk;
+                break;
             }
+            walk = walk->parent;
         }
 
+        // Create variable descriptor and set
         Environment::Variable var;
         var.value = val;
-        var.is_constant = false;  // assignments via globals() create/overwrite as non-constant
-        obj->proxy_env->set(key, var);
+        var.is_constant = false;  // assignments via globals() produce mutable vars by default
+
+        if (defining_env) {
+            defining_env->set(prop, var);  // update existing variable in its defining environment
+        } else {
+            op->proxy_env->set(prop, var);  // create new variable in proxied environment
+        }
         return;
     }
+    
+    // --- Normal object property semantics ---
 
-    if (obj->is_frozen) return;
-
-    auto it = obj->properties.find(key);
-    if (it != obj->properties.end()) {
+    // If property exists, enforce permission/lock/private rules
+    auto it = op->properties.find(prop);
+    if (it != op->properties.end()) {
         PropertyDescriptor& desc = it->second;
-
-        // cannot assign to private from outside
-        if (desc.is_private && !is_private_access_allowed(obj, env)) {
-            throw std::runtime_error(
-                "PermissionError at " + assignToken.loc.to_string() +
-                "\nCannot assign to private property '" + key + "' from outside the owning object." +
-                "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-            );
+        if (desc.is_private && !is_private_access_allowed(op, accessorEnv)) {
+            throw SwaziError("PermissionError", "Cannot assign to private property '" + prop + "'.", token.loc);
         }
-
-        // cannot assign to readonly / getter-backed property
+        if (desc.is_locked && !is_private_access_allowed(op, accessorEnv)) {
+            throw SwaziError("PermissionError", "Cannot assign to locked property '" + prop + "'.", token.loc);
+        }
         if (desc.is_readonly) {
-            throw std::runtime_error(
-                "TypeError at " + assignToken.loc.to_string() +
-                "\nCannot assign to readonly property '" + key + "'." +
-                "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-            );
+            throw SwaziError("TypeError", "Cannot assign to read-only property '" + prop + "'.", token.loc);
         }
-
-        // locked: only allow internal code (same-$ or class-internal) to overwrite
-        if (desc.is_locked) {
-            bool isInternal = is_private_access_allowed(obj, env);
-            if (!isInternal) {
-                throw std::runtime_error(
-                    "PermissionError at " + assignToken.loc.to_string() +
-                    "\nCannot overwrite locked property '" + key + "' from outside the owning object." +
-                    "\n --> Traced at:\n" + assignToken.loc.get_line_trace()
-                );
-            }
-        }
-
+        // Update descriptor
         desc.value = val;
-        // keep private/readonly/locked flags & token as-is
+        desc.token = token;
         return;
     }
 
-    // property didn't exist - create it
-    PropertyDescriptor desc;
-    desc.value = val;
-    desc.is_private = false;
-    desc.is_readonly = false;
-    desc.token = assignToken;
-    obj->properties[key] = std::move(desc);
+    // Property does not exist: create a new public property descriptor
+    PropertyDescriptor newDesc;
+    newDesc.value = val;
+    newDesc.is_private = false;
+    newDesc.is_readonly = false;
+    newDesc.is_locked = false;
+    newDesc.token = token;
+    op->properties[prop] = std::move(newDesc);
 }
 void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& value, EnvPtr env, bool is_constant, const Token& declToken) {
     if (!pattern) return;
@@ -839,6 +809,14 @@ std::string Evaluator::print_object(
     if (obj->is_env_proxy) {
         if (!obj->proxy_env) return "{}";
 
+        // Cycle detection: if we've already visited this ObjectValue (proxy), avoid recursing.
+        const ObjectValue* proxy_ptr = obj.get();
+        if (visited.count(proxy_ptr)) {
+            return "{/*cycle*/}";
+        }
+        // Mark as visited so nested printing of the same proxy will be cut off.
+        visited.insert(proxy_ptr);
+
         // Collect visible entries from the Environment
         std::vector<std::pair<std::string, Value>> props;
         props.reserve(obj->proxy_env->values.size());
@@ -848,7 +826,11 @@ std::string Evaluator::print_object(
             props.emplace_back(name, v.value);
         }
 
-        if (props.empty()) return "{}";
+        if (props.empty()) {
+            // remove visited mark for tidy correctness (not strictly required)
+            visited.erase(proxy_ptr);
+            return "{}";
+        }
 
         // Try inline representation if all values are simple and few in number
         bool inline_ok = true;
@@ -863,11 +845,14 @@ std::string Evaluator::print_object(
                 if (use_color) oss << Color::white;
                 oss << props[i].first;
                 if (use_color) oss << Color::reset;
-                oss << ": " << print_value(props[i].second, indent + 1);
+                oss << ": " << print_value(props[i].second, indent + 1, visited);
             }
             oss << "}";
             std::string s = oss.str();
-            if ((int)s.size() <= INLINE_MAX_LEN) return s;
+            if ((int)s.size() <= INLINE_MAX_LEN) {
+                visited.erase(proxy_ptr);
+                return s;
+            }
             // otherwise fallthrough to expanded form
         }
 
@@ -883,13 +868,14 @@ std::string Evaluator::print_object(
             oss << key;
             if (use_color) oss << Color::reset;
             oss << ": ";
-            oss << print_value(val, indent + 2);
+            oss << print_value(val, indent + 2, visited);
             if (i + 1 < props.size()) oss << ",\n"; else oss << "\n";
         }
         oss << ind << "}";
+
+        visited.erase(proxy_ptr);
         return oss.str();
     }
-
     // ---------- existing object printing below remains (unchanged) ----------
     // Decide inline vs expanded:
     auto should_inline = [&](ObjectPtr o) -> bool {

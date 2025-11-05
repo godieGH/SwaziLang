@@ -301,7 +301,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             // Getter semantics: call getter if readonly and stored function
             if (desc.is_readonly && std::holds_alternative<FunctionPtr>(desc.value)) {
                 FunctionPtr getter = std::get<FunctionPtr>(desc.value);
-                return call_function(getter, {}, desc.token);
+                return call_function(getter, {}, env, desc.token);
             }
 
             // Normal return of the value (from the class where it was found)
@@ -914,7 +914,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         } else {
                             FunctionPtr cmp = std::get<FunctionPtr>(args[0]);
                             std::sort(arr->elements.begin(), arr->elements.end(), [&](const Value& A, const Value& B) {
-                                Value res = call_function(cmp, {A, B}, token);
+                                Value res = call_function(cmp, {A, B}, callEnv, token);
                                 return to_number(res, token) < 0;
                             });
                         }
@@ -963,7 +963,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
                         FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
-                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
+                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, callEnv, token);
                             if (to_bool(res)) return arr->elements[i];
                         }
                         return std::monostate{};
@@ -979,7 +979,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
                         FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
-                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
+                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, callEnv, token);
                             if (to_bool(res)) return Value{static_cast<double>(i)};
                         }
                         return Value{static_cast<double>(-1)};
@@ -1044,7 +1044,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         FunctionPtr mapper = std::get<FunctionPtr>(args[0]);
                         auto out = std::make_shared<ArrayValue>();
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
-                            Value res = call_function(mapper, {arr->elements[i], Value{static_cast<double>(i)}}, token);
+                            Value res = call_function(mapper, {arr->elements[i], Value{static_cast<double>(i)}}, callEnv, token);
                             out->elements.push_back(res);
                         }
                         return Value{out};
@@ -1061,7 +1061,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                         FunctionPtr fn = std::get<FunctionPtr>(args[0]);
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
-                            call_function(fn, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
+                            call_function(fn, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, callEnv, token);
                         }
                         return std::monostate{};
                     }
@@ -1077,7 +1077,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
                         auto out = std::make_shared<ArrayValue>();
                         for (size_t i = 0; i < arr->elements.size(); ++i) {
-                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, token);
+                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, callEnv, token);
                             if (to_bool(res)) out->elements.push_back(arr->elements[i]);
                         }
                         return Value{out};
@@ -1107,7 +1107,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             startIndex = 1;
                         }
                         for (size_t i = startIndex; i < arr->elements.size(); ++i) {
-                            acc = call_function(reducer, {acc, arr->elements[i], Value{static_cast<double>(i)}}, token);
+                            acc = call_function(reducer, {acc, arr->elements[i], Value{static_cast<double>(i)}}, callEnv, token);
                         }
                         return acc;
                     }
@@ -1973,7 +1973,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
         }
 
-        return call_function(fn, args, effectiveTok);
+        return call_function(fn, args, env, effectiveTok);
     }
     throw SwaziError(
         "TypeError",
@@ -2183,7 +2183,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 // and set current_class_context so 'super(...)' works inside constructor.
                 ClassPtr saved_ctx = current_class_context;
                 current_class_context = cls;
-                call_function_with_receiver(constructorFn, instance, ctorArgs, persisted->token);
+                call_function_with_receiver(constructorFn, instance, ctorArgs, env, persisted->token);
                 current_class_context = saved_ctx;
             }
         }
@@ -2256,7 +2256,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 ClassPtr saved_ctx = current_class_context;
                 current_class_context = parent;
                 try {
-                    Value res = call_function_with_receiver(parentCtor, receiver, args, m->token);
+                    Value res = call_function_with_receiver(parentCtor, receiver, args, env, m->token);
                     current_class_context = saved_ctx;
                     return res;
                 } catch (...) {
@@ -2310,7 +2310,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         auto dtorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, dtorClosure, persisted->token);
 
                         // forward evaluated args into destructor call
-                        Value res = call_function_with_receiver(dtorFn, obj, args, m->token);
+                        Value res = call_function_with_receiver(dtorFn, obj, args, env, m->token);
                         obj->properties.clear();
                         return res;
                     }

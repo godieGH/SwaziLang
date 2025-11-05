@@ -204,8 +204,8 @@ class Evaluator {
 
     // Expression & statement evaluators. Pass the environment explicitly for lexical scoping.
     Value evaluate_expression(ExpressionNode* expr, EnvPtr env);
-    Value call_function(FunctionPtr fn, const std::vector<Value>& args, const Token& callToken);
-    Value call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, const Token& callToken);
+    Value call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
+    Value call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
     void evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value = nullptr, bool* did_return = nullptr, LoopControl* lc = nullptr);
 
     // helpers: conversions and formatting

@@ -8,14 +8,14 @@
 #include "ClassRuntime.hpp"
 #include "evaluator.hpp"
 
-Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, const Token& callToken) {
-      if (!fn) {
-          throw SwaziError(
-              "TypeError",
-              "Attempt to call a null function.",
-              callToken.loc
-          );
-      }
+Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
+    if (!fn) {
+        throw SwaziError(
+            "TypeError",
+            "Attempt to call a null function.",
+            callToken.loc
+        );
+    }
 
     // Native function: call the C++ implementation directly.
     if (fn->is_native) {
@@ -26,9 +26,9 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, c
                 callToken.loc
             );
         }
-        // Note: we pass fn->closure as the env argument to native_impl; native_impl may
-        // choose to create/bind its own environment if desired.
-        return fn->native_impl(args, fn->closure, callToken);
+        // Pass the dynamic caller environment (caller_env) so native_impl can inspect
+        // and operate on the environment where the call happened (module/repl/main).
+        return fn->native_impl(args, caller_env, callToken);
     }
 
     // --- compute minimum required arguments (including rest_required_count) ---
@@ -47,16 +47,16 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, c
         }
     }
 
-  if (args.size() < minRequired) {
-      std::ostringstream ss;
-      ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
-         << "' expects at least " << minRequired << " argument(s) but got " << args.size();
-      throw SwaziError(
-          "TypeError",
-          ss.str(),
-          callToken.loc
-      );
-  }
+    if (args.size() < minRequired) {
+        std::ostringstream ss;
+        ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
+           << "' expects at least " << minRequired << " argument(s) but got " << args.size();
+        throw SwaziError(
+            "TypeError",
+            ss.str(),
+            callToken.loc
+        );
+    }
 
     // create local environment whose parent is the function's closure
     auto local = std::make_shared<Environment>(fn->closure);
@@ -73,10 +73,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, c
         }
 
         if (p->is_rest) {
-            // If rest_required_count > 0 => capture exactly that many and ignore extras.
-            // If rest_required_count == 0 => capture all remaining args.
             auto arr = std::make_shared<ArrayValue>();
-
             if (p->rest_required_count > 0) {
                 size_t remaining = (argIndex < args.size()) ? (args.size() - argIndex) : 0;
                 if (remaining < p->rest_required_count) {
@@ -90,52 +87,41 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, c
                         callToken.loc
                     );
                 }
-                // capture exactly rest_required_count elements (ignore extras)
                 for (size_t k = 0; k < p->rest_required_count; ++k) {
                     arr->elements.push_back(args[argIndex++]);
                 }
             } else {
-                // capture all remaining
                 while (argIndex < args.size()) {
                     arr->elements.push_back(args[argIndex++]);
                 }
             }
-
             Environment::Variable var;
             var.value = arr;
             var.is_constant = false;
             local->set(p->name, var);
-
-            // rest must be last (parser should enforce) — but continue defensively
             continue;
         }
 
-        // Non-rest parameter
         Environment::Variable var;
         if (argIndex < args.size()) {
             var.value = args[argIndex++];
         } else {
-            // apply default if present, evaluating in 'local' so earlier params are visible
             if (p->defaultValue) {
                 var.value = evaluate_expression(p->defaultValue.get(), local);
             } else {
-               // missing required positional (shouldn't happen because minRequired was checked)
-              std::ostringstream ss;
-              ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
-                 << "' missing required argument '" << p->name << "'";
-              throw SwaziError(
-                  "TypeError",
-                  ss.str(),
-                  callToken.loc
-              );
+                std::ostringstream ss;
+                ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
+                   << "' missing required argument '" << p->name << "'";
+                throw SwaziError(
+                    "TypeError",
+                    ss.str(),
+                    callToken.loc
+                );
             }
         }
         var.is_constant = false;
         local->set(p->name, var);
     }
-
-    // Note: any args not captured by an explicit rest (because rest_required_count consumed only
-    // a fixed number) are ignored per the requested semantics.
 
     Value ret_val = std::monostate{};
     bool did_return = false;
@@ -147,16 +133,17 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, c
 
     return did_return ? ret_val : std::monostate{};
 }
-Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, const Token& callToken) {
-if (!fn) {
-    throw SwaziError(
-        "TypeError",
-        "Attempt to call a null function.",
-        callToken.loc
-    );
-}
 
-    // Native function case: forward (native_impl receives closure; if native needs 'this', it can get it from args or closure)
+Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
+    if (!fn) {
+        throw SwaziError(
+            "TypeError",
+            "Attempt to call a null function.",
+            callToken.loc
+        );
+    }
+
+    // Native function case: forward (native_impl receives caller_env so it can inspect $ if needed)
     if (fn->is_native) {
         if (!fn->native_impl) {
             throw SwaziError(
@@ -165,8 +152,7 @@ if (!fn) {
                 callToken.loc
             );
         }
-        // native_impl receives fn->closure. If native needs $ it can be passed via closure or special conventions.
-        return fn->native_impl(args, fn->closure, callToken);
+        return fn->native_impl(args, caller_env, callToken);
     }
 
     // compute minimum required arguments (including rest_required_count)
@@ -183,16 +169,16 @@ if (!fn) {
             minRequired += 1;
     }
 
-if (args.size() < minRequired) {
-    std::ostringstream ss;
-    ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
-       << "' expects at least " << minRequired << " arguments but got " << args.size();
-    throw SwaziError(
-        "TypeError",
-        ss.str(),
-        callToken.loc
-    );
-}
+    if (args.size() < minRequired) {
+        std::ostringstream ss;
+        ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
+           << "' expects at least " << minRequired << " arguments but got " << args.size();
+        throw SwaziError(
+            "TypeError",
+            ss.str(),
+            callToken.loc
+        );
+    }
 
     // create local environment whose parent is the function's closure
     auto local = std::make_shared<Environment>(fn->closure);
@@ -203,7 +189,7 @@ if (args.size() < minRequired) {
     thisVar.is_constant = false;
     local->set("$", thisVar);
 
-    // Bind parameters left-to-right, building rest-array for rest param if present
+    // Bind parameters left-to-right...
     size_t argIndex = 0;
     for (size_t i = 0; i < fn->parameters.size(); ++i) {
         auto& p = fn->parameters[i];
@@ -214,31 +200,20 @@ if (args.size() < minRequired) {
 
         if (p->is_rest) {
             auto arr = std::make_shared<ArrayValue>();
-
             if (p->rest_required_count > 0) {
                 size_t remaining = (argIndex < args.size()) ? (args.size() - argIndex) : 0;
                 if (remaining < p->rest_required_count) {
-    std::ostringstream ss;
-    ss << "Function '" << (fn->name.empty() ? "<lamda>" : fn->name)
-       << "' rest parameter '" << p->name << "' requires at least " << p->rest_required_count
-       << " elements but got " << remaining;
-    throw SwaziError(
-        "TypeError",
-        ss.str(),
-        callToken.loc
-    );
-}
-                // capture exactly rest_required_count arguments and ignore extras
-                for (size_t k = 0; k < p->rest_required_count; ++k) {
-                    arr->elements.push_back(args[argIndex++]);
+                    std::ostringstream ss;
+                    ss << "Function '" << (fn->name.empty() ? "<lamda>" : fn->name)
+                       << "' rest parameter '" << p->name << "' requires at least " << p->rest_required_count
+                       << " elements but got " << remaining;
+                    throw SwaziError("TypeError", ss.str(), callToken.loc);
                 }
+                for (size_t k = 0; k < p->rest_required_count; ++k)
+                    arr->elements.push_back(args[argIndex++]);
             } else {
-                // capture all remaining
-                while (argIndex < args.size()) {
-                    arr->elements.push_back(args[argIndex++]);
-                }
+                while (argIndex < args.size()) arr->elements.push_back(args[argIndex++]);
             }
-
             Environment::Variable var;
             var.value = arr;
             var.is_constant = false;
@@ -254,13 +229,9 @@ if (args.size() < minRequired) {
                 var.value = evaluate_expression(p->defaultValue.get(), local);
             } else {
                 std::ostringstream ss;
-ss << "Function '" << (fn->name.empty() ? "<anonymous>" : fn->name)
-   << "' missing required argument '" << p->name << "'";
-throw SwaziError(
-    "TypeError",
-    ss.str(),
-    callToken.loc
-);
+                ss << "Function '" << (fn->name.empty() ? "<anonymous>" : fn->name)
+                   << "' missing required argument '" << p->name << "'";
+                throw SwaziError("TypeError", ss.str(), callToken.loc);
             }
         }
         var.is_constant = false;

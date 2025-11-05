@@ -79,8 +79,19 @@ void Evaluator::populate_module_metadata(EnvPtr env, const std::string& resolved
         v.is_constant = true;
         env->set("__dir__", v);
     }
-}
 
+    // --- Expose __builtins__ variable in module env pointing to global_env via an env-proxy object
+    {
+        auto builtins_proxy = std::make_shared<ObjectValue>();
+        builtins_proxy->is_env_proxy = true;
+        builtins_proxy->proxy_env = this->global_env;  // evaluator's global_env
+
+        Environment::Variable v;
+        v.value = builtins_proxy;
+        v.is_constant = true;
+        env->set("__builtins__", v);
+    }
+}
 void Evaluator::set_entry_point(const std::string& filename) {
     // Resolve filename to canonical absolute path if provided; empty => REPL
     std::string resolved;

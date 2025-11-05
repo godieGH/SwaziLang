@@ -474,7 +474,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         auto fn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, env, persisted->token);
 
                         // call with receiver bound and forward args
-                        call_function_with_receiver(fn, obj, args, m->token);
+                        call_function_with_receiver(fn, obj, args, env, m->token);
                         break;
                     }
                 }

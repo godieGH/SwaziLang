@@ -88,7 +88,7 @@ void Evaluator::run_event_loop() {
         std::vector<Value> args = item.second;
 
         try {
-            call_function(cb, args, cb->token);
+            call_function(cb, args, cb->closure, cb->token);
         } catch (const std::exception& e) {
             std::cerr << "Unhandled async callback exception: " << e.what() << std::endl;
         } catch (...) {

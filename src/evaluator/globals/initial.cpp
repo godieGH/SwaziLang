@@ -707,7 +707,7 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
 }
 
 void init_globals(EnvPtr env) {
-    if (!env) return;
+   if (!env) return;
 
     auto add_fn = [&](const std::string& name,
                       std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
@@ -718,25 +718,56 @@ void init_globals(EnvPtr env) {
         env->set(name, var);
     };
 
+    // --- globals() builtin: return a live proxy object for the module-level environment.
+    add_fn("globals", [env](const std::vector<Value>& /*args*/, EnvPtr callEnv, const Token& /*tok*/) -> Value {
+        // Determine module-level environment:
+        // Walk up from callEnv until we find an environment whose parent == global_env (env param),
+        // or stop at callEnv if none found (fallback).
+        EnvPtr module_env = nullptr;
+        if (callEnv) {
+            EnvPtr walk = callEnv;
+            // Walk until we either reach an env whose parent is the global env or we reach nullptr
+            while (walk) {
+                if (walk->parent == env) {
+                    module_env = walk;
+                    break;
+                }
+                // If parent is nullptr, stop (no module boundary)
+                if (!walk->parent) break;
+                walk = walk->parent;
+            }
+        }
 
+        // Fallbacks:
+        if (!module_env) {
+            // If callEnv is null or we didn't find a module boundary, prefer:
+            // - callEnv (so REPL/local contexts still work), else global env as last resort
+            module_env = callEnv ? callEnv : env;
+        }
 
-
-    // --- globals() builtin: returns a live proxy object for the passed environment `env` ---
-    add_fn("globals", [env](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
+        // Create the env proxy object (live view of the module env)
         auto proxy = std::make_shared<ObjectValue>();
         proxy->is_env_proxy = true;
-        proxy->proxy_env = env;
+        proxy->proxy_env = module_env;
+
+        // Create a builtins proxy object that points to the global_env (env param).
+        auto builtins_proxy = std::make_shared<ObjectValue>();
+        builtins_proxy->is_env_proxy = true;
+        builtins_proxy->proxy_env = env;  // global env
+
+        // Expose __builtins__ on the returned proxy as a readonly/locked property (so globals().__builtins__ works).
+        PropertyDescriptor pd;
+        pd.value = builtins_proxy;
+        pd.is_private = false;
+        pd.is_readonly = true;
+        pd.is_locked = true;
+        pd.token = Token();
+        proxy->properties["__builtins__"] = std::move(pd);
+
         return Value{proxy};
     });
 
-    // Optional convenience: module_globals() alias for module-local view (same as globals() here)
-    add_fn("module_globals", [env](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
-        auto proxy = std::make_shared<ObjectValue>();
-        proxy->is_env_proxy = true;
-        proxy->proxy_env = env;  // currently resolves to same env passed to init_globals
-        return Value{proxy};
-    });
-    // Existing builtins
+
     add_fn("ainaya", builtin_ainaya);
     add_fn("Orodha", builtin_orodha);
     add_fn("Bool", builtin_bool);
