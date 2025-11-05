@@ -1,4 +1,4 @@
-
+tumia regex kama rg
 
 kazi no_wrap(str):
   # validate str
@@ -9,6 +9,19 @@ kazi no_wrap(str):
   rudisha str.badilishaZote("\n", "")
 
 
+kazi f(str, ...args) {
+  kama si str.nineno =>> rudisha null;
+  kama !str.kuna("{}") =>> rudisha str;
+  
+  data { replace } = rg;
+  args.kwaKila((a) => {
+    str = replace(str, "\\{\\}", a)
+  })
+  
+  rudisha str;
+}
+
 ruhusu {
-  no_wrap
+  no_wrap,
+  f
 }

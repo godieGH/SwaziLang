@@ -191,51 +191,81 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
 
     // Case D: default/module binding: tumia localName [kama alias] kutoka "path"
     if (peek().type == TokenType::IDENTIFIER) {
-    Token idTok = consume();
-    std::string imported = "default";  // by convention: single identifier imports module default/object
-    std::string local = idTok.value;
+        // Collect a dotted identifier sequence: IDENT ('.' IDENT)*
+        std::vector<Token> idParts;
+        Token firstId = consume();
+        idParts.push_back(firstId);
 
-    // optional alias: tumia original kama alias
-    skip_formatting();
-    if (peek().type == TokenType::KAMA) {
-        consume();  // 'kama'
+        while (peek().type == TokenType::DOT) {
+            consume();  // consume '.'
+            // allow layout between '.' and identifier (tolerant)
+            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+            expect(TokenType::IDENTIFIER, "Expected identifier after '.' in import shorthand");
+            idParts.push_back(tokens[position - 1]);
+        }
+
+        // By default treat as:
+        // - single ident: tumia math        -> default import from module "math" into local name "math"
+        // - dotted: tumia console.print    -> import 'print' from module 'console' as local 'print'
+        std::string imported;
+        std::string local;
+        std::string implicit_module_spec;
+        Token module_tok_for_diag = idParts.front();  // fallback token for module diagnostics
+
+        if (idParts.size() == 1) {
+            // tumia X  -> default import of module X into local name X, implicit module_path = X
+            imported = "default";
+            local = idParts[0].value;
+            implicit_module_spec = idParts[0].value;
+        } else {
+            // tumia A.B.C  -> imported = "C", module_spec = "A.B"
+            imported = idParts.back().value;
+            local = imported;
+            std::ostringstream ss;
+            for (size_t i = 0; i + 1 < idParts.size(); ++i) {
+                if (i) ss << ".";
+                ss << idParts[i].value;
+            }
+            implicit_module_spec = ss.str();
+            module_tok_for_diag = idParts.front();
+        }
+
+        // optional alias 'kama'
         skip_formatting();
-        expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
-        Token aliasTok = tokens[position - 1];
-        local = aliasTok.value;
-    }
+        if (peek().type == TokenType::KAMA) {
+            consume();  // 'kama'
+            skip_formatting();
+            expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
+            Token aliasTok = tokens[position - 1];
+            local = aliasTok.value;
+        }
 
-    // Now two possibilities:
-    //  A) explicit: 'kutoka' STRING  -> tumia X [kama Y] kutoka "path"
-    //  B) implicit: no 'kutoka'       -> treat the identifier X as module specifier/path (tumia math => tumia math kutoka "math")
-    skip_formatting();
-    std::string module_path;
-    Token module_tok;
-    if (peek().type == TokenType::KUTOKA) {
-        consume();  // 'kutoka'
+        // Now check for explicit 'kutoka' string which overrides implicit module spec
         skip_formatting();
-        expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
-        Token pathTok = tokens[position - 1];
-        module_path = pathTok.value;
-        module_tok = pathTok;
-    } else {
-        // implicit module specifier: use the identifier text as the module path
-        module_path = idTok.value;
-        // Use the identifier token as the module token for diagnostics (acceptable fallback)
-        module_tok = idTok;
+        if (peek().type == TokenType::KUTOKA) {
+            consume();  // 'kutoka'
+            skip_formatting();
+            expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+            Token pathTok = tokens[position - 1];
+            node->module_path = pathTok.value;
+            node->module_token = pathTok;
+        } else {
+            // No explicit 'kutoka' -> use implicit module spec from the dotted identifiers
+            node->module_path = implicit_module_spec;
+            node->module_token = module_tok_for_diag;
+        }
+
+        // Create the specifier: if dotted then named import, otherwise default import already mapped to "default"
+        auto spec = std::make_unique<ImportSpecifier>();
+        spec->imported = imported;
+        spec->local = local;
+        // Use the token corresponding to the imported name for location/diagnostics
+        spec->token = idParts.back();
+        node->specifiers.push_back(std::move(spec));
+
+        maybe_consume_semicolon();
+        return node;
     }
-
-    auto spec = std::make_unique<ImportSpecifier>();
-    spec->imported = imported;
-    spec->local = local;
-    spec->token = idTok;
-    node->specifiers.push_back(std::move(spec));
-    node->module_path = module_path;
-    node->module_token = module_tok;
-    maybe_consume_semicolon();
-    return node;
-}
-
     // Otherwise it's a syntax error
     Token bad = peek();
     throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": invalid import syntax after 'tumia'" + "\n --> Traced at: \n" + bad.loc.get_line_trace());
