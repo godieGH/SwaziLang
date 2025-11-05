@@ -865,6 +865,70 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         return;
     }
 
+
+
+
+    if (auto ts = dynamic_cast<ThrowStatementNode*>(stmt)) {
+        // Evaluate the throw expression
+        Value throwVal = evaluate_expression(ts->value.get(), env);
+        
+        // Case 1: Simple string - wrap in runtime_error with location
+        if (std::holds_alternative<std::string>(throwVal)) {
+            std::string msg = std::get<std::string>(throwVal);
+            std::string fullMsg = "Error at " + ts->token.loc.to_string() + 
+                                  "\n" + msg;
+            throw std::runtime_error(fullMsg);
+        }
+        
+        // Case 2: Object returned by Error() builtin
+        // Expected shape: { errortype: "Type", message: "msg", loc: {...} }
+        if (std::holds_alternative<ObjectPtr>(throwVal)) {
+            ObjectPtr errObj = std::get<ObjectPtr>(throwVal);
+            if (!errObj) {
+                throw std::runtime_error(
+                    "Error at " + ts->token.loc.to_string() + 
+                    "\nthrow received null object");
+            }
+            
+            // Extract error type
+            std::string errType = "Error";
+            auto typeIt = errObj->properties.find("errortype");
+            if (typeIt != errObj->properties.end() && 
+                std::holds_alternative<std::string>(typeIt->second.value)) {
+                errType = std::get<std::string>(typeIt->second.value);
+            }
+            
+            // Extract message
+            std::string errMsg = "An error occurred";
+            auto msgIt = errObj->properties.find("message");
+            if (msgIt != errObj->properties.end() && 
+                std::holds_alternative<std::string>(msgIt->second.value)) {
+                errMsg = std::get<std::string>(msgIt->second.value);
+            }
+            
+            // Check if custom location object provided
+            auto locIt = errObj->properties.find("loc");
+            if (locIt != errObj->properties.end() && 
+                std::holds_alternative<ObjectPtr>(locIt->second.value)) {
+                // Use the helper from initial.cpp to build TokenLocation
+                TokenLocation customLoc = build_location_from_value(
+                    locIt->second.value, 
+                    ts->token.loc);
+                throw SwaziError(errType, errMsg, customLoc);
+            }
+            
+            // No custom location - use throw statement's location
+            throw SwaziError(errType, errMsg, ts->token.loc);
+        }
+        
+        // Case 3: Other types - convert to string and throw
+        std::string msg = to_string_value(throwVal);
+        std::string fullMsg = "Error at " + ts->token.loc.to_string() + 
+                              "\n" + msg;
+        throw std::runtime_error(fullMsg);
+    }
+
+
     throw SwaziError(
         "InternalError",
         "Unhandled statement node encountered in evaluator — likely a bug in the interpreter.",

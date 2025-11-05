@@ -27,7 +27,7 @@
 //
 // This function is defensive: if fields are missing or the arg isn't an object, it will
 // fall back to the provided defaultLoc.
-static TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc) {
+TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc) {
     if (!std::holds_alternative<ObjectPtr>(v)) return defaultLoc;
     ObjectPtr o = std::get<ObjectPtr>(v);
     if (!o) return defaultLoc;
@@ -41,11 +41,13 @@ static TokenLocation build_location_from_value(const Value& v, const TokenLocati
         if (std::holds_alternative<std::string>(vv)) return std::get<std::string>(vv);
         return std::nullopt;
     };
+    
     auto get_number = [&](const std::string& key) -> std::optional<int> {
         auto it = o->properties.find(key);
         if (it == o->properties.end()) return std::nullopt;
         const Value& vv = it->second.value;
-        if (std::holds_alternative<double>(vv)) return static_cast<int>(std::llround(std::get<double>(vv)));
+        if (std::holds_alternative<double>(vv)) 
+            return static_cast<int>(std::llround(std::get<double>(vv)));
         return std::nullopt;
     };
 
@@ -56,27 +58,26 @@ static TokenLocation build_location_from_value(const Value& v, const TokenLocati
     if (auto n = get_number("col")) loc.col = *n;
     if (auto n = get_number("length")) loc.length = *n;
 
-    // line trace / trace string
     if (auto t = get_string("line_trace")) loc.line_trace = *t;
     else if (auto t2 = get_string("trace_str")) loc.line_trace = *t2;
     else if (auto t3 = get_string("trace")) loc.line_trace = *t3;
 
-    // linestrv (map) -- optional; if present and an object, convert its string keys to ints
     auto it_lines = o->properties.find("linestrv");
-    if (it_lines != o->properties.end() && std::holds_alternative<ObjectPtr>(it_lines->second.value)) {
+    if (it_lines != o->properties.end() && 
+        std::holds_alternative<ObjectPtr>(it_lines->second.value)) {
         ObjectPtr mobj = std::get<ObjectPtr>(it_lines->second.value);
         std::map<int, std::string> mp;
         for (auto &kv : mobj->properties) {
-            // kv.first is the key (string) -> try to parse as integer
             try {
                 int ln = std::stoi(kv.first);
                 const Value& valv = kv.second.value;
                 if (std::holds_alternative<std::string>(valv)) {
                     mp[ln] = std::get<std::string>(valv);
                 } else {
-                    // fallback: stringify non-strings (limited)
-                    if (std::holds_alternative<double>(valv)) mp[ln] = std::to_string(std::get<double>(valv));
-                    else if (std::holds_alternative<bool>(valv)) mp[ln] = std::get<bool>(valv) ? "true" : "false";
+                    if (std::holds_alternative<double>(valv)) 
+                        mp[ln] = std::to_string(std::get<double>(valv));
+                    else if (std::holds_alternative<bool>(valv)) 
+                        mp[ln] = std::get<bool>(valv) ? "true" : "false";
                 }
             } catch (...) {
                 // ignore non-integer keys
@@ -490,45 +491,48 @@ static Value builtin_throw(const std::vector<Value>& args, EnvPtr env, const Tok
     throw SwaziError(type, msg, userLoc);
 }
 static Value builtin_Error(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    // default type and message
+    // Create error object (frozen) that can be thrown or returned
+    ObjectPtr errObj = std::make_shared<ObjectValue>();
+    errObj->is_frozen = true;
+    
     std::string type = "Error";
-    std::string msg = "Error";
-
+    std::string msg = "An error occurred";
+    Value locVal = std::monostate{};
+    
+    // Parse arguments based on count
     if (args.empty()) {
-        // no args: use default message and include call token location in the runtime_error text
-        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
-        return out;
-    }
-
-    // One argument: treat as message
-    if (args.size() == 1) {
+        // Error() - defaults
+        type = "Error";
+        msg = "An error occurred";
+    } 
+    else if (args.size() == 1) {
+        // Error("message") - message only
         msg = value_to_string(args[0]);
-        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
-        return out;
-    }
-
-    // Two arguments: first is type, second is message
-    if (args.size() == 2) {
+    } 
+    else if (args.size() == 2) {
+        // Error("Type", "message")
         type = value_to_string(args[0]);
         msg = value_to_string(args[1]);
-        std::string out = type + " at " + tok.loc.to_string() + "\n" + msg;
-        return out;
+    } 
+    else {
+        // Error("Type", "message", locObj)
+        type = value_to_string(args[0]);
+        msg = value_to_string(args[1]);
+        locVal = args[2];
     }
-
-    // Three or more: first type, second message, third is location object to build TokenLocation
-    type = value_to_string(args[0]);
-    msg = value_to_string(args[1]);
-    const Value& locVal = args[2];
-
-    TokenLocation userLoc = build_location_from_value(locVal, tok.loc);
     
-    ObjectPtr errObjVal = std::make_shared<ObjectValue>();
-    errObjVal->is_frozen = true;
-    errObjVal->properties["errortype"] = {type, false,false,true, tok};
-    errObjVal->properties["message"] = {msg, false, false, true, tok};
-    errObjVal->properties["loc"] = {locVal, false, false, true, tok};
-    return errObjVal;
+    // Build error object properties
+    errObj->properties["errortype"] = {type, false, false, true, tok};
+    errObj->properties["message"] = {msg, false, false, true, tok};
+    
+    // If location provided, store it
+    if (!std::holds_alternative<std::monostate>(locVal)) {
+        errObj->properties["loc"] = {locVal, false, false, true, tok};
+    }
+    
+    return errObj;
 }
+
 static Value builtin_thibitisha(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     bool ok = args.empty() ? false : value_to_bool(args[0]);
     if (!ok) {

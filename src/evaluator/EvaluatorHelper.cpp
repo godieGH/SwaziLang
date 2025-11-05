@@ -677,6 +677,38 @@ std::string Evaluator::print_value(
     std::unordered_set<const ArrayValue*> arrvisited) {
     bool use_color = supports_color();
 
+    if (std::holds_alternative<std::monostate>(v)) {
+        return use_color ? (Color::bright_black + std::string("null") + Color::reset) : std::string("null");
+    }
+
+    if (std::holds_alternative<double>(v)) {
+        std::ostringstream ss;
+        double d = std::get<double>(v);
+        if (std::fabs(d - std::round(d)) < 1e-12)
+            ss << (long long)std::llround(d);
+        else
+            ss << d;
+        return use_color ? (Color::yellow + ss.str() + Color::reset) : ss.str();
+    }
+
+    if (std::holds_alternative<bool>(v)) {
+        std::string s = std::get<bool>(v) ? "kweli" : "sikweli";
+        return use_color ? (Color::bright_magenta + s + Color::reset) : s;
+    }
+
+    if (std::holds_alternative<std::string>(v)) {
+        const std::string& s = std::get<std::string>(v);
+        return quote_and_color(s, use_color);
+    }
+
+    if (std::holds_alternative<FunctionPtr>(v)) {
+        FunctionPtr fn = std::get<FunctionPtr>(v);
+        std::string nm = fn->name.empty() ? "<lambda>" : fn->name;
+        std::ostringstream ss;
+        ss << "[kazi " << nm << "]";
+        return use_color ? (Color::bright_cyan + ss.str() + Color::reset) : ss.str();
+    }
+
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr arr = std::get<ArrayPtr>(v);
         if (!arr) return "[]";
@@ -749,9 +781,43 @@ std::string Evaluator::print_value(
         }
     }
 
-    // fallthrough to earlier single-value handling for non-array types (kept unchanged elsewhere)
-    return to_string_value(v);
+    if (std::holds_alternative<ObjectPtr>(v)) {
+        ObjectPtr op = std::get<ObjectPtr>(v);
+        if (!op) return "{}";
+        return print_object(op, depth, visited);
+    }
+
+    if (std::holds_alternative<ClassPtr>(v)) {
+        ClassPtr cp = std::get<ClassPtr>(v);
+        if (!cp) {
+            std::ostringstream ss;
+            ss << "[muundo " << "<null>" << "]";
+            return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
+        }
+
+        // label only
+        std::string label = "[muundo " + cp->name + "]";
+        std::string out;
+        if (use_color)
+            out = Color::bright_blue + label + Color::reset;
+        else
+            out = label;
+
+        // Append static table representation (use the same 'visited' set so cycles are detected)
+        if (cp->static_table) {
+            std::string static_repr = print_object(cp->static_table, depth, visited);
+            if (!static_repr.empty() && static_repr != "{}") {
+                out += " " + static_repr;
+            }
+        }
+
+        return out;
+    }
+
+    return "<?>";  // fallback
 }
+
+
 
 std::string Evaluator::print_object(
     ObjectPtr obj,

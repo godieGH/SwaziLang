@@ -1183,10 +1183,29 @@ std::unique_ptr<StatementNode> Parser::parse_try_catch() {
 }
 
 std::unique_ptr<StatementNode> Parser::parse_throw_statement() {
-  // throw logic will stay here
-  // what it should check.
-  // Syntax should be like throw <expression>
-  // an expression that resolves to a string (error message) or an error object what Makosa actually call when calling SwaziError();
-  // 
-  return nullptr;
+    // 'throw' token (THROW) was already consumed by parse_statement
+    Token throwTok = tokens[position - 1];
+
+    auto node = std::make_unique<ThrowStatementNode>();
+    node->token = throwTok;
+
+    // throw requires an expression (no bare 'throw' allowed)
+    if (peek().type == TokenType::SEMICOLON || 
+        peek().type == TokenType::NEWLINE || 
+        peek().type == TokenType::EOF_TOKEN) {
+        throw std::runtime_error(
+            "SyntaxError at " + throwTok.loc.to_string() + 
+            ": 'throw' requires an expression (error message, Error(...), or other callable)" +
+            "\n --> Traced at:\n" + throwTok.loc.get_line_trace());
+    }
+
+    // Parse the expression that produces the error
+    node->value = parse_expression();
+
+    // Optional semicolon
+    if (peek().type == TokenType::SEMICOLON) {
+        consume();
+    }
+
+    return node;
 }

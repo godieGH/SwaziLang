@@ -254,3 +254,5 @@ class Evaluator {
     void run_event_loop();
     void schedule_callback(FunctionPtr cb, const std::vector<Value>& args);
 };
+
+TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc);
