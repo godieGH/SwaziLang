@@ -191,37 +191,50 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
 
     // Case D: default/module binding: tumia localName [kama alias] kutoka "path"
     if (peek().type == TokenType::IDENTIFIER) {
-        Token idTok = consume();
-        std::string imported = "default";  // by convention: single identifier imports module default/object
-        std::string local = idTok.value;
+    Token idTok = consume();
+    std::string imported = "default";  // by convention: single identifier imports module default/object
+    std::string local = idTok.value;
 
-        // optional alias: tumia original kama alias  (rare; support either exported name or default)
+    // optional alias: tumia original kama alias
+    skip_formatting();
+    if (peek().type == TokenType::KAMA) {
+        consume();  // 'kama'
         skip_formatting();
-        if (peek().type == TokenType::KAMA) {
-            consume();  // 'kama'
-            skip_formatting();
-            expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
-            Token aliasTok = tokens[position - 1];
-            local = aliasTok.value;
-        }
+        expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
+        Token aliasTok = tokens[position - 1];
+        local = aliasTok.value;
+    }
 
-        // require 'kutoka' and module path
-        skip_formatting();
-        expect(TokenType::KUTOKA, "Expected 'kutoka' after import target");
+    // Now two possibilities:
+    //  A) explicit: 'kutoka' STRING  -> tumia X [kama Y] kutoka "path"
+    //  B) implicit: no 'kutoka'       -> treat the identifier X as module specifier/path (tumia math => tumia math kutoka "math")
+    skip_formatting();
+    std::string module_path;
+    Token module_tok;
+    if (peek().type == TokenType::KUTOKA) {
+        consume();  // 'kutoka'
         skip_formatting();
         expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
         Token pathTok = tokens[position - 1];
-
-        auto spec = std::make_unique<ImportSpecifier>();
-        spec->imported = imported;
-        spec->local = local;
-        spec->token = idTok;
-        node->specifiers.push_back(std::move(spec));
-        node->module_path = pathTok.value;
-        node->module_token = pathTok;
-        maybe_consume_semicolon();
-        return node;
+        module_path = pathTok.value;
+        module_tok = pathTok;
+    } else {
+        // implicit module specifier: use the identifier text as the module path
+        module_path = idTok.value;
+        // Use the identifier token as the module token for diagnostics (acceptable fallback)
+        module_tok = idTok;
     }
+
+    auto spec = std::make_unique<ImportSpecifier>();
+    spec->imported = imported;
+    spec->local = local;
+    spec->token = idTok;
+    node->specifiers.push_back(std::move(spec));
+    node->module_path = module_path;
+    node->module_token = module_tok;
+    maybe_consume_semicolon();
+    return node;
+}
 
     // Otherwise it's a syntax error
     Token bad = peek();
