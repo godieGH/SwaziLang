@@ -167,11 +167,14 @@ class Evaluator {
     static std::string cerr_colored(const std::string& s);
 
     void set_entry_point(const std::string& filename);
+    void set_cli_args(const std::vector<std::string>& args);
 
    private:
     EnvPtr global_env;
     EnvPtr main_module_env;
     EnvPtr repl_env;
+    
+    std::vector<std::string> cli_args;
 
     ClassPtr current_class_context = nullptr;
 

@@ -15,7 +15,7 @@
 
 namespace fs = std::filesystem;
 
-static void run_file_mode(const std::string& filename) {
+static void run_file_mode(const std::string& filename, const std::vector<std::string>& cli_args) {
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << filename << std::endl;
@@ -38,6 +38,8 @@ static void run_file_mode(const std::string& filename) {
         // print_program_debug(ast.get(), 2);
 
         Evaluator evaluator;
+        // populate argv in runtime before evaluating so modules can read it
+        evaluator.set_cli_args(cli_args);
         evaluator.set_entry_point(filename);
         evaluator.evaluate(ast.get());
     } catch (const std::exception& e) {
@@ -78,6 +80,11 @@ int main(int argc, char* argv[]) {
                   << "or prefix the filename with a path (for example `./-file.sl`):\n"
                   << "  swazi -- -file.sl\n";
     };
+
+    // Build CLI args vector (include argv[0] so scripts can see script path in argv[0])
+    std::vector<std::string> cli_args;
+    cli_args.reserve((size_t)argc);
+    for (int i = 0; i < argc; ++i) cli_args.emplace_back(argv[i]);
 
     if (argc == 1) {
         run_repl_mode();
@@ -159,6 +166,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    run_file_mode(file_to_run.string());
+    // Pass cli_args through so evaluator can populate global argv for scripts.
+    run_file_mode(file_to_run.string(), cli_args);
     return 0;
 }

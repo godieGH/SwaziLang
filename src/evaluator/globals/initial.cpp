@@ -950,4 +950,14 @@ void init_globals(EnvPtr env) {
         infoVar.is_constant = true;
         env->set("__info__", infoVar);
     }
+    
+    
+    {
+        auto argv_arr = std::make_shared<ArrayValue>();
+        Environment::Variable argvVar;
+        argvVar.value = argv_arr;
+        argvVar.is_constant = true;  
+        env->set("argv", argvVar);
+    }
+    
 }

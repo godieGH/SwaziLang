@@ -117,3 +117,25 @@ void Evaluator::set_entry_point(const std::string& filename) {
     // Populate __main__/__name__/__file__/__dir__ in the main module env.
     populate_module_metadata(main_module_env, resolved, name, true);
 }
+
+
+
+void Evaluator::set_cli_args(const std::vector<std::string>& args) {
+    // store copy locally (if you need it later)
+    this->cli_args = args;
+
+    // Build ArrayValue of strings
+    auto arr = std::make_shared<ArrayValue>();
+    arr->elements.reserve(args.size());
+    for (const auto &s : args) {
+        arr->elements.push_back(Value{std::string(s)});
+    }
+
+    // If global_env exists, set or replace its "argv" variable
+    if (this->global_env) {
+        Environment::Variable var;
+        var.value = arr;
+        var.is_constant = true;  // binding is constant
+        this->global_env->set("argv", var);
+    }
+}
