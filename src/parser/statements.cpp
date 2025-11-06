@@ -754,12 +754,28 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
     return stmt;
 }
 std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
+    struct AsyncScopeGuard {
+        Parser& parser;
+        bool prev;
+        AsyncScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_async_function) {
+            parser.in_async_function = newVal;
+        }
+        ~AsyncScopeGuard() {
+            parser.in_async_function = prev;
+        }
+    };
+
     // The 'kazi' token was already consumed by parse_statement
+    auto funcNode = std::make_unique<FunctionDeclarationNode>();
+
+    // optional ASYNC modifier BEFORE the function name (syntax: 'kazi ASYNC name ...')
+    if (peek().type == TokenType::ASYNC) {
+        consume();
+        funcNode->is_async = true;
+    }
 
     expect(TokenType::IDENTIFIER, "Expected function name after 'kazi'");
     Token idTok = tokens[position - 1];
-
-    auto funcNode = std::make_unique<FunctionDeclarationNode>();
     funcNode->name = idTok.value;
     funcNode->token = idTok;
 
@@ -923,6 +939,8 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
         expect(TokenType::NEWLINE, "Expected newline after ':' in function declaration");
         expect(TokenType::INDENT, "Expected indented block for function body");
 
+        AsyncScopeGuard async_guard(*this, funcNode->is_async);
+
         // indentation-based body (defensive: parse_statement may return null at EOF)
         while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
             auto stmt = parse_statement();
@@ -933,6 +951,8 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
         expect(TokenType::DEDENT, "Expected dedent to close function body");
 
     } else if (match(TokenType::OPENBRACE)) {
+        AsyncScopeGuard async_guard(*this, funcNode->is_async);
+
         // --- Brace-based body ---
         // Loop but skip separators before attempting to parse a statement so that
         // trailing NEWLINE/INDENT/DEDENT before '}' don't cause parse_statement to

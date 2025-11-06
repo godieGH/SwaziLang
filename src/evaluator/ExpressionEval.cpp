@@ -426,20 +426,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 t};
         }
 
-        // type-checking booleans
-        if (prop == "ninamba") return Value{
-            std::holds_alternative<double>(objVal)};
-        if (prop == "nineno") return Value{
-            std::holds_alternative<std::string>(objVal)};
-        if (prop == "nibool") return Value{
-            std::holds_alternative<bool>(objVal)};
-        if (prop == "niorodha") return Value{
-            std::holds_alternative<ArrayPtr>(objVal)};
-        if (prop == "nikazi") return Value{
-            std::holds_alternative<FunctionPtr>(objVal)};
-        if (prop == "niobject") return Value{
-            std::holds_alternative<ObjectPtr>(objVal)};
-
+        {
+            // type-checking booleans
+            if (prop == "ninamba") return Value{
+                std::holds_alternative<double>(objVal)};
+            if (prop == "nineno") return Value{
+                std::holds_alternative<std::string>(objVal)};
+            if (prop == "nibool") return Value{
+                std::holds_alternative<bool>(objVal)};
+            if (prop == "niorodha") return Value{
+                std::holds_alternative<ArrayPtr>(objVal)};
+            if (prop == "nikazi") return Value{
+                std::holds_alternative<FunctionPtr>(objVal)};
+            if (prop == "niobject") return Value{
+                std::holds_alternative<ObjectPtr>(objVal)};
+        }
         // String property 'herufi' (length)
         if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {
             const std::string& s = std::get<std::string>(objVal);
@@ -1486,7 +1487,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
                 return Value(obj);
             }
-            return get_object_property(op, mem->property, env);
+            return get_object_property(op, mem->property, env, mem->token);
         }
         // For other non-array/non-string objects, return undefined for unknown props
         throw std::runtime_error(
@@ -1544,7 +1545,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
             if (!op) return std::monostate{};
             std::string key = to_string_value(indexVal);
-            return get_object_property(op, key, env);
+            return get_object_property(op, key, env, idx->token);
         }
 
         throw std::runtime_error(

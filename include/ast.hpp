@@ -147,6 +147,22 @@ struct CallExpressionNode : public ExpressionNode {
         return n;
     }
 };
+
+struct AwaitExpressionNode : public ExpressionNode {
+    std::unique_ptr<ExpressionNode> expression;  // the operand to await
+
+    std::string to_string() const override {
+        return "await " + (expression ? expression->to_string() : "<null>");
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<AwaitExpressionNode>();
+        n->token = token;
+        n->expression = expression ? expression->clone() : nullptr;
+        return n;
+    }
+};
+
 // Member expression: obj.prop (e.g., arr.idadi, str.herufi, arr.ongeza)
 struct MemberExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> object;
@@ -731,17 +747,17 @@ struct ParameterNode : public Node {
 
 // Function declaration
 struct FunctionDeclarationNode : public StatementNode {
-    std::string name;  // function name
-
-    // parameters are now ParameterNode objects (allow defaults and rest descriptors)
+    std::string name;
     std::vector<std::unique_ptr<ParameterNode>> parameters;
-
     std::vector<std::unique_ptr<StatementNode>> body;  // function body statements
+
+    bool is_async = false;  // NEW: async modifier
 
     std::unique_ptr<StatementNode> clone() const override {
         auto n = std::make_unique<FunctionDeclarationNode>();
         n->token = token;
         n->name = name;
+        n->is_async = is_async;  // copy async flag
         n->parameters.reserve(parameters.size());
         for (const auto& p : parameters) {
             n->parameters.push_back(p ? p->clone() : nullptr);
@@ -785,11 +801,13 @@ struct FunctionExpressionNode : public ExpressionNode {
     std::vector<std::unique_ptr<ParameterNode>> parameters;
     std::vector<std::unique_ptr<StatementNode>> body;
     bool is_getter = false;
-    // use Node::token
+
+    bool is_async = false;
 
     std::string to_string() const override {
         std::string s;
         if (is_getter) s += "[getter] ";
+        if (is_async) s += "[async] ";
         s += name + "(";
         for (size_t i = 0; i < parameters.size(); ++i) {
             if (i) s += ", ";
@@ -804,6 +822,7 @@ struct FunctionExpressionNode : public ExpressionNode {
         n->token = token;  // Node::token
         n->name = name;
         n->is_getter = is_getter;
+        n->is_async = is_async; // copy async flag
         n->parameters.reserve(parameters.size());
         for (const auto& p : parameters) n->parameters.push_back(p ? p->clone() : nullptr);
         n->body.reserve(body.size());
@@ -813,12 +832,12 @@ struct FunctionExpressionNode : public ExpressionNode {
         return n;
     }
 };
-
 struct LambdaNode : public ExpressionNode {
     std::vector<std::unique_ptr<ParameterNode>> params;
     std::unique_ptr<ExpressionNode> exprBody;               // for expr-lambdas
     std::vector<std::unique_ptr<StatementNode>> blockBody;  // for block-lambdas
     bool isBlock = false;
+    bool is_async = false;
 
     // convenience constructor from names (keeps some backwards compatibility with existing parser)
     LambdaNode(const std::vector<std::string>& p, std::unique_ptr<ExpressionNode> expr)
@@ -855,25 +874,29 @@ struct LambdaNode : public ExpressionNode {
             for (const auto& s : blockBody) {
                 clonedBlock.push_back(s ? s->clone() : nullptr);
             }
-            // clone params
             std::vector<std::unique_ptr<ParameterNode>> clonedParams;
             clonedParams.reserve(params.size());
             for (const auto& p : params) clonedParams.push_back(p ? p->clone() : nullptr);
-            return std::make_unique<LambdaNode>(std::move(clonedParams), std::move(clonedBlock));
+            auto node = std::make_unique<LambdaNode>(std::move(clonedParams), std::move(clonedBlock));
+            node->is_async = is_async;
+            return node;
         } else {
             auto clonedExpr = exprBody ? exprBody->clone() : nullptr;
             std::vector<std::unique_ptr<ParameterNode>> clonedParams;
             clonedParams.reserve(params.size());
             for (const auto& p : params) clonedParams.push_back(p ? p->clone() : nullptr);
-            return std::make_unique<LambdaNode>(std::move(clonedParams), std::move(clonedExpr));
+            auto node = std::make_unique<LambdaNode>(std::move(clonedParams), std::move(clonedExpr));
+            node->is_async = is_async;
+            return node;
         }
     }
 
     std::string to_string() const override {
+        std::string asyncPrefix = is_async ? "ASYNC " : "";
         if (isBlock)
-            return "lambda { ... }";
+            return asyncPrefix + "lambda { ... }";
         else {
-            std::string s = "lambda (";
+            std::string s = asyncPrefix + "lambda (";
             for (size_t i = 0; i < params.size(); ++i) {
                 if (i) s += ", ";
                 s += params[i] ? params[i]->to_string() : "<param>";
@@ -1033,22 +1056,18 @@ struct ClassPropertyNode : public Node {
 // Represents a method inside a class. This is NOT a wrapper around FunctionExpressionNode
 // to avoid clone-signature mismatches — we store the method shape directly.
 struct ClassMethodNode : public Node {
-    std::string name;  // method name (for constructor/destructor rules parser enforces equality)
-
-    // parameters now allow defaults and rest descriptors
+    std::string name;
     std::vector<std::unique_ptr<ParameterNode>> params;
-
     std::vector<std::unique_ptr<StatementNode>> body;
 
-    // modifiers
-    bool is_private = false;      // @
-    bool is_static = false;       // *
-    bool is_locked = false;       // &
-    bool is_getter = false;       // 'thabiti' style: no params allowed; treated like readonly getter
-    bool is_constructor = false;  // constructor (name must equal class name, parser enforces)
-    bool is_destructor = false;   // destructor (marked with ~ in source; parser enforces name)
+    bool is_private = false;
+    bool is_static = false;
+    bool is_locked = false;
+    bool is_getter = false;
+    bool is_constructor = false;
+    bool is_destructor = false;
 
-    ClassMethodNode() = default;
+    bool is_async = false; // NEW
 
     std::unique_ptr<ClassMethodNode> clone() const {
         auto n = std::make_unique<ClassMethodNode>();
@@ -1060,6 +1079,7 @@ struct ClassMethodNode : public Node {
         n->is_getter = is_getter;
         n->is_constructor = is_constructor;
         n->is_destructor = is_destructor;
+        n->is_async = is_async; // copy async flag
 
         n->params.reserve(params.size());
         for (const auto& p : params) n->params.push_back(p ? p->clone() : nullptr);
@@ -1074,10 +1094,11 @@ struct ClassMethodNode : public Node {
         if (is_static) ss << "*";
         if (is_private) ss << "@";
         if (is_locked) ss << "&";
+        if (is_async) ss << "ASYNC ";
         if (is_constructor)
-            ss << name;  // constructors rendered as "Name(...) { ... }"
+            ss << name;
         else if (is_destructor)
-            ss << "~" << name;  // destructor syntax
+            ss << "~" << name;
         else
             ss << "tabia " << name;
 
@@ -1089,7 +1110,6 @@ struct ClassMethodNode : public Node {
             }
             ss << ")";
         } else {
-            // getter has no args; indicate it
             ss << " (getter)";
         }
 

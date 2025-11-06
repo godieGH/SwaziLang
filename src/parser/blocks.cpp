@@ -190,6 +190,17 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     bool isCtor,
     bool isDtor,
     bool braceStyle) {
+    struct AsyncScopeGuard {
+        Parser& parser;
+        bool prev;
+        AsyncScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_async_function) {
+            parser.in_async_function = newVal;
+        }
+        ~AsyncScopeGuard() {
+            parser.in_async_function = prev;
+        }
+    };
+
     auto node = std::make_unique<ClassMethodNode>();
     node->is_private = is_private;
     node->is_static = is_static;
@@ -197,6 +208,11 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     node->is_constructor = isCtor;
     node->is_destructor = isDtor;
     node->is_getter = false;
+
+    if (peek().type == TokenType::ASYNC) {
+        consume();
+        node->is_async = true;
+    }
 
     // ---- determine method name ----
     if (isDtor) {
@@ -226,6 +242,9 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
         }
     }
 
+    if (node->is_getter && node->is_async) {
+        throw SwaziError("SyntaxError", "Getter 'thabiti' cannot be ASYNC.", node->token.loc);
+    }
     // ---- parse parameters (getter must not accept any) ----
     node->params.clear();
     if (!node->is_getter) {
@@ -372,7 +391,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     } else {
         // getter cannot have parameters
         if (peek().type == TokenType::OPENPARENTHESIS || peek().type == TokenType::IDENTIFIER) {
-            throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Getter must not accept parameters" + "\n --> Traced at: \n" + peek().loc.get_line_trace());
+            throw SwaziError("SyntaxError", "Getters do not accept/take parameters.", peek().loc);
         }
     }
 
@@ -381,6 +400,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     //  1) ':' NEWLINE INDENT ... DEDENT  (pythonic)  -> we should consume ':' and NEWLINE then call parse_block(false)
     //  2) '{' ... '}'                      (c-style) -> call parse_block(true) which will consume '{' itself
     if (peek().type == TokenType::COLON) {
+        AsyncScopeGuard async_guard(*this, node->is_async);
         // consume ':' and the following NEWLINE so parse_block(false) can expect INDENT
         consume();  // ':'
         expect(TokenType::NEWLINE, "Expected newline after ':' for method body");
@@ -388,11 +408,12 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
         auto stmts = parse_block(false);  // returns vector<unique_ptr<StatementNode>>
         node->body = std::move(stmts);
     } else if (peek().type == TokenType::OPENBRACE) {
+        AsyncScopeGuard async_guard(*this, node->is_async);
         // parse_block(true) will consume '{' and '}' and return body
         auto stmts = parse_block(true);
         node->body = std::move(stmts);
     } else {
-        throw std::runtime_error("Parse error at " + peek().loc.to_string() + ": Expected ':' or '{' to begin method body" + "\n --> Traced at: \n" + peek().loc.get_line_trace());
+        throw SwaziError("SyntaxError", "Expected ':' or '{' to begin method body.", peek().loc);
     }
 
     return node;

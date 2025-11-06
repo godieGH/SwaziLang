@@ -235,7 +235,7 @@ class Evaluator {
         return std::holds_alternative<std::monostate>(v);
     }
 
-    Value get_object_property(ObjectPtr obj, const std::string& key, EnvPtr env);
+    Value get_object_property(ObjectPtr obj, const std::string& key, EnvPtr env, const Token& accessToken);
     void set_object_property(ObjectPtr obj, const std::string& key, const Value& val, EnvPtr env, const Token& assignToken);
 
     std::string print_value(

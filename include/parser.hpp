@@ -14,6 +14,8 @@ class Parser {
    private:
     std::vector<Token> tokens;
     size_t position = 0;
+    
+    bool in_async_function = false;
 
     Token peek() const;
     Token peek_next(size_t offset = 1) const;

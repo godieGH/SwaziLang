@@ -327,7 +327,7 @@ bool Evaluator::is_private_access_allowed(ObjectPtr obj, EnvPtr env) {
     return false;
 }
 
-Value Evaluator::get_object_property(ObjectPtr op, const std::string& prop, EnvPtr accessorEnv) {
+Value Evaluator::get_object_property(ObjectPtr op, const std::string& prop, EnvPtr accessorEnv, const Token& token) {
     if (!op) return std::monostate{};
 
     // Special-case: environment proxy. Map property access to environment lookup.
@@ -352,8 +352,8 @@ Value Evaluator::get_object_property(ObjectPtr op, const std::string& prop, EnvP
 
     // Enforce private access rules (same as before)
     if (desc.is_private && !is_private_access_allowed(op, accessorEnv)) {
-        throw std::runtime_error(
-            "PermissionError: Cannot access private property '" + prop + "'.");
+        throw SwaziError(
+            "PermissionError", "Cannot access private property '" + prop + "'.", token.loc);
     }
 
     // If property is readonly and stores a function, treat as getter and call it
@@ -534,7 +534,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
             Value v = std::monostate{};
             if (src) {
                 try {
-                    v = get_object_property(src, key, env);
+                    v = get_object_property(src, key, env, declToken);
                 } catch (...) {
                     // if getter throws, rethrow with context
                     throw;

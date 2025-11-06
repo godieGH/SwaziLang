@@ -3,6 +3,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "SwaziError.hpp"
 #include "parser.hpp"
 
 // ---------- expressions (precedence) ----------
@@ -368,6 +369,19 @@ std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
+    struct AsyncScopeGuard {
+        Parser& parser;
+        bool prev;
+        AsyncScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_async_function) {
+            parser.in_async_function = newVal;
+        }
+        ~AsyncScopeGuard() {
+            parser.in_async_function = prev;
+        }
+    };
+
+    auto func = std::make_unique<FunctionExpressionNode>();
+
     // Accept either a dedicated TABIA token or IDENTIFIER "tabia"
     Token startTok;
     if (peek().type == TokenType::TABIA) {
@@ -375,7 +389,14 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
     } else if (peek().type == TokenType::IDENTIFIER && peek().value == "tabia") {
         startTok = consume();
     } else {
-        throw std::runtime_error("parse_tabia_method called without 'tabia' at " + peek().loc.to_string() + "\n --> Traced at: \n" + peek().loc.get_line_trace());
+        throw SwaziError("ParseError", "Method function should start with 'tabia' keyword", peek().loc);
+    }
+
+    bool is_async = false;
+    if (peek().type == TokenType::ASYNC) {
+        consume();
+        is_async = true;
+        func->is_async = is_async;
     }
 
     // optional 'thabiti' keyword -> getter flag (allow either dedicated token or identifier)
@@ -384,6 +405,10 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
         (peek().type == TokenType::IDENTIFIER && peek().value == "thabiti")) {
         consume();
         is_getter = true;
+    }
+
+    if (is_getter && is_async) {
+        throw SwaziError("SyntaxError", "tabia thabiti — getters cannot be declared ASYNC", startTok.loc);
     }
 
     // method name: must be identifier
@@ -565,6 +590,8 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
         expect(TokenType::NEWLINE, "Expected newline after ':' in tabia method");
         expect(TokenType::INDENT, "Expected INDENT for tabia method body");
 
+        AsyncScopeGuard async_guard(*this, func->is_async);
+
         while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
             auto stmt = parse_statement();
             if (!stmt) break;
@@ -573,6 +600,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
         expect(TokenType::DEDENT, "Expected DEDENT to close tabia method body");
 
     } else if (match(TokenType::OPENBRACE)) {
+        AsyncScopeGuard async_guard(*this, func->is_async);
         // brace-based body
         while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
             // skip formatting tokens between statements
@@ -596,7 +624,6 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
     }
 
     // Build the FunctionExpressionNode
-    auto func = std::make_unique<FunctionExpressionNode>();
     func->token = startTok;
     func->name = nameTok.value;
     func->parameters = std::move(params);
@@ -800,6 +827,12 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
+    bool is_async_lambda = false;
+    if (peek().type == TokenType::ASYNC) {
+        consume();
+        is_async_lambda = true;
+    }
+
     // Produce ParameterNode descriptors (support defaults and rest syntax)
     std::vector<std::unique_ptr<ParameterNode>> params;
     bool rest_seen = false;
@@ -943,20 +976,54 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
     // next token must be '=>'
     Token arrow = consume();
     if (arrow.type != TokenType::LAMBDA) {
-        throw std::runtime_error("Expected '=>' after parameter list at " + arrow.loc.to_string() + "\n --> Traced at: \n" + arrow.loc.get_line_trace());
+        throw SwaziError("SyntaxError", "Expected '=>' after parameter list.", arrow.loc);
     }
 
+    struct AsyncScopeGuard {
+        Parser& parser;
+        bool prev;
+        AsyncScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_async_function) { parser.in_async_function = newVal; }
+        ~AsyncScopeGuard() { parser.in_async_function = prev; }
+    };
+
     if (peek().type == TokenType::OPENBRACE) {
+        AsyncScopeGuard guard(*this, is_async_lambda);
         auto block = parse_block(true);  // returns vector<StatementNode>
-        return std::make_unique<LambdaNode>(std::move(params), std::move(block));
+        auto ln = std::make_unique<LambdaNode>(std::move(params), std::move(block));
+        ln->is_async = is_async_lambda;
+        return ln;
     } else {
+        AsyncScopeGuard guard(*this, is_async_lambda);
         auto expr = parse_expression();
-        return std::make_unique<LambdaNode>(std::move(params), std::move(expr));
+        auto ln = std::make_unique<LambdaNode>(std::move(params), std::move(expr));
+        ln->is_async = is_async_lambda;
+        return ln;
     }
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_primary() {
     Token t = peek();
+
+    if (t.type == TokenType::ASYNC) {
+        // Use is_lambda_ahead() to detect whether this ASYNC begins a lambda.
+        if (is_lambda_ahead()) {
+            return parse_lambda();
+        }
+        throw SwaziError("SyntaxError", "Unexpected 'ASYNC' token.", t.loc);
+    }
+
+    if (t.type == TokenType::AWAIT) {
+        if (!in_async_function) {
+            throw SwaziError("SyntaxError", "'await' used outside of an async function.", t.loc);
+        }
+        Token awaitTok = consume();  // consume 'await'
+        auto node = std::make_unique<AwaitExpressionNode>();
+        node->token = awaitTok;
+        // 'await' binds to a unary expression in many JS-like grammars
+        node->expression = parse_unary();
+        return node;
+    }
+
     if (t.type == TokenType::NUMBER) {
         Token numTok = consume();
         auto n = std::make_unique<NumericLiteralNode>();
