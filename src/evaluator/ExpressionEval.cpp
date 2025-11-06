@@ -867,7 +867,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" || prop == "panua" ||
                 prop == "badili" || prop == "tafuta" || prop == "kuna" || prop == "panga" ||
                 prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" ||
-                prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach" || prop == "fill") {
+                prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach" || prop == "fill" || prop == "every" || prop == "some" || prop == "baadhi") {
                 auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
 
@@ -1262,6 +1262,38 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
 
                         return Value{arr};
+                    }
+
+                    // some: baadhi(fn) - returns true if at least one element passes the test
+                    if (prop == "baadhi" || prop == "some") {
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.baadhi requires a predicate function as the first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
+                        for (size_t i = 0; i < arr->elements.size(); ++i) {
+                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, callEnv, token);
+                            if (to_bool(res)) return Value{true};
+                        }
+                        return Value{false};
+                    }
+
+                    // every: every(fn) - returns true if all elements pass the test
+                    if (prop == "every") {
+                        if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                            throw std::runtime_error(
+                                "TypeError at " + token.loc.to_string() +
+                                "\narr.every requires a predicate function as the first argument. Got 0 or non-function type." +
+                                "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        }
+                        FunctionPtr predicate = std::get<FunctionPtr>(args[0]);
+                        for (size_t i = 0; i < arr->elements.size(); ++i) {
+                            Value res = call_function(predicate, {arr->elements[i], Value{static_cast<double>(i)}, Value{arr}}, callEnv, token);
+                            if (!to_bool(res)) return Value{false};
+                        }
+                        return Value{true};
                     }
 
                     return std::monostate{};
