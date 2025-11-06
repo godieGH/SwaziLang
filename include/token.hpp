@@ -24,6 +24,12 @@ enum class TokenType {
     TUMIA,   // 'tumia' (import)
     KUTOKA,  // 'kutoka' (from)
     RUHUSU,  // 'ruhusu' (export)
+    
+    //-----------------------
+    // asyncronous
+    //-----------------------
+    ASYNC,
+    AWAIT,
 
     // -----------------------
     // Control-flow (if / else / switches / guards)

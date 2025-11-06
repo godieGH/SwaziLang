@@ -335,14 +335,19 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"fanya", TokenType::DOWHILE},
         {"simama", TokenType::SIMAMA},
         {"endelea", TokenType::ENDELEA},
-
+        
+        // keyword literals and constants
         {"null", TokenType::NULL_LITERAL},  // null token
         {"nan", TokenType::NAN_LITERAL},
         {"inf", TokenType::INF_LITERAL},
 
         {"__block__", TokenType::BLOCK_DU},
         {"__line__", TokenType::LINE_DU},
-
+        
+        // asyncronous async/await
+        {"ASYNC", TokenType::ASYNC},
+        {"await", TokenType::AWAIT}
+        
     };
 
     auto it = keywords.find(id);
