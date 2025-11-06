@@ -726,6 +726,12 @@ std::string Evaluator::print_value(
                 break;
             }
         }
+        
+        // if arr is empty then all holes is false
+        if (arr->elements.empty()) {
+            allHoles = false;
+        }
+        
         if (allHoles) {
             std::ostringstream ss;
             if (use_color) {
