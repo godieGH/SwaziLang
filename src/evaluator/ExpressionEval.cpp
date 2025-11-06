@@ -428,15 +428,15 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         {
             // type-checking booleans
-            if (prop == "ninamba") return Value{
+            if (prop == "ninamba" || prop == "NINAMBA") return Value{
                 std::holds_alternative<double>(objVal)};
-            if (prop == "nineno") return Value{
+            if (prop == "nineno" || prop == "NINENO") return Value{
                 std::holds_alternative<std::string>(objVal)};
-            if (prop == "nibool") return Value{
+            if (prop == "nibool" || prop == "NIBOOL") return Value{
                 std::holds_alternative<bool>(objVal)};
-            if (prop == "niorodha") return Value{
+            if (prop == "niorodha" || prop == "NIORODHA") return Value{
                 std::holds_alternative<ArrayPtr>(objVal)};
-            if (prop == "nikazi") return Value{
+            if (prop == "nikazi" || prop == "NIKAZI") return Value{
                 std::holds_alternative<FunctionPtr>(objVal)};
             if (prop == "niobject") return Value{
                 std::holds_alternative<ObjectPtr>(objVal)};
