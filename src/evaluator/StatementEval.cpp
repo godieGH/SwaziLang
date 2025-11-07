@@ -297,6 +297,8 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             else
                 persisted->parameters.push_back(nullptr);
         }
+        
+        persisted->is_async = fd->is_async;
 
         // Move or clone the body into persisted (we can move here since fd is ephemeral)
         persisted->body.reserve(fd->body.size());
@@ -386,6 +388,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     auto persisted = std::make_shared<FunctionDeclarationNode>();
                     persisted->name = m_uptr->name;
                     persisted->token = m_uptr->token;
+                    persisted->is_async = m_uptr->is_async;
                     persisted->parameters.reserve(m_uptr->params.size());
                     for (const auto& pp : m_uptr->params) {
                         if (pp)
@@ -458,6 +461,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         auto persisted = std::make_shared<FunctionDeclarationNode>();
                         persisted->name = m->name;
                         persisted->token = m->token;
+                        persisted->is_async = m->is_async;
 
                         // clone parameter descriptors from method node
                         persisted->parameters.reserve(m->params.size());
@@ -815,6 +819,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         std::exception_ptr eptr;
 
         // Try block (use a separate env)
+        
         {
             auto tryEnv = std::make_shared<Environment>(env);
             try {
@@ -823,8 +828,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     // don't return here — break so finally can run
                     if (did_return && *did_return) break;
                 }
+            } catch (const SuspendExecution&) {
+                // This is NOT an error — it's the "await" suspension control-flow.
+                // Re-throw so the async machinery can keep the frame and resume later.
+                throw;
             } catch (...) {
-                // capture exception for catch handling
+                // Real runtime exception — capture for catch-block handling.
                 hadException = true;
                 eptr = std::current_exception();
             }

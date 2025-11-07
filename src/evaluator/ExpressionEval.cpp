@@ -16,6 +16,25 @@
 
 Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (!expr) return std::monostate{};
+    
+    
+    auto extract_promise_from_value = [](const Value& v) -> PromisePtr {
+        if (std::holds_alternative<PromisePtr>(v)) {
+            return std::get<PromisePtr>(v);
+        }
+        if (std::holds_alternative<ObjectPtr>(v)) {
+            ObjectPtr obj = std::get<ObjectPtr>(v);
+            if (!obj) return nullptr;
+            auto it = obj->properties.find("__promise__");
+            if (it == obj->properties.end()) return nullptr;
+            const PropertyDescriptor& pd = it->second;
+            if (std::holds_alternative<PromisePtr>(pd.value)) {
+                return std::get<PromisePtr>(pd.value);
+            }
+        }
+        return nullptr;
+    };
+    
 
     if (auto n = dynamic_cast<NumericLiteralNode*>(expr)) return Value{
         n->value};
@@ -38,88 +57,173 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     
     // --- await expression (suspends current async frame) ---
     if (auto awaitNode = dynamic_cast<AwaitExpressionNode*>(expr)) {
-        // Evaluate the operand (this may be a CallExpression returning a PromisePtr).
-        Value operand = evaluate_expression(awaitNode->expression.get(), env);
-
-        if (!std::holds_alternative<PromisePtr>(operand)) {
-            throw std::runtime_error(
-                "TypeError at " + awaitNode->token.loc.to_string() +
-                "\nawait expects a Promise value.");
-        }
-
-        PromisePtr p = std::get<PromisePtr>(operand);
-        if (!p) return std::monostate{};
-
-        // already settled -> return immediately
-        if (p->state == PromiseValue::State::FULFILLED) {
-            return p->result;
-        }
-        if (p->state == PromiseValue::State::REJECTED) {
-            // Throw rejection reason (we convert to string for now)
-            // Prefer using SwaziError if you want richer error objects here.
-            throw std::runtime_error("Promise rejected: " + to_string_value(p->result));
-        }
-
-        // PENDING -> suspend current frame. We need a frame to suspend.
+        // Short-circuit: if resumption already happened, return result or rethrow stored exception
         auto frame = current_frame();
-        if (!frame || !frame->is_async) {
-            throw std::runtime_error(
-                "RuntimeError at " + awaitNode->token.loc.to_string() +
-                "\nawait can only be used inside an async function.");
+        if (frame) {
+            // If this await was already settled during a prior resume, use stored result
+            auto it_res = frame->awaited_results.find(awaitNode);
+            if (it_res != frame->awaited_results.end()) {
+                Value v = it_res->second;
+                // erase state now (one-time consumption)
+                frame->awaited_results.erase(it_res);
+                frame->awaited_promises.erase(awaitNode);
+                return v;
+            }
+            auto it_ex = frame->awaited_exceptions.find(awaitNode);
+            if (it_ex != frame->awaited_exceptions.end()) {
+                std::exception_ptr ep = it_ex->second;
+                frame->awaited_exceptions.erase(it_ex);
+                frame->awaited_promises.erase(awaitNode);
+                std::rethrow_exception(ep);
+            }
         }
-
-        // Register continuations to resume the suspended frame.
-        // We capture a shared_ptr to frame (CallFramePtr) so the lambda keeps it alive.
-        // On fulfillment: store value into a well-known temporary in the frame's env and schedule resume.
-        PromisePtr pcopy = p;
-        Token resumeTok = awaitNode->token;
-
-        pcopy->then_callbacks.push_back([this, frame, resumeTok](Value res) {
-            if (!frame->env) return;
-            Environment::Variable v;
-            v.value = res;
-            v.is_constant = false;
-            frame->env->set("$await_result", v);
-
-            // schedule macrotask to resume execution of this frame
-            scheduler()->enqueue_macrotask([this, frame]() {
-                // frame may already be popped/cancelled; defensive check:
-                // clear suspended flag then resume
+    
+        // Evaluate operand exactly once -> must capture the resulting Promise so we do not re-run call
+        Value operand = evaluate_expression(awaitNode->expression.get(), env);
+    
+        // Accept either a raw PromisePtr or an object that contains a "__promise__" slot.
+        PromisePtr p = extract_promise_from_value(operand);
+    
+        // If operand is not a Promise-like, wrap it as a fulfilled Promise (Promise.resolve behavior).
+        // This makes `await <non-promise>` suspend & resume asynchronously (microtask),
+        // matching the JS semantics described by the user.
+        if (!p) {
+            auto resolved = std::make_shared<PromiseValue>();
+            resolved->state = PromiseValue::State::FULFILLED;
+            resolved->result = operand;
+            p = resolved;
+        }
+    
+        // Ensure await is used only inside async function frames
+        bool inAsync = false;
+        if (frame) {
+            // Accept either the frame flag (set by call_function) OR the underlying FunctionValue's is_async
+            inAsync = frame->is_async || (frame->function && frame->function->is_async);
+        }
+        if (!inAsync) {
+            throw SwaziError("RuntimeError", "await can only be used inside an async function.", awaitNode->token.loc);
+        }
+    
+        // store promise reference in the frame to avoid re-evaluation on resume
+        frame->awaited_promises[awaitNode] = p;
+    
+        // If promise already settled, stamp result/exception now.
+        if (p->state == PromiseValue::State::FULFILLED) {
+    frame->awaited_results[awaitNode] = p->result;
+    // schedule microtask to resume execution of this frame (ensures asynchronous resumption)
+    if (scheduler()) {
+        PromisePtr callPromise = frame->pending_promise;
+        scheduler()->enqueue_microtask([this, frame, callPromise]() {
+            frame->is_suspended = false;
+            try {
+                execute_frame_until_await_or_return(frame, callPromise);
+            } catch (...) {
+                // swallow; caller handles logging if needed
+            }
+        });
+    } else {
+        // no scheduler available — resume immediately on this thread (still treat as suspension)
+        frame->is_suspended = false;
+        try {
+            execute_frame_until_await_or_return(frame, frame->pending_promise);
+        } catch (...) {
+        }
+    }
+    // mark suspended and unwind using existing control flow mechanism
+    frame->is_suspended = true;
+    throw SuspendExecution();
+}
+        
+        // use the frame's pending_promise when scheduling the resume (rejection path)
+        if (p->state == PromiseValue::State::REJECTED) {
+            // capture exception information; store as exception_ptr so we rethrow on resume
+            std::exception_ptr eptr;
+            try {
+                throw std::runtime_error(to_string_value(p->result));
+            } catch (...) {
+                eptr = std::current_exception();
+            }
+            frame->awaited_exceptions[awaitNode] = eptr;
+        
+            if (scheduler()) {
+                PromisePtr callPromise = frame->pending_promise;
+                scheduler()->enqueue_microtask([this, frame, callPromise]() {
+                    frame->is_suspended = false;
+                    try {
+                        execute_frame_until_await_or_return(frame, callPromise);
+                    } catch (...) {
+                    }
+                });
+            } else {
                 frame->is_suspended = false;
                 try {
-                    execute_frame_until_await_or_return(frame, nullptr);
+                    execute_frame_until_await_or_return(frame, frame->pending_promise);
                 } catch (...) {
-                    // swallow: executor will log if needed
+                }
+            }
+            frame->is_suspended = true;
+            throw SuspendExecution();
+        }
+    
+        // Pending -> register then/catch callbacks that stamp the resolution into frame->awaited_results/awaited_exceptions
+        // and enqueue a microtask that resumes frame execution.
+        {
+            PromisePtr pcopy = p;
+            Token resumeTok = awaitNode->token;
+    
+           
+            pcopy->then_callbacks.push_back([this, frame, awaitNode](Value res) {
+                frame->awaited_results[awaitNode] = res;
+                if (scheduler()) {
+                    PromisePtr callPromise = frame->pending_promise;
+                    scheduler()->enqueue_microtask([this, frame, callPromise]() {
+                        frame->is_suspended = false;
+                        try {
+                            execute_frame_until_await_or_return(frame, callPromise);
+                        } catch (...) {
+                        }
+                    });
+                } else {
+                    frame->is_suspended = false;
+                    try {
+                        execute_frame_until_await_or_return(frame, frame->pending_promise);
+                    } catch (...) {
+                    }
                 }
             });
-        });
-
-        // On rejection: store exception sentinel (stringified) and resume so the resumed evaluator
-        // can re-run the statement and see the rejection (or you can implement special behavior).
-        pcopy->catch_callbacks.push_back([this, frame, resumeTok](Value reason) {
-            if (!frame->env) return;
-            Environment::Variable v;
-            // store as string for now; you can propagate richer Error objects later
-            v.value = to_string_value(reason);
-            v.is_constant = false;
-            frame->env->set("$await_exception", v);
-
-            scheduler()->enqueue_macrotask([this, frame]() {
-                frame->is_suspended = false;
+            pcopy->catch_callbacks.push_back([this, frame, awaitNode](Value reason) {
+                std::exception_ptr eptr;
                 try {
-                    execute_frame_until_await_or_return(frame, nullptr);
+                    throw std::runtime_error(to_string_value(reason));
                 } catch (...) {
+                    eptr = std::current_exception();
+                }
+                frame->awaited_exceptions[awaitNode] = eptr;
+                if (scheduler()) {
+                    PromisePtr callPromise = frame->pending_promise;
+                    scheduler()->enqueue_microtask([this, frame, callPromise]() {
+                        frame->is_suspended = false;
+                        try {
+                            execute_frame_until_await_or_return(frame, callPromise);
+                        } catch (...) {
+                        }
+                    });
+                } else {
+                    frame->is_suspended = false;
+                    try {
+                        execute_frame_until_await_or_return(frame, frame->pending_promise);
+                    } catch (...) {
+                    }
                 }
             });
-        });
-
-        // Mark suspended and unwind to stop current evaluation. The executor will catch SuspendExecution
-        // and leave frame->next_statement_index unchanged so re-evaluation will resume the statement.
-        frame->is_suspended = true;
-        throw SuspendExecution();
+    
+            // mark suspended and unwind using existing control flow mechanism
+            frame->is_suspended = true;
+            throw SuspendExecution();
+        }
     }
     
-
+    
     // Template literal evaluation: concatenate quasis and evaluated expressions.
     if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {
         // quasis.size() is expected to be expressions.size() + 1, but tolerate mismatches.
@@ -195,7 +299,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             auto declptr = std::make_shared<FunctionDeclarationNode>();
             declptr->token = fe->token;
             declptr->name = fe->name;
-
+            // Preserve async flag from the FunctionExpressionNode
+            declptr->is_async = fe->is_async;
+        
             // clone parameter descriptors (ParameterNode unique_ptrs)
             declptr->parameters.reserve(fe->parameters.size());
             for (const auto& pp : fe->parameters) {
@@ -204,7 +310,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 else
                     declptr->parameters.push_back(nullptr);
             }
-
+        
             declptr->body.reserve(fe->body.size());
             for (const auto& s : fe->body) declptr->body.push_back(s ? s->clone() : nullptr);
             return declptr;
@@ -398,13 +504,15 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
         
         // Promise methods: then, catch, finally
-        if (std::holds_alternative<PromisePtr>(objVal)) {
-            PromisePtr prom = std::get<PromisePtr>(objVal);
-            const std::string& prop = mem->property;
-            Token memTok = mem->token;
+         {
+            PromisePtr prom = extract_promise_from_value(objVal);
+            if(prom) {
+              PromisePtr prom_local = prom;
+              const std::string& prop = mem->property;
+              Token memTok = mem->token;
 
             if (prop == "then") {
-                auto native_impl = [this, prom, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                auto native_impl = [this, prom_local, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
                         throw std::runtime_error("TypeError at " + token.loc.to_string() + "\nPromise.then expects a function argument.");
                     }
@@ -459,14 +567,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     };
 
                     // attach to original promise
-                    if (prom->state == PromiseValue::State::FULFILLED) {
-                        Value v = prom->result;
+                    if (prom_local->state == PromiseValue::State::FULFILLED) {
+                        Value v = prom_local->result;
                         scheduler()->enqueue_microtask([run_cb_and_chain, v]() { run_cb_and_chain(v); });
-                    } else if (prom->state == PromiseValue::State::PENDING) {
-                        prom->then_callbacks.push_back([run_cb_and_chain](Value v) { run_cb_and_chain(v); });
-                        prom->catch_callbacks.push_back([reject_next](Value r) { reject_next(r); });
+                    } else if (prom_local->state == PromiseValue::State::PENDING) {
+                        prom_local->then_callbacks.push_back([run_cb_and_chain](Value v) { run_cb_and_chain(v); });
+                        prom_local->catch_callbacks.push_back([reject_next](Value r) { reject_next(r); });
                     } else { // original rejected -> propagate to next unless user provided onRejected (not supported here)
-                        scheduler()->enqueue_microtask([reject_next, r = prom->result]() { reject_next(r); });
+                        scheduler()->enqueue_microtask([reject_next, r = prom_local->result]() { reject_next(r); });
                     }
 
                     return Value{next};
@@ -475,7 +583,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
 
             if (prop == "catch") {
-                auto native_impl = [this, prom, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                auto native_impl = [this, prom_local, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
                         throw std::runtime_error("TypeError at " + token.loc.to_string() + "\nPromise.catch expects a function argument.");
                     }
@@ -520,14 +628,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
                     };
 
-                    if (prom->state == PromiseValue::State::REJECTED) {
-                        Value reason = prom->result;
+                    if (prom_local->state == PromiseValue::State::REJECTED) {
+                        Value reason = prom_local->result;
                         scheduler()->enqueue_microtask([run_on_reject, reason]() { run_on_reject(reason); });
-                    } else if (prom->state == PromiseValue::State::PENDING) {
-                        prom->catch_callbacks.push_back([run_on_reject](Value r) { run_on_reject(r); });
-                        prom->then_callbacks.push_back([resolve_next](Value v) { resolve_next(v); });
+                    } else if (prom_local->state == PromiseValue::State::PENDING) {
+                        prom_local->catch_callbacks.push_back([run_on_reject](Value r) { run_on_reject(r); });
+                        prom_local->then_callbacks.push_back([resolve_next](Value v) { resolve_next(v); });
                     } else { // already fulfilled -> forward
-                        scheduler()->enqueue_microtask([resolve_next, v = prom->result]() { resolve_next(v); });
+                        scheduler()->enqueue_microtask([resolve_next, v = prom_local->result]() { resolve_next(v); });
                     }
 
                     return Value{next};
@@ -536,7 +644,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
 
             if (prop == "finally") {
-                auto native_impl = [this, prom, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                auto native_impl = [this, prom_local, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
                         throw std::runtime_error("TypeError at " + token.loc.to_string() + "\nPromise.finally expects a function argument.");
                     }
@@ -571,18 +679,19 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         else resolve_next(outcome);
                     };
 
-                    if (prom->state == PromiseValue::State::PENDING) {
-                        prom->then_callbacks.push_back([run_finally](Value v) { run_finally(v, false); });
-                        prom->catch_callbacks.push_back([run_finally](Value r) { run_finally(r, true); });
-                    } else if (prom->state == PromiseValue::State::FULFILLED) {
-                        scheduler()->enqueue_microtask([run_finally, v = prom->result]() { run_finally(v, false); });
+                    if (prom_local->state == PromiseValue::State::PENDING) {
+                        prom_local->then_callbacks.push_back([run_finally](Value v) { run_finally(v, false); });
+                        prom_local->catch_callbacks.push_back([run_finally](Value r) { run_finally(r, true); });
+                    } else if (prom_local->state == PromiseValue::State::FULFILLED) {
+                        scheduler()->enqueue_microtask([run_finally, v = prom_local->result]() { run_finally(v, false); });
                     } else {
-                        scheduler()->enqueue_microtask([run_finally, r = prom->result]() { run_finally(r, true); });
+                        scheduler()->enqueue_microtask([run_finally, r = prom_local->result]() { run_finally(r, true); });
                     }
 
                     return Value{next};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:promise.finally"), native_impl, env, memTok)};
+            }
             }
         }
 
@@ -2447,7 +2556,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto ln = dynamic_cast<LambdaNode*>(expr)) {
         // Convert LambdaNode to a callable FunctionValue
         auto fnDecl = std::make_shared<FunctionDeclarationNode>();
-
+        fnDecl->is_async = ln->is_async;
+        
         // clone params from ln->params
         fnDecl->parameters.reserve(ln->params.size());
         for (const auto& pp : ln->params) {
@@ -2553,6 +2663,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 auto persisted = std::make_shared<FunctionDeclarationNode>();
                 persisted->name = m->name;
                 persisted->token = m->token;
+                persisted->is_async = m->is_async;
 
                 // clone parameter descriptors from ClassMethodNode::params
                 persisted->parameters.reserve(m->params.size());
@@ -2605,6 +2716,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 auto persisted = std::make_shared<FunctionDeclarationNode>();
                 persisted->name = ctorNode->name;
                 persisted->token = ctorNode->token;
+                persisted->is_async = ctorNode->is_async;
 
                 // clone parameter descriptors from ctorNode->params
                 persisted->parameters.reserve(ctorNode->params.size());
@@ -2681,6 +2793,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 auto persisted = std::make_shared<FunctionDeclarationNode>();
                 persisted->name = m->name;
                 persisted->token = m->token;
+                persisted->is_async = m->is_async;
 
                 // clone parameters
                 persisted->parameters.reserve(m->params.size());
@@ -2744,6 +2857,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         auto persisted = std::make_shared<FunctionDeclarationNode>();
                         persisted->name = m->name;
                         persisted->token = m->token;
+                        persisted->is_async = m->is_async;
 
                         // clone parameter descriptors from method node
                         persisted->parameters.reserve(m->params.size());

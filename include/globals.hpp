@@ -6,8 +6,9 @@
 #include <variant>
 
 #include "evaluator.hpp"
+using EnvPtr = std::shared_ptr<class Environment>;
 
-void init_globals(EnvPtr env);
+void init_globals(EnvPtr env, Evaluator* evaluator);
 
 inline bool value_to_bool(const Value& v) {
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v);

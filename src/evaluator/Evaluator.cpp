@@ -18,7 +18,9 @@ namespace fs = std::filesystem;
 Evaluator::~Evaluator() = default;
 
 Evaluator::Evaluator() : global_env(std::make_shared<Environment>(nullptr)), main_module_env(nullptr) {
-    init_globals(global_env);
+    // Pass 'this' pointer into init_globals so some builtins (Promise constructor,
+    // etc.) can synchronously call back into the evaluator.
+    init_globals(global_env, this);
 
     scheduler_ = std::make_unique<Scheduler>();
 
@@ -43,7 +45,6 @@ Evaluator::Evaluator() : global_env(std::make_shared<Environment>(nullptr)), mai
             }
         });
 }
-
 void Evaluator::push_frame(CallFramePtr f) {
     if (!f) return;
     call_stack_.push_back(f);
@@ -60,7 +61,11 @@ CallFramePtr Evaluator::current_frame() {
     return call_stack_.back();
 }
 
-
+// Public wrapper so native builtins can invoke interpreter functions synchronously.
+// This simply forwards to the private call_function implementation.
+Value Evaluator::invoke_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
+    return call_function(fn, args, caller_env, callToken);
+}
 
 // ----------------- Program evaluation -----------------
 void Evaluator::evaluate(ProgramNode* program) {

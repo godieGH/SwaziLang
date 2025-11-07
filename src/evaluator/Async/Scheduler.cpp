@@ -5,7 +5,12 @@ Scheduler::~Scheduler() = default;
 
 void Scheduler::enqueue_microtask(const Continuation& task) {
     if (!task) return;
-    microtasks.push_back(task);
+    {
+        std::lock_guard<std::mutex> lk(microtasks_mutex);
+        microtasks.push_back(task);
+    }
+    // Microtasks may be enqueued from other threads (timers etc.) — wake run loop.
+    macrotasks_cv.notify_one();
 }
 
 void Scheduler::enqueue_macrotask(const Continuation& task) {
@@ -18,9 +23,15 @@ void Scheduler::enqueue_macrotask(const Continuation& task) {
 }
 
 bool Scheduler::run_one() {
-    while (!microtasks.empty()) {
-        Continuation t = microtasks.front();
-        microtasks.pop_front();
+    // Drain microtasks first (thread-safe snapshot drain)
+    while (true) {
+        Continuation t;
+        {
+            std::lock_guard<std::mutex> lk(microtasks_mutex);
+            if (microtasks.empty()) break;
+            t = microtasks.front();
+            microtasks.pop_front();
+        }
         try {
             if (t) t();
         } catch (...) {
@@ -45,44 +56,33 @@ bool Scheduler::run_one() {
 }
 
 void Scheduler::run_until_idle(const std::function<bool()>& has_pending) {
-    // Keep running until should_stop or until no macrotasks and has_pending==false.
     while (!should_stop) {
         bool did_work = run_one();
         if (did_work) continue;
 
-        // No immediate work: wait for macrotask arrival or for a change in external pending state.
         std::unique_lock<std::mutex> lk(macrotasks_mutex);
 
-        // If a predicate is provided, wake when either:
-        // - macrotasks is not empty (someone enqueued)
-        // - should_stop requested
-        // - predicate says there are no pending external tasks (i.e., we're allowed to exit)
         macrotasks_cv.wait(lk, [&]() {
             if (should_stop) return true;
+            {
+                std::lock_guard<std::mutex> ml(microtasks_mutex);
+                if (!microtasks.empty()) return true;
+            }
             if (!macrotasks.empty()) return true;
             if (has_pending) {
-                // if has_pending()==false -> safe to stop/wake and re-check exit conditions
                 bool pending = has_pending();
                 return !pending;
             }
-            // no predicate: wake only when macrotasks non-empty or should_stop
             return false;
         });
 
-        // After wake, loop continues and will re-evaluate run_one() and should_stop.
-        // If the predicate returned true because there are no pending external tasks and
-        // there are no macrotasks, the next run_one() will do nothing and the while will
-        // loop again; since macrotasks still empty and has_pending() returned false,
-        // the wait condition will be satisfied and we will break out via the loop condition.
         if (should_stop) break;
-        // If we returned from wait because has_pending()==false and macrotasks empty,
-        // the next iteration will call run_one() (no work) and then go back to wait,
-        // but since has_pending()==false the wait will immediately return and we will exit.
         if (!macrotasks.empty()) continue;
-        if (has_pending && !has_pending()) {
-            // no more external work and no macrotasks -> done
-            break;
+        {
+            std::lock_guard<std::mutex> ml(microtasks_mutex);
+            if (!microtasks.empty()) continue;
         }
+        if (has_pending && !has_pending()) break;
     }
 }
 

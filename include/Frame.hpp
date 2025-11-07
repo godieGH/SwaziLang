@@ -1,64 +1,38 @@
-#ifndef SWAZI_FRAME_HPP
-#define SWAZI_FRAME_HPP
-
-#include <memory>
-#include <functional>
-#include <vector>
-#include <string>
+#pragma once
 #include <any>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <exception>
 
-#include "token.hpp"
+#include "ast.hpp"
+#include "evaluator.hpp"
 
-// Forward declarations used here — keep header minimal so it doesn't pull evaluator.hpp
+// forward
 struct FunctionValue;
 using FunctionPtr = std::shared_ptr<FunctionValue>;
-using EnvPtr = std::shared_ptr<class Environment>;
+using PromisePtr = std::shared_ptr<PromiseValue>;
 
-// Continuation: a small callable scheduled by the scheduler.
-using Continuation = std::function<void()>;
-
-// Simple CallFrame placeholder: we will expand this during the full refactor.
-// Keep it POD-like and non-owning for now.
 struct CallFrame {
-    // function being executed (nullable for top-level tasks)
     FunctionPtr function;
-
-    // lexical environment for the frame (closure / locals parent)
-    EnvPtr env;
-    
-    // Execution cursor (index of next statement to execute)
+    std::shared_ptr<Environment> env;
     size_t next_statement_index = 0;
-
-    // Whether the frame is currently suspended waiting for something
-    bool is_suspended = false;
-
-    // Opaque slot to store the awaited promise or any pending value (std::any avoids
-    // depending on Value here, concrete code will std::any_cast<Value> where needed)
-    std::any awaited_slot;
-
-    // Optional continuation to call with a result when resuming (opaque typed)
-    // Use std::any for the result parameter to avoid header dependency on Value.
-    std::function<void(std::any)> resume_with_result;
-
-    // token where the call originated (useful for diagnostics)
-    Token call_token;
-
-    // optional receiver ($) for method calls: forward-declare ObjectValue as incomplete
-    std::shared_ptr<struct ObjectValue> receiver;
-
-    // storage slot for return value / temporary while running (opaque)
     std::any return_value;
-
-    // execution flags
     bool did_return = false;
-    bool is_async = false;
-
-    // user-visible stack label (function name or "<top>")
+    Token call_token;
     std::string label;
+    bool is_async = false;
+    bool is_suspended = false;
+    // For methods:
+    std::shared_ptr<ObjectValue> receiver;
 
-    CallFrame() = default;
+    // --- await bookkeeping (keyed by the AwaitExpressionNode pointer)
+    std::unordered_map<const ExpressionNode*, PromisePtr> awaited_promises;
+    std::unordered_map<const ExpressionNode*, Value> awaited_results;
+    std::unordered_map<const ExpressionNode*, std::exception_ptr> awaited_exceptions;
+    
+    PromisePtr pending_promise = nullptr;
 };
-
 using CallFramePtr = std::shared_ptr<CallFrame>;
 
-#endif // SWAZI_FRAME_HPP
+using Continuation = std::function<void()>;

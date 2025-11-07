@@ -218,6 +218,10 @@ class Evaluator {
     // Accessor for the scheduler (non-owning for now).
     Scheduler* scheduler() { return scheduler_.get(); }
     
+    // Public wrapper that lets native builtins synchronously invoke interpreter-callable functions.
+    // This is a thin public forwarder to the private call_function implementation.
+    Value invoke_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
+
    private:
     EnvPtr global_env;
     EnvPtr main_module_env;

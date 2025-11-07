@@ -35,7 +35,10 @@ public:
 private:
     std::deque<Continuation> microtasks;
     std::deque<Continuation> macrotasks;
+
+    // protect both queues (microtasks need protection too)
     std::mutex macrotasks_mutex;
+    std::mutex microtasks_mutex;
     std::condition_variable macrotasks_cv;
     bool should_stop = false;
 };
