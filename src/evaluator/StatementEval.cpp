@@ -297,7 +297,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             else
                 persisted->parameters.push_back(nullptr);
         }
-        
+
         persisted->is_async = fd->is_async;
 
         // Move or clone the body into persisted (we can move here since fd is ephemeral)
@@ -819,7 +819,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         std::exception_ptr eptr;
 
         // Try block (use a separate env)
-        
+
         {
             auto tryEnv = std::make_shared<Environment>(env);
             try {

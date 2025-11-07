@@ -1,9 +1,6 @@
 // src/evaluator/Evaluator.cpp
 #include "evaluator.hpp"
 
-#include "Scheduler.hpp"
-#include "Frame.hpp"
-
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -11,6 +8,8 @@
 #include <stdexcept>
 
 #include "ClassRuntime.hpp"
+#include "Frame.hpp"
+#include "Scheduler.hpp"
 #include "globals.hpp"
 namespace fs = std::filesystem;
 #include "AsyncBridge.hpp"

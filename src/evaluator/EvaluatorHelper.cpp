@@ -53,6 +53,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<ObjectPtr>(v)) return "object";
     if (std::holds_alternative<ClassPtr>(v)) return "muundo";
     if (std::holds_alternative<HoleValue>(v)) return "emptyhole";
+    if (std::holds_alternative<PromisePtr>(v)) return "promise";
     return "unknown";
 }
 
@@ -170,6 +171,44 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         }
         return out;
     }
+
+    if (std::holds_alternative<PromisePtr>(v)) {
+        PromisePtr p = std::get<PromisePtr>(v);
+        if (!p) {
+            std::ostringstream ss;
+            ss << "[Promise <null>]";
+            return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
+        }
+        // Pending
+        if (p->state == PromiseValue::State::PENDING) {
+            return use_color ? (Color::bright_blue + "Promise {<PENDING>}" + Color::reset) : "Promise {<PENDING>}";
+        }
+
+        // Fulfilled — show the inner value using the regular pretty-printer
+        if (p->state == PromiseValue::State::FULFILLED) {
+            std::string inner = print_value(p->result, 0);
+            if (use_color) {
+                // color the outer label but leave inner value coloring as returned by print_value
+                return Color::bright_blue + std::string("Promise { ") + Color::reset + inner + Color::bright_blue + " }" + Color::reset;
+            }
+            return std::string("Promise { ") + inner + " }";
+        }
+
+        // Rejected — show reason
+        if (p->state == PromiseValue::State::REJECTED) {
+            if (use_color) {
+                return (Color::bright_blue +
+                    "Promise {" +
+                    Color::reset +
+                    Color::bright_black +
+                    std::string("<REJECTED>") +
+                    Color::reset +
+                    Color::bright_blue + "}" + Color::reset);
+            }
+            return std::string("Promise {<REJECTED>}");
+        }
+    }
+
     return "";
 }
 
@@ -726,12 +765,12 @@ std::string Evaluator::print_value(
                 break;
             }
         }
-        
+
         // if arr is empty then all holes is false
         if (arr->elements.empty()) {
             allHoles = false;
         }
-        
+
         if (allHoles) {
             std::ostringstream ss;
             if (use_color) {
@@ -819,6 +858,30 @@ std::string Evaluator::print_value(
         }
 
         return out;
+    }
+
+    if (std::holds_alternative<PromisePtr>(v)) {
+        PromisePtr p = std::get<PromisePtr>(v);
+        if (!p) return use_color ? (Color::bright_blue + "Promise {<null>}" + Color::reset) : "Promise {<null>}";
+
+        if (p->state == PromiseValue::State::PENDING) {
+            return use_color ? (Color::bright_blue + "Promise {<PENDING>}" + Color::reset) : "Promise {<PENDING>}";
+        }
+
+        if (p->state == PromiseValue::State::FULFILLED) {
+            std::ostringstream ss;
+            ss << "Promise { ";
+            ss << print_value(p->result, depth + 1, visited, arrvisited);
+            ss << " }";
+            std::string s = ss.str();
+            return use_color ? (Color::bright_blue + s + Color::reset) : s;
+        }
+
+        // REJECTED
+        std::ostringstream ss;
+        std::string reject_str = use_color ? (Color::bright_black + "<REJECTED>" + Color::reset) : "<REJECTED>";
+        ss << Color::bright_blue << "Promise {" << Color::reset << (reject_str) << Color::bright_blue << "}" << Color::reset;
+        return ss.str();
     }
 
     return "<?>";  // fallback

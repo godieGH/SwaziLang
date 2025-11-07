@@ -8,10 +8,10 @@
 #include <thread>
 #include <unordered_map>
 
+#include "AsyncBridge.hpp"  // -> defines CallbackPayload
+#include "Scheduler.hpp"
 #include "builtins.hpp"
 #include "evaluator.hpp"
-#include "Scheduler.hpp"
-#include "AsyncBridge.hpp" // -> defines CallbackPayload
 
 // Timer bookkeeping (unchanged)...
 static std::mutex g_timers_mutex;

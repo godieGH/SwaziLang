@@ -4,13 +4,11 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "ClassRuntime.hpp"
 #include "Frame.hpp"
 #include "Scheduler.hpp"
-
-#include "ClassRuntime.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
-
 
 void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise) {
     if (!frame || !frame->function) return;
@@ -119,9 +117,8 @@ void Evaluator::execute_frame_until_return(CallFramePtr frame) {
 
     // No explicit return; treat as returning undefined (std::monostate)
     frame->return_value = std::monostate{};
-    frame->did_return = false; // no explicit 'return' statement, but completion yields undefined
+    frame->did_return = false;  // no explicit 'return' statement, but completion yields undefined
 }
-
 
 Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
     if (!fn) {
@@ -169,10 +166,10 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             ss.str(),
             callToken.loc);
     }
-    
+
     auto frame = std::make_shared<CallFrame>();
     frame->function = fn;
-    frame->env = nullptr; // will set to local env after it's created
+    frame->env = nullptr;  // will set to local env after it's created
     frame->call_token = callToken;
     frame->label = fn->name.empty() ? "<lambda>" : fn->name;
     frame->is_async = fn->is_async;
@@ -182,7 +179,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
     // create local environment whose parent is the function's closure
     auto local = std::make_shared<Environment>(fn->closure);
     frame->env = local;
-    
+
     // Bind parameters left-to-right. Rest parameter (if any) collects appropriate args.
     size_t argIndex = 0;
     for (size_t i = 0; i < fn->parameters.size(); ++i) {
@@ -245,8 +242,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
 
     Value ret_val = std::monostate{};
     bool did_return = false;
-    
-    
+
     // If async function, create and return a Promise immediately.
     // Start executing the async function synchronously on the calling thread
     // until the first await. If it suspends (SuspendExecution), we return
@@ -255,7 +251,7 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
     if (fn->is_async) {
         auto promise = std::make_shared<PromiseValue>();
         frame->pending_promise = promise;
-    
+
         try {
             // Execute right away until first await or completion.
             execute_frame_until_await_or_return(frame, promise);
@@ -275,7 +271,9 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
                 if (scheduler()) {
                     scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
                 } else {
-                    try { cb(reason); } catch (...) {}
+                    try {
+                        cb(reason);
+                    } catch (...) {}
                 }
             }
             // ensure frame popped if not already
@@ -289,18 +287,20 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
                 if (scheduler()) {
                     scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
                 } else {
-                    try { cb(reason); } catch (...) {}
+                    try {
+                        cb(reason);
+                    } catch (...) {}
                 }
             }
             pop_frame();
             return promise;
         }
-    
+
         // Return the promise (either pending because we suspended, or already fulfilled)
         return promise;
     }
 
-   // Sync function: run directly
+    // Sync function: run directly
     try {
         execute_frame_until_return(frame);
     } catch (...) {
@@ -372,10 +372,10 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
             ss.str(),
             callToken.loc);
     }
-    
+
     auto frame = std::make_shared<CallFrame>();
     frame->function = fn;
-    frame->env = nullptr; // will set after creating local
+    frame->env = nullptr;  // will set after creating local
     frame->call_token = callToken;
     frame->label = fn->name.empty() ? "<lambda>" : fn->name;
     frame->is_async = fn->is_async;
@@ -461,7 +461,9 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
                 if (scheduler()) {
                     scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
                 } else {
-                    try { cb(reason); } catch (...) {}
+                    try {
+                        cb(reason);
+                    } catch (...) {}
                 }
             }
             pop_frame();
@@ -474,7 +476,9 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
                 if (scheduler()) {
                     scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
                 } else {
-                    try { cb(reason); } catch (...) {}
+                    try {
+                        cb(reason);
+                    } catch (...) {}
                 }
             }
             pop_frame();
