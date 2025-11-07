@@ -1,6 +1,8 @@
 // src/evaluator/Evaluator.cpp
 #include "evaluator.hpp"
 
+#include "Scheduler.hpp"
+
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -10,11 +12,38 @@
 #include "ClassRuntime.hpp"
 #include "globals.hpp"
 namespace fs = std::filesystem;
+#include "AsyncBridge.hpp"
+
+Evaluator::~Evaluator() = default;
 
 Evaluator::Evaluator() : global_env(std::make_shared<Environment>(nullptr)), main_module_env(nullptr) {
-    // global_env is the shared root/builtins environment (parent == nullptr)
     init_globals(global_env);
+
+    scheduler_ = std::make_unique<Scheduler>();
+
+    // Register scheduler runner that knows how to interpret the CallbackPayload.
+    register_scheduler_runner(
+        scheduler_.get(),
+        [this](void* boxed) {
+            if (!boxed) return;
+            CallbackPayload* p = static_cast<CallbackPayload*>(boxed);
+            if (!p) return;
+            FunctionPtr cb = p->cb;
+            std::vector<Value> args = p->args;
+            // delete the payload now (we own it)
+            delete p;
+            if (!cb) return;
+            try {
+                this->call_function(cb, args, cb->closure, cb->token);
+            } catch (const std::exception& e) {
+                std::cerr << "Unhandled async callback exception: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "Unhandled async callback unknown exception" << std::endl;
+            }
+        });
 }
+
+
 // ----------------- Program evaluation -----------------
 void Evaluator::evaluate(ProgramNode* program) {
     if (!program) return;

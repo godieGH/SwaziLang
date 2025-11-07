@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -9,20 +10,10 @@
 
 #include "builtins.hpp"
 #include "evaluator.hpp"
+#include "Scheduler.hpp"
+#include "AsyncBridge.hpp" // -> defines CallbackPayload
 
-// Lightweight async queue + timers for the "async" builtin.
-// - Async.subiri(cb, ...args) enqueues cb
-// - Async.setTimeout(ms, cb) or setTimeout(cb, ms) schedules single-shot callback, returns id
-// - Async.clearTimeout(id) cancels it
-// - Async.setInterval(ms, cb) or setInterval(cb, ms) schedules repeating callback, returns id
-// - Async.clearInterval(id) cancels it
-// - Async.nap(ms, cb?) is sugar for setTimeout
-
-static std::mutex g_async_queue_mutex;
-static std::condition_variable g_async_cv;
-static std::deque<std::pair<FunctionPtr, std::vector<Value>>> g_async_queue;
-
-// Timer bookkeeping
+// Timer bookkeeping (unchanged)...
 static std::mutex g_timers_mutex;
 static std::atomic<long long> g_next_timer_id{1};
 struct TimerEntry {
@@ -35,67 +26,57 @@ struct TimerEntry {
 };
 static std::unordered_map<long long, std::shared_ptr<TimerEntry>> g_timers;
 
+// Forward declaration: check whether any timers exist (used by run_event_loop).
+bool async_timers_exist();
+
 // Enqueue a language callback (used across this file)
+// Build a heap-allocated CallbackPayload and hand it to the scheduler bridge.
 static void enqueue_callback(FunctionPtr cb, const std::vector<Value>& args) {
     if (!cb) return;
-    {
-        std::lock_guard<std::mutex> lk(g_async_queue_mutex);
-        g_async_queue.emplace_back(cb, args);
-    }
-    g_async_cv.notify_one();
+    // allocate a payload copy that the evaluator will delete after use
+    CallbackPayload* box = new CallbackPayload(cb, args);
+    enqueue_callback_global(static_cast<void*>(box));
 }
 
 // Evaluator: schedule callback (exposed)
 void Evaluator::schedule_callback(FunctionPtr cb, const std::vector<Value>& args) {
     if (!cb) return;
-    enqueue_callback(cb, args);
+    // If scheduler present, use it; otherwise fallback to the global bridge.
+    if (scheduler()) {
+        // create a macrotask that calls call_function on this evaluator instance
+        FunctionPtr cb_copy = cb;
+        std::vector<Value> args_copy = args;
+        scheduler()->enqueue_macrotask([this, cb_copy, args_copy]() {
+            try {
+                this->call_function(cb_copy, args_copy, cb_copy->closure, cb_copy->token);
+            } catch (const std::exception& e) {
+                std::cerr << "Unhandled async callback exception: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "Unhandled async callback unknown exception" << std::endl;
+            }
+        });
+    } else {
+        enqueue_callback(cb, args);
+    }
 }
 
 // Evaluator: drain the queue (existing behavior)
+// When a Scheduler exists, run_until_idle takes a predicate that lets the scheduler
+// know whether there are active async timers; this allows the scheduler to remain
+// running until timers complete.
 void Evaluator::run_event_loop() {
-    auto timers_empty = []() -> bool {
-        std::lock_guard<std::mutex> lk(g_timers_mutex);
-        return g_timers.empty();
-    };
-
-    while (true) {
-        std::pair<FunctionPtr, std::vector<Value>> item;
-        {
-            std::unique_lock<std::mutex> lk(g_async_queue_mutex);
-
-            // Wait until either there's a queued callback, or there are no timers left (then we can exit),
-            // or we are notified (new timer enqueued a callback or a timer finished).
-            g_async_cv.wait(lk, [&]() {
-                return !g_async_queue.empty() || timers_empty();
-            });
-
-            // If queue empty and no timers -> done
-            if (g_async_queue.empty() && timers_empty()) {
-                return;
-            }
-
-            // If there's a queued callback, pop it. Otherwise, loop again (will wait).
-            if (!g_async_queue.empty()) {
-                item = std::move(g_async_queue.front());
-                g_async_queue.pop_front();
-            } else {
-                // No callback right now (timers still active), continue waiting
-                continue;
-            }
-        }  // release queue lock before executing callback
-
-        FunctionPtr cb = item.first;
-        std::vector<Value> args = item.second;
-
-        try {
-            call_function(cb, args, cb->closure, cb->token);
-        } catch (const std::exception& e) {
-            std::cerr << "Unhandled async callback exception: " << e.what() << std::endl;
-        } catch (...) {
-            std::cerr << "Unhandled async callback unknown exception" << std::endl;
-        }
+    if (scheduler()) {
+        // Drain scheduler (blocks until idle). Provide a predicate so scheduler can
+        // exit when both macrotasks empty AND there are no active async timers.
+        scheduler()->run_until_idle([]() {
+            return async_timers_exist();
+        });
+        return;
     }
+
+    return;
 }
+
 // Internal: spawn a timer worker thread for this entry (detached)
 static void spawn_timer_thread(std::shared_ptr<TimerEntry> te) {
     std::thread([te]() {
@@ -117,8 +98,14 @@ static void spawn_timer_thread(std::shared_ptr<TimerEntry> te) {
         {
             std::lock_guard<std::mutex> lk(g_timers_mutex);
             g_timers.erase(te->id);
+            // We intentionally do not try to access internal scheduler globals here.
+            // Instead we will notify the scheduler via the public bridge below.
         }
-        g_async_cv.notify_one();
+        // Wake the evaluator/scheduler bridge so run_until_idle's predicate can re-check timers.
+        // We create a small no-op CallbackPayload (null cb) that the global bridge will deliver
+        // to the evaluator; the evaluator's callback runner is responsible for deleting the payload.
+        CallbackPayload* wake = new CallbackPayload(nullptr, {});
+        enqueue_callback_global(static_cast<void*>(wake));
     }).detach();
 }
 
@@ -295,4 +282,10 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
     obj->properties["nap"] = PropertyDescriptor{fn_nap, false, false, false, tNap};
 
     return obj;
+}
+
+// Check whether there are any active timers (used by the scheduler exit predicate)
+bool async_timers_exist() {
+    std::lock_guard<std::mutex> lk(g_timers_mutex);
+    return !g_timers.empty();
 }

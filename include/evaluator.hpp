@@ -14,6 +14,10 @@
 // Forward declaration
 class Environment;
 
+// NOTE: Do NOT include Scheduler.hpp or Frame.hpp here to avoid include cycles.
+// Forward-declare Scheduler so Evaluator can keep a pointer.
+class Scheduler;
+
 // Our language's value types
 struct FunctionValue;
 using FunctionPtr = std::shared_ptr<FunctionValue>;
@@ -30,7 +34,7 @@ struct ObjectValue;
 using ObjectPtr = std::shared_ptr<ObjectValue>;
 
 // New: sentinel type to represent a JavaScript-like "hole" (an empty slot).
-// It's an empty struct used only to distinguish holes from `null`/`undefined`.
+// It's an empty struct used only to distinguish holes from `null`/undefined`.
 struct HoleValue {};
 
 // Value union: add HoleValue so arrays can hold explicit holes distinct from null/undefined.
@@ -165,6 +169,7 @@ struct LoopControl {
 class Evaluator {
    public:
     Evaluator();
+    ~Evaluator();
     // Evaluate whole program (caller must ensure ProgramNode lifetime covers evaluation)
     void evaluate(ProgramNode* program);
 
@@ -176,7 +181,10 @@ class Evaluator {
 
     void set_entry_point(const std::string& filename);
     void set_cli_args(const std::vector<std::string>& args);
-
+    
+    // Accessor for the scheduler (non-owning for now).
+    Scheduler* scheduler() { return scheduler_.get(); }
+    
    private:
     EnvPtr global_env;
     EnvPtr main_module_env;
@@ -185,7 +193,12 @@ class Evaluator {
     std::vector<std::string> cli_args;
 
     ClassPtr current_class_context = nullptr;
-
+    
+    // Scheduler instance used to host microtasks/macrotasks and future frame continuations.
+    // Initialized in constructor (Phase 0). Using unique_ptr to avoid problems with header inclusion order.
+    std::unique_ptr<Scheduler> scheduler_;
+    
+    
     void populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main);
 
     // Module loader records for caching and circular dependency handling.
