@@ -33,7 +33,13 @@ using ClassPtr = std::shared_ptr<ClassValue>;
 struct ObjectValue;
 using ObjectPtr = std::shared_ptr<ObjectValue>;
 
-// New: sentinel type to represent a JavaScript-like "hole" (an empty slot).
+struct CallFrame;
+using CallFramePtr = std::shared_ptr<CallFrame>;
+
+struct PromiseValue;
+using PromisePtr = std::shared_ptr<PromiseValue>;
+
+// sentinel type to represent a JavaScript-like "hole" (an empty slot).
 // It's an empty struct used only to distinguish holes from `null`/undefined`.
 struct HoleValue {};
 
@@ -47,7 +53,9 @@ using Value = std::variant<
     HoleValue,
     ArrayPtr,
     ObjectPtr,
-    ClassPtr>;
+    ClassPtr,
+    PromisePtr
+>;
 
 struct PropertyDescriptor {
     Value value;
@@ -69,6 +77,17 @@ struct ObjectValue {
     bool is_env_proxy = false;
     EnvPtr proxy_env = nullptr;
 };
+
+struct PromiseValue {
+    enum class State { PENDING, FULFILLED, REJECTED };
+    State state = State::PENDING;
+    Value result;  // fulfilled value or rejection reason
+    
+    // Continuations to run when resolved
+    std::vector<std::function<void(Value)>> then_callbacks;
+    std::vector<std::function<void(Value)>> catch_callbacks;
+};
+
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
     // We keep simple contiguous vector storage, but elements can now be HoleValue
@@ -83,6 +102,8 @@ struct FunctionValue {
     std::shared_ptr<FunctionDeclarationNode> body;
     EnvPtr closure;
     Token token;
+    // new: mark whether this function was declared async in the AST
+    bool is_async = false;
     bool is_native = false;
     std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> native_impl;
 
@@ -92,9 +113,11 @@ struct FunctionValue {
         const std::shared_ptr<FunctionDeclarationNode>& b,
         const EnvPtr& env,
         const Token& tok) : name(nm),
+                            parameters(),     // default-initialize parameters, we'll fill below
                             body(b),
                             closure(env),
                             token(tok),
+                            is_async(b ? b->is_async : false),
                             is_native(false) {
         parameters.reserve(params.size());
         for (const auto& p : params) {
@@ -117,6 +140,7 @@ struct FunctionValue {
                             body(b),
                             closure(env),
                             token(tok),
+                            is_async(b ? b->is_async : false),
                             is_native(false) {
     }
 
@@ -129,10 +153,12 @@ struct FunctionValue {
                             body(nullptr),
                             closure(env),
                             token(tok),
+                            is_async(false),
                             is_native(true),
                             native_impl(std::move(impl)) {
     }
 };
+
 // Environment with lexical parent pointer
 class Environment : public std::enable_shared_from_this<Environment> {
    public:
@@ -164,6 +190,13 @@ struct LoopControl {
     bool did_break = false;
     bool did_continue = false;
 };
+
+
+struct SuspendExecution : public std::exception {
+     // Exception used to short-circuit evaluation when an async await suspends the current frame.
+     // It's not an error — the executor will catch it, keep the frame on the stack and return.
+     const char* what() const noexcept override { return "Execution suspended for await"; }
+ };
 
 // Evaluator
 class Evaluator {
@@ -197,6 +230,14 @@ class Evaluator {
     // Scheduler instance used to host microtasks/macrotasks and future frame continuations.
     // Initialized in constructor (Phase 0). Using unique_ptr to avoid problems with header inclusion order.
     std::unique_ptr<Scheduler> scheduler_;
+    std::vector<CallFramePtr> call_stack_;
+
+    // call frame helpers
+    void push_frame(CallFramePtr f);
+    void pop_frame();
+    CallFramePtr current_frame();
+    void execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise);
+    void execute_frame_until_return(CallFramePtr frame);
     
     
     void populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main);

@@ -6,6 +6,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "Frame.hpp"
+#include "Scheduler.hpp"
+
+
 #include "ClassRuntime.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
@@ -30,6 +34,91 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (auto inf = dynamic_cast<InfNode*>(expr)) {
         return Value(std::numeric_limits<double>::infinity());
     }
+    
+    
+    // --- await expression (suspends current async frame) ---
+    if (auto awaitNode = dynamic_cast<AwaitExpressionNode*>(expr)) {
+        // Evaluate the operand (this may be a CallExpression returning a PromisePtr).
+        Value operand = evaluate_expression(awaitNode->expression.get(), env);
+
+        if (!std::holds_alternative<PromisePtr>(operand)) {
+            throw std::runtime_error(
+                "TypeError at " + awaitNode->token.loc.to_string() +
+                "\nawait expects a Promise value.");
+        }
+
+        PromisePtr p = std::get<PromisePtr>(operand);
+        if (!p) return std::monostate{};
+
+        // already settled -> return immediately
+        if (p->state == PromiseValue::State::FULFILLED) {
+            return p->result;
+        }
+        if (p->state == PromiseValue::State::REJECTED) {
+            // Throw rejection reason (we convert to string for now)
+            // Prefer using SwaziError if you want richer error objects here.
+            throw std::runtime_error("Promise rejected: " + to_string_value(p->result));
+        }
+
+        // PENDING -> suspend current frame. We need a frame to suspend.
+        auto frame = current_frame();
+        if (!frame || !frame->is_async) {
+            throw std::runtime_error(
+                "RuntimeError at " + awaitNode->token.loc.to_string() +
+                "\nawait can only be used inside an async function.");
+        }
+
+        // Register continuations to resume the suspended frame.
+        // We capture a shared_ptr to frame (CallFramePtr) so the lambda keeps it alive.
+        // On fulfillment: store value into a well-known temporary in the frame's env and schedule resume.
+        PromisePtr pcopy = p;
+        Token resumeTok = awaitNode->token;
+
+        pcopy->then_callbacks.push_back([this, frame, resumeTok](Value res) {
+            if (!frame->env) return;
+            Environment::Variable v;
+            v.value = res;
+            v.is_constant = false;
+            frame->env->set("$await_result", v);
+
+            // schedule macrotask to resume execution of this frame
+            scheduler()->enqueue_macrotask([this, frame]() {
+                // frame may already be popped/cancelled; defensive check:
+                // clear suspended flag then resume
+                frame->is_suspended = false;
+                try {
+                    execute_frame_until_await_or_return(frame, nullptr);
+                } catch (...) {
+                    // swallow: executor will log if needed
+                }
+            });
+        });
+
+        // On rejection: store exception sentinel (stringified) and resume so the resumed evaluator
+        // can re-run the statement and see the rejection (or you can implement special behavior).
+        pcopy->catch_callbacks.push_back([this, frame, resumeTok](Value reason) {
+            if (!frame->env) return;
+            Environment::Variable v;
+            // store as string for now; you can propagate richer Error objects later
+            v.value = to_string_value(reason);
+            v.is_constant = false;
+            frame->env->set("$await_exception", v);
+
+            scheduler()->enqueue_macrotask([this, frame]() {
+                frame->is_suspended = false;
+                try {
+                    execute_frame_until_await_or_return(frame, nullptr);
+                } catch (...) {
+                }
+            });
+        });
+
+        // Mark suspended and unwind to stop current evaluation. The executor will catch SuspendExecution
+        // and leave frame->next_statement_index unchanged so re-evaluation will resume the statement.
+        frame->is_suspended = true;
+        throw SuspendExecution();
+    }
+    
 
     // Template literal evaluation: concatenate quasis and evaluated expressions.
     if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {
@@ -306,6 +395,195 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
             // Normal return of the value (from the class where it was found)
             return desc.value;
+        }
+        
+        // Promise methods: then, catch, finally
+        if (std::holds_alternative<PromisePtr>(objVal)) {
+            PromisePtr prom = std::get<PromisePtr>(objVal);
+            const std::string& prop = mem->property;
+            Token memTok = mem->token;
+
+            if (prop == "then") {
+                auto native_impl = [this, prom, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                        throw std::runtime_error("TypeError at " + token.loc.to_string() + "\nPromise.then expects a function argument.");
+                    }
+                    FunctionPtr cb = std::get<FunctionPtr>(args[0]);
+
+                    // Create a promise to return.
+                    auto next = std::make_shared<PromiseValue>();
+
+                    // helpers to resolve/reject next
+                    auto resolve_next = [this, next](Value v) {
+                        if (!next) return;
+                        next->state = PromiseValue::State::FULFILLED;
+                        next->result = v;
+                        for (auto& c : next->then_callbacks) {
+                            Value rv = v;
+                            scheduler()->enqueue_microtask([c, rv]() { try { c(rv); } catch (...) {} });
+                        }
+                    };
+                    auto reject_next = [this, next](Value r) {
+                        if (!next) return;
+                        next->state = PromiseValue::State::REJECTED;
+                        next->result = r;
+                        for (auto& c : next->catch_callbacks) {
+                            Value rr = r;
+                            scheduler()->enqueue_microtask([c, rr]() { try { c(rr); } catch (...) {} });
+                        }
+                    };
+
+                    // Runner that calls user callback and chains result into `next` promise
+                    auto run_cb_and_chain = [this, cb, resolve_next, reject_next, memTok](Value v) {
+                        try {
+                            Value res = this->call_function(cb, {v}, cb->closure, memTok);
+                            if (std::holds_alternative<PromisePtr>(res)) {
+                                PromisePtr p2 = std::get<PromisePtr>(res);
+                                if (!p2) { resolve_next(std::monostate{}); return; }
+                                if (p2->state == PromiseValue::State::FULFILLED) {
+                                    resolve_next(p2->result);
+                                } else if (p2->state == PromiseValue::State::PENDING) {
+                                    p2->then_callbacks.push_back([resolve_next](Value rv) { resolve_next(rv); });
+                                    p2->catch_callbacks.push_back([reject_next](Value rr) { reject_next(rr); });
+                                } else { // rejected
+                                    reject_next(p2->result);
+                                }
+                            } else {
+                                resolve_next(res);
+                            }
+                        } catch (const std::exception& e) {
+                            reject_next(std::string(e.what()));
+                        } catch (...) {
+                            reject_next(std::string("unknown exception"));
+                        }
+                    };
+
+                    // attach to original promise
+                    if (prom->state == PromiseValue::State::FULFILLED) {
+                        Value v = prom->result;
+                        scheduler()->enqueue_microtask([run_cb_and_chain, v]() { run_cb_and_chain(v); });
+                    } else if (prom->state == PromiseValue::State::PENDING) {
+                        prom->then_callbacks.push_back([run_cb_and_chain](Value v) { run_cb_and_chain(v); });
+                        prom->catch_callbacks.push_back([reject_next](Value r) { reject_next(r); });
+                    } else { // original rejected -> propagate to next unless user provided onRejected (not supported here)
+                        scheduler()->enqueue_microtask([reject_next, r = prom->result]() { reject_next(r); });
+                    }
+
+                    return Value{next};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:promise.then"), native_impl, env, memTok)};
+            }
+
+            if (prop == "catch") {
+                auto native_impl = [this, prom, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                        throw std::runtime_error("TypeError at " + token.loc.to_string() + "\nPromise.catch expects a function argument.");
+                    }
+                    FunctionPtr cb = std::get<FunctionPtr>(args[0]);
+                    auto next = std::make_shared<PromiseValue>();
+
+                    auto resolve_next = [this, next](Value v) {
+                        next->state = PromiseValue::State::FULFILLED;
+                        next->result = v;
+                        for (auto& c : next->then_callbacks) {
+                            Value rv = v;
+                            scheduler()->enqueue_microtask([c, rv]() { try { c(rv); } catch (...) {} });
+                        }
+                    };
+                    auto reject_next = [this, next](Value r) {
+                        next->state = PromiseValue::State::REJECTED;
+                        next->result = r;
+                        for (auto& c : next->catch_callbacks) {
+                            Value rr = r;
+                            scheduler()->enqueue_microtask([c, rr]() { try { c(rr); } catch (...) {} });
+                        }
+                    };
+
+                    auto run_on_reject = [this, cb, resolve_next, reject_next, memTok](Value r) {
+                        try {
+                            Value res = this->call_function(cb, {r}, cb->closure, memTok);
+                            if (std::holds_alternative<PromisePtr>(res)) {
+                                PromisePtr p2 = std::get<PromisePtr>(res);
+                                if (!p2) { resolve_next(std::monostate{}); return; }
+                                if (p2->state == PromiseValue::State::FULFILLED) resolve_next(p2->result);
+                                else if (p2->state == PromiseValue::State::PENDING) {
+                                    p2->then_callbacks.push_back([resolve_next](Value rv) { resolve_next(rv); });
+                                    p2->catch_callbacks.push_back([reject_next](Value rr) { reject_next(rr); });
+                                } else reject_next(p2->result);
+                            } else {
+                                resolve_next(res);
+                            }
+                        } catch (const std::exception& e) {
+                            reject_next(std::string(e.what()));
+                        } catch (...) {
+                            reject_next(std::string("unknown"));
+                        }
+                    };
+
+                    if (prom->state == PromiseValue::State::REJECTED) {
+                        Value reason = prom->result;
+                        scheduler()->enqueue_microtask([run_on_reject, reason]() { run_on_reject(reason); });
+                    } else if (prom->state == PromiseValue::State::PENDING) {
+                        prom->catch_callbacks.push_back([run_on_reject](Value r) { run_on_reject(r); });
+                        prom->then_callbacks.push_back([resolve_next](Value v) { resolve_next(v); });
+                    } else { // already fulfilled -> forward
+                        scheduler()->enqueue_microtask([resolve_next, v = prom->result]() { resolve_next(v); });
+                    }
+
+                    return Value{next};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:promise.catch"), native_impl, env, memTok)};
+            }
+
+            if (prop == "finally") {
+                auto native_impl = [this, prom, memTok](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                        throw std::runtime_error("TypeError at " + token.loc.to_string() + "\nPromise.finally expects a function argument.");
+                    }
+                    FunctionPtr cb = std::get<FunctionPtr>(args[0]);
+                    auto next = std::make_shared<PromiseValue>();
+
+                    auto resolve_next = [this, next](Value v) {
+                        next->state = PromiseValue::State::FULFILLED;
+                        next->result = v;
+                        for (auto& c : next->then_callbacks) {
+                            Value rv = v;
+                            scheduler()->enqueue_microtask([c, rv]() { try { c(rv); } catch (...) {} });
+                        }
+                    };
+                    auto reject_next = [this, next](Value r) {
+                        next->state = PromiseValue::State::REJECTED;
+                        next->result = r;
+                        for (auto& c : next->catch_callbacks) {
+                            Value rr = r;
+                            scheduler()->enqueue_microtask([c, rr]() { try { c(rr); } catch (...) {} });
+                        }
+                    };
+
+                    auto run_finally = [this, cb, resolve_next, reject_next, memTok](Value outcome, bool wasRejected) {
+                        try {
+                            // call cb with no args; ignore its return for now (JS semantics are more subtle)
+                            this->call_function(cb, {}, cb->closure, memTok);
+                        } catch (...) {
+                            // swallow finally errors for now and prefer to propagate original outcome
+                        }
+                        if (wasRejected) reject_next(outcome);
+                        else resolve_next(outcome);
+                    };
+
+                    if (prom->state == PromiseValue::State::PENDING) {
+                        prom->then_callbacks.push_back([run_finally](Value v) { run_finally(v, false); });
+                        prom->catch_callbacks.push_back([run_finally](Value r) { run_finally(r, true); });
+                    } else if (prom->state == PromiseValue::State::FULFILLED) {
+                        scheduler()->enqueue_microtask([run_finally, v = prom->result]() { run_finally(v, false); });
+                    } else {
+                        scheduler()->enqueue_microtask([run_finally, r = prom->result]() { run_finally(r, true); });
+                    }
+
+                    return Value{next};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:promise.finally"), native_impl, env, memTok)};
+            }
         }
 
         // --- Universal properties ---

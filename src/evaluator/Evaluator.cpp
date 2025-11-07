@@ -2,6 +2,7 @@
 #include "evaluator.hpp"
 
 #include "Scheduler.hpp"
+#include "Frame.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -42,6 +43,23 @@ Evaluator::Evaluator() : global_env(std::make_shared<Environment>(nullptr)), mai
             }
         });
 }
+
+void Evaluator::push_frame(CallFramePtr f) {
+    if (!f) return;
+    call_stack_.push_back(f);
+}
+
+void Evaluator::pop_frame() {
+    if (!call_stack_.empty()) {
+        call_stack_.pop_back();
+    }
+}
+
+CallFramePtr Evaluator::current_frame() {
+    if (call_stack_.empty()) return nullptr;
+    return call_stack_.back();
+}
+
 
 
 // ----------------- Program evaluation -----------------

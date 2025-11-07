@@ -15,7 +15,6 @@ using FunctionPtr = std::shared_ptr<FunctionValue>;
 using EnvPtr = std::shared_ptr<class Environment>;
 
 // Continuation: a small callable scheduled by the scheduler.
-// It can be a lambda that resumes a suspended frame or any task.
 using Continuation = std::function<void()>;
 
 // Simple CallFrame placeholder: we will expand this during the full refactor.
@@ -26,22 +25,33 @@ struct CallFrame {
 
     // lexical environment for the frame (closure / locals parent)
     EnvPtr env;
+    
+    // Execution cursor (index of next statement to execute)
+    size_t next_statement_index = 0;
+
+    // Whether the frame is currently suspended waiting for something
+    bool is_suspended = false;
+
+    // Opaque slot to store the awaited promise or any pending value (std::any avoids
+    // depending on Value here, concrete code will std::any_cast<Value> where needed)
+    std::any awaited_slot;
+
+    // Optional continuation to call with a result when resuming (opaque typed)
+    // Use std::any for the result parameter to avoid header dependency on Value.
+    std::function<void(std::any)> resume_with_result;
 
     // token where the call originated (useful for diagnostics)
     Token call_token;
 
-    // optional receiver ($) for method calls
+    // optional receiver ($) for method calls: forward-declare ObjectValue as incomplete
     std::shared_ptr<struct ObjectValue> receiver;
 
-    // storage slot for return value / temporary while running.
-    // Use std::any here to avoid a hard dependency on the interpreter's Value
-    // type in this header (breaks include cycle). When we fully reify frames
-    // we will replace this with the actual Value or a boxed Value type.
+    // storage slot for return value / temporary while running (opaque)
     std::any return_value;
 
     // execution flags
     bool did_return = false;
-    bool is_async = false;  // will be used later
+    bool is_async = false;
 
     // user-visible stack label (function name or "<top>")
     std::string label;

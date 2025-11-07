@@ -4,9 +4,124 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "Frame.hpp"
+#include "Scheduler.hpp"
+
 #include "ClassRuntime.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+
+
+void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise) {
+    if (!frame || !frame->function) return;
+
+    auto& body = frame->function->body->body;
+
+    // Resume from where we left off
+    while (frame->next_statement_index < body.size()) {
+        auto* stmt = body[frame->next_statement_index].get();
+
+        try {
+            Value ret_val;
+            bool did_return = false;
+
+            // evaluate the current statement — this may throw SuspendExecution to indicate suspension
+            evaluate_statement(stmt, frame->env, &ret_val, &did_return);
+
+            if (did_return) {
+                // Fulfill the promise with return value
+                if (promise) {
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = ret_val;
+                    // schedule then callbacks as microtasks
+                    for (auto& cb : promise->then_callbacks) {
+                        Value rv = ret_val;
+                        scheduler()->enqueue_microtask([cb, rv]() { try { cb(rv); } catch (...) {} });
+                    }
+                }
+                pop_frame();
+                return;
+            }
+
+            // advance to next statement only on successful evaluation (no suspension)
+            frame->next_statement_index++;
+        } catch (const SuspendExecution&) {
+            // Normal suspension — leave frame->next_statement_index unchanged so resume re-evaluates same statement.
+            return;
+        } catch (const std::exception& e) {
+            // Fatal exception while executing an async function -> reject the promise
+            if (promise) {
+                promise->state = PromiseValue::State::REJECTED;
+                promise->result = std::string(e.what());
+                // schedule catch callbacks as microtasks
+                for (auto& cb : promise->catch_callbacks) {
+                    Value reason = promise->result;
+                    scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
+                }
+            }
+            pop_frame();
+            return;
+        } catch (...) {
+            // unknown throw -> reject with a generic reason
+            if (promise) {
+                promise->state = PromiseValue::State::REJECTED;
+                promise->result = std::string("unknown exception");
+                for (auto& cb : promise->catch_callbacks) {
+                    Value reason = promise->result;
+                    scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
+                }
+            }
+            pop_frame();
+            return;
+        }
+    }
+
+    // Function completed without explicit return -> resolve undefined
+    if (promise) {
+        promise->state = PromiseValue::State::FULFILLED;
+        promise->result = std::monostate{};
+        for (auto& cb : promise->then_callbacks) {
+            scheduler()->enqueue_microtask([cb]() { try { cb(std::monostate{}); } catch (...) {} });
+        }
+    }
+    pop_frame();
+}
+void Evaluator::execute_frame_until_return(CallFramePtr frame) {
+    if (!frame || !frame->function) return;
+
+    // Ensure frame->env exists
+    if (!frame->env) {
+        frame->env = std::make_shared<Environment>(frame->function->closure);
+    }
+
+    auto& body = frame->function->body->body;
+
+    // Resume from stored index (0 for fresh)
+    while (frame->next_statement_index < body.size()) {
+        auto* stmt = body[frame->next_statement_index].get();
+
+        Value ret_val;
+        bool did_return = false;
+
+        // Evaluate statement in the frame's environment
+        evaluate_statement(stmt, frame->env, &ret_val, &did_return);
+
+        if (did_return) {
+            // store return into frame as a Value inside std::any (frame header uses std::any)
+            frame->return_value = ret_val;
+            frame->did_return = true;
+            return;
+        }
+
+        // Advance to next statement
+        frame->next_statement_index++;
+    }
+
+    // No explicit return; treat as returning undefined (std::monostate)
+    frame->return_value = std::monostate{};
+    frame->did_return = false; // no explicit 'return' statement, but completion yields undefined
+}
+
 
 Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
     if (!fn) {
@@ -54,10 +169,20 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             ss.str(),
             callToken.loc);
     }
+    
+    auto frame = std::make_shared<CallFrame>();
+    frame->function = fn;
+    frame->env = nullptr; // will set to local env after it's created
+    frame->call_token = callToken;
+    frame->label = fn->name.empty() ? "<lambda>" : fn->name;
+    frame->is_async = fn->is_async;
+
+    push_frame(frame);
 
     // create local environment whose parent is the function's closure
     auto local = std::make_shared<Environment>(fn->closure);
-
+    frame->env = local;
+    
     // Bind parameters left-to-right. Rest parameter (if any) collects appropriate args.
     size_t argIndex = 0;
     for (size_t i = 0; i < fn->parameters.size(); ++i) {
@@ -120,13 +245,48 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
 
     Value ret_val = std::monostate{};
     bool did_return = false;
-
-    for (auto& stmt_uptr : fn->body->body) {
-        evaluate_statement(stmt_uptr.get(), local, &ret_val, &did_return);
-        if (did_return) break;
+    
+    
+   // If async function, return a promise immediately
+    if (fn->is_async) {
+        auto promise = std::make_shared<PromiseValue>();
+        
+        // Schedule execution as continuation
+        scheduler()->enqueue_macrotask([this, frame, promise]() {
+            execute_frame_until_await_or_return(frame, promise);
+        });
+        
+        return promise;
     }
 
-    return did_return ? ret_val : std::monostate{};
+   // Sync function: run directly
+    try {
+        execute_frame_until_return(frame);
+    } catch (...) {
+        pop_frame();
+        throw;
+    }
+
+    // Extract Value result from opaque slot and pop frame
+    Value result = std::monostate{};
+    if (frame->did_return) {
+        try {
+            result = std::any_cast<Value>(frame->return_value);
+        } catch (const std::bad_any_cast&) {
+            // Defensive: if something else was stored, treat as undefined
+            result = std::monostate{};
+        }
+    } else {
+        // function completed without explicit return -> undefined
+        try {
+            // if someone filled return_value, try to read it, else undefined
+            result = std::any_cast<Value>(frame->return_value);
+        } catch (...) {
+            result = std::monostate{};
+        }
+    }
+    pop_frame();
+    return result;
 }
 
 Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
@@ -171,9 +331,20 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
             ss.str(),
             callToken.loc);
     }
+    
+    auto frame = std::make_shared<CallFrame>();
+    frame->function = fn;
+    frame->env = nullptr; // will set after creating local
+    frame->call_token = callToken;
+    frame->label = fn->name.empty() ? "<lambda>" : fn->name;
+    frame->is_async = fn->is_async;
+    frame->receiver = receiver;
+
+    push_frame(frame);
 
     // create local environment whose parent is the function's closure
     auto local = std::make_shared<Environment>(fn->closure);
+    frame->env = local;
 
     // Bind '$' to receiver so methods / getters can access private fields using existing checks
     Environment::Variable thisVar;
@@ -233,10 +404,42 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
     Value ret_val = std::monostate{};
     bool did_return = false;
 
-    for (auto& stmt_uptr : fn->body->body) {
-        evaluate_statement(stmt_uptr.get(), local, &ret_val, &did_return);
-        if (did_return) break;
+    // If function is async, treat like call_function: return a Promise immediately
+    if (fn->is_async) {
+        auto promise = std::make_shared<PromiseValue>();
+
+        // schedule async execution of the frame (the frame already pushed and env prepared)
+        scheduler()->enqueue_macrotask([this, frame, promise]() {
+            execute_frame_until_await_or_return(frame, promise);
+        });
+
+        return promise;
     }
 
-    return did_return ? ret_val : std::monostate{};
+    // Sync method: run to completion
+    try {
+        execute_frame_until_return(frame);
+    } catch (...) {
+        pop_frame();
+        throw;
+    }
+
+    // Extract the return value (frame->return_value holds std::any)
+    Value result = std::monostate{};
+    if (frame->did_return) {
+        try {
+            result = std::any_cast<Value>(frame->return_value);
+        } catch (...) {
+            result = std::monostate{};
+        }
+    } else {
+        try {
+            result = std::any_cast<Value>(frame->return_value);
+        } catch (...) {
+            result = std::monostate{};
+        }
+    }
+
+    pop_frame();
+    return result;
 }
