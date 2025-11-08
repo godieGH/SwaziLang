@@ -1,4 +1,6 @@
+#include "colors.hpp"
 #include "repl.hpp"
+
 
 // Improved REPL indentation/block handling
 // - More robust comment detection
@@ -16,6 +18,33 @@ static bool is_likely_incomplete_input(const std::string& err) {
         err.find("Expected ')'") != std::string::npos ||
         err.find("Expected ']'") != std::string::npos;
 }
+
+
+// --- Multiline-mode helper --------------------------------------------------
+// Enter a simple "multiline editor" session. The user types lines and finishes
+// the block by entering a single "." or ".end" line. Prompts used inside the
+// block are "... ". The function returns the concatenated block (with final '\n').
+static std::string read_multiline_block() {
+    bool use_color = Color::supports_color();
+    std::string mlbuf;
+    std::string ss = use_color ?  (Color::bright_black + "... " + Color::reset) : "... ";
+    while (true) {
+        char* raw = linenoise(ss.c_str());
+        if (!raw) {
+            // EOF / Ctrl-D inside multiline -> return what we have so far
+            break;
+        }
+        std::string line(raw);
+        linenoiseFree(raw);
+        // terminators: a single "." or ".end" on its own line
+        if (line == "---end---") break;
+        mlbuf += line;
+        mlbuf.push_back('\n');
+    }
+    return mlbuf;
+}
+
+
 
 // --- Helpers for REPL indentation and block detection ---
 
@@ -197,7 +226,8 @@ void run_repl_mode() {
     Evaluator evaluator;
     evaluator.set_entry_point("");  // REPL: sets __name__ to "<repl>" and __main__ true
     std::vector<IndentFrame> indent_stack;
-
+    bool use_color = Color::supports_color();
+    
     std::cout << "swazi v" << SWAZI_VERSION << " | built on " << __DATE__ << "\n";
     std::cout << "Swazi REPL — type 'exit' or 'quit' or Ctrl-D to quit\n";
 
@@ -215,12 +245,30 @@ void run_repl_mode() {
 
     std::string last_added_history;
 
-#ifdef LINENOISE_MULTILINE
-    linenoiseSetMultiLine(1);
-#endif
+    // NOTE: do NOT set global multiline mode here. We'll enable/disable per-session
+    // when entering the explicit multiline editor command. Leaving global mode set
+    // causes prompt/behavior confusion (e.g. prompt staying '...').
+    //
+    // #ifdef LINENOISE_MULTILINE
+    //     linenoiseSetMultiLine(1);
+    // #endif
 
     while (true) {
-        std::string prompt = buffer.empty() ? ">>> " : "... ";
+        
+        std::string prompt;
+        if (buffer.empty()) {
+            prompt = ">>> "; // primary prompt remains plain (no color)
+        } else {
+            if (use_color) {
+                prompt = Color::bright_black + std::string("... ") + Color::reset;
+            } else {
+                prompt = "... ";
+            }
+        }
+
+        // Pass the prompt (may include ANSI) directly to linenoise. linenoise now
+        // computes printable width ignoring ANSI, so cursor math stays correct
+        // while the visible colored prompt is drawn and preserved across edits.
         char* raw = linenoise(prompt.c_str());
         if (!raw) {  // EOF (Ctrl-D) or error
             std::cout << "\n";
@@ -232,6 +280,65 @@ void run_repl_mode() {
 
         // Normalise tabs early so all indent calculations are consistent.
         line = expand_tabs(line, 4);
+        
+        // Multiline-mode toggle command.
+        if (line == "---ml---" || line == "---multiline---") {
+            std::cout << "(entering multiline mode — terminate with '---end---')\n";
+#ifdef LINENOISE_MULTILINE
+            linenoiseSetMultiLine(1);
+#endif
+            std::string block = read_multiline_block();
+#ifdef LINENOISE_MULTILINE
+            linenoiseSetMultiLine(0);
+#endif
+            if (!block.empty()) {
+                buffer += block;
+                if (buffer.empty() || buffer.back() != '\n') buffer.push_back('\n');
+
+                // Attempt parse/evaluate immediately (unchanged)
+                try {
+                    Lexer lexer(buffer, "<repl>");
+                    std::vector<Token> tokens = lexer.tokenize();
+
+                    Parser parser(tokens);
+                    std::unique_ptr<ProgramNode> ast = parser.parse();
+
+                    bool did_auto_print = false;
+                    if (ast->body.size() == 1) {
+                        if (auto exprStmt = dynamic_cast<ExpressionStatementNode*>(ast->body[0].get())) {
+                            Value v = evaluator.evaluate_expression(exprStmt->expression.get());
+                            if (!evaluator.is_void(v)) {
+                                std::cout << evaluator.value_to_string(v) << "\n";
+                            }
+                            did_auto_print = true;
+                        }
+                    }
+
+                    if (!did_auto_print) evaluator.evaluate(ast.get());
+
+                    // success: clear buffer and indentation stack
+                    buffer.clear();
+                    indent_stack.clear();
+                } catch (const std::exception& e) {
+                    std::string msg = e.what();
+                    if (is_likely_incomplete_input(msg)) {
+                        std::cerr << "Incomplete input after multiline block: " << msg << std::endl;
+                        buffer.clear();
+                        indent_stack.clear();
+                    } else {
+                        std::cerr << "Error: " << msg << std::endl;
+                        buffer.clear();
+                        indent_stack.clear();
+                    }
+                } catch (...) {
+                    std::cerr << "Unknown fatal error\n";
+                    buffer.clear();
+                    indent_stack.clear();
+                }
+            }
+            continue;
+        }
+
 
         if (line == "exit" || line == "quit") break;
 

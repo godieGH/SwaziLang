@@ -191,6 +191,41 @@ FILE *lndebug_fp = NULL;
 #define lndebug(fmt, ...)
 #endif
 
+
+/* ----------------- New helper: printable prompt width (skip ANSI) -----------------
+ *
+ * Compute the number of visible columns of a prompt string that may contain
+ * ANSI CSI escape sequences like "\x1b[31m" or "\x1b[0m".
+ *
+ * We skip sequences that start with ESC '[' and continue until a byte in the
+ * range '@'..'~' which is the CSI final byte range, per ANSI/VT100 sequences.
+ * For simplicity we treat each non-CSI byte as width 1 (this keeps existing
+ * behavior for ASCII prompts).
+ */
+static size_t printable_prompt_width(const char *s) {
+    if (s == NULL) return 0;
+    const unsigned char *p = (const unsigned char *)s;
+    size_t w = 0;
+    while (*p) {
+        if (*p == 0x1b && *(p+1) == '[') {
+            // skip CSI sequence ESC '[' ... final-byte (in @ A ... ~)
+            p += 2; // skip ESC and '['
+            while (*p) {
+                unsigned char c = *p++;
+                if (c >= 0x40 && c <= 0x7E) break; // CSI final byte
+            }
+            continue;
+        }
+        // For other escape sequences or bytes we simply count 1 column.
+        // If you need full unicode width handling add wcwidth() here.
+        w++;
+        p++;
+    }
+    return w;
+}
+
+
+
 /* ======================= Low level terminal handling ====================== */
 
 /* Enable "mask mode". When it is enabled, instead of the input that
@@ -546,7 +581,7 @@ void refreshShowHints(struct abuf *ab, struct linenoiseState *l, int plen) {
  * prompt, just write it, or both. */
 static void refreshSingleLine(struct linenoiseState *l, int flags) {
     char seq[64];
-    size_t plen = strlen(l->prompt);
+    size_t plen = l->plen;                 /* use printable width (columns) */
     int fd = l->ofd;
     char *buf = l->buf;
     size_t len = l->len;
@@ -569,14 +604,14 @@ static void refreshSingleLine(struct linenoiseState *l, int flags) {
 
     if (flags & REFRESH_WRITE) {
         /* Write the prompt and the current buffer content */
-        abAppend(&ab,l->prompt,strlen(l->prompt));
+        abAppend(&ab,l->prompt, strlen(l->prompt)); /* full bytes including ANSI */
         if (maskmode == 1) {
             while (len--) abAppend(&ab,"*",1);
         } else {
             abAppend(&ab,buf,len);
         }
         /* Show hits if any. */
-        refreshShowHints(&ab,l,plen);
+        refreshShowHints(&ab,l, (int) plen);
     }
 
     /* Erase to right */
@@ -602,11 +637,11 @@ static void refreshSingleLine(struct linenoiseState *l, int flags) {
  * prompt, just write it, or both. */
 static void refreshMultiLine(struct linenoiseState *l, int flags) {
     char seq[64];
-    int plen = strlen(l->prompt);
-    int rows = (plen+l->len+l->cols-1)/l->cols; /* rows used by current buf. */
-    int rpos = (plen+l->oldpos+l->cols)/l->cols; /* cursor relative row. */
+    int plen = (int)l->plen; /* use printable width for computations */
+    int rows = (plen + (int)l->len + (int)l->cols - 1) / (int)l->cols; /* rows used by current buf. */
+    int rpos = (plen + (int)l->oldpos + (int)l->cols) / (int)l->cols; /* cursor relative row. */
     int rpos2; /* rpos after refresh. */
-    int col; /* colum position, zero-based. */
+    int col; /* column position, zero-based. */
     int old_rows = l->oldrows;
     int fd = l->ofd, j;
     struct abuf ab;
@@ -635,13 +670,13 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
     if (flags & REFRESH_ALL) {
         /* Clean the top line. */
         lndebug("clear");
-        snprintf(seq,64,"\r\x1b[0K");
+        snprintf(seq,sizeof(seq),"\r\x1b[0K");
         abAppend(&ab,seq,strlen(seq));
     }
 
     if (flags & REFRESH_WRITE) {
         /* Write the prompt and the current buffer content */
-        abAppend(&ab,l->prompt,strlen(l->prompt));
+        abAppend(&ab,l->prompt, strlen(l->prompt)); /* full bytes incl. ANSI */
         if (maskmode == 1) {
             unsigned int i;
             for (i = 0; i < l->len; i++) abAppend(&ab,"*",1);
@@ -650,7 +685,7 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
         }
 
         /* Show hits if any. */
-        refreshShowHints(&ab,l,plen);
+        refreshShowHints(&ab,l, plen);
 
         /* If we are at the very end of the screen with our prompt, we need to
          * emit a newline and move the prompt to the first column. */
@@ -667,7 +702,7 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
         }
 
         /* Move cursor to right position. */
-        rpos2 = (plen+l->pos+l->cols)/l->cols; /* Current cursor relative row */
+        rpos2 = (plen + (int)l->pos + (int)l->cols) / (int)l->cols; /* Current cursor relative row */
         lndebug("rpos2 %d", rpos2);
 
         /* Go up till we reach the expected positon. */
@@ -678,7 +713,7 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
         }
 
         /* Set column. */
-        col = (plen+(int)l->pos) % (int)l->cols;
+        col = (plen + (int)l->pos) % (int)l->cols;
         lndebug("set col %d", 1+col);
         if (col)
             snprintf(seq,64,"\r\x1b[%dC", col);
@@ -918,7 +953,11 @@ int linenoiseEditStart(struct linenoiseState *l, int stdin_fd, int stdout_fd, ch
     l->buf = buf;
     l->buflen = buflen;
     l->prompt = prompt;
-    l->plen = strlen(prompt);
+
+    // compute printable prompt width (columns) and keep full byte-length
+    size_t prompt_bytes = prompt ? strlen(prompt) : 0;
+    l->plen = prompt ? printable_prompt_width(prompt) : 0;
+
     l->oldpos = l->pos = 0;
     l->len = 0;
 
@@ -942,7 +981,10 @@ int linenoiseEditStart(struct linenoiseState *l, int stdin_fd, int stdout_fd, ch
      * initially is just an empty string. */
     linenoiseHistoryAdd("");
 
-    if (write(l->ofd,prompt,l->plen) == -1) return -1;
+    /* Write the full prompt bytes (including any ANSI) */
+    if (prompt_bytes > 0) {
+        if (write(l->ofd, prompt, (ssize_t)prompt_bytes) == -1) return -1;
+    }
     return 0;
 }
 
