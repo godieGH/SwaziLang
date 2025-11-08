@@ -189,10 +189,6 @@ void Evaluator::set_cli_args(const std::vector<std::string>& args) {
     }
 }
 
-
-
-
-
 // --- Promise resolution helpers (deliver via microtasks and support unhandled rejection reporting) ---
 void Evaluator::fulfill_promise(PromisePtr p, const Value& value) {
     if (!p) return;
@@ -206,13 +202,17 @@ void Evaluator::fulfill_promise(PromisePtr p, const Value& value) {
     if (scheduler()) {
         scheduler()->enqueue_microtask([callbacks, value]() mutable {
             for (auto& cb : callbacks) {
-                try { cb(value); } catch (...) {}
+                try {
+                    cb(value);
+                } catch (...) {}
             }
         });
     } else {
         // Fallback: execute directly (best-effort for no-scheduler mode)
         for (auto& cb : callbacks) {
-            try { cb(value); } catch (...) {}
+            try {
+                cb(value);
+            } catch (...) {}
         }
     }
 }
@@ -234,7 +234,9 @@ void Evaluator::reject_promise(PromisePtr p, const Value& reason) {
         scheduler()->enqueue_microtask([this, p, callbacks, reason]() mutable {
             // Run user catch callbacks (they may call .then/.catch on the promise)
             for (auto& cb : callbacks) {
-                try { cb(reason); } catch (...) {}
+                try {
+                    cb(reason);
+                } catch (...) {}
             }
 
             // Schedule the unhandled-rejection check in a subsequent microtask,
@@ -253,7 +255,9 @@ void Evaluator::reject_promise(PromisePtr p, const Value& reason) {
     } else {
         // No scheduler: run handlers immediately then report if unhandled (best-effort)
         for (auto& cb : callbacks) {
-            try { cb(reason); } catch (...) {}
+            try {
+                cb(reason);
+            } catch (...) {}
         }
         if (!p->handled && !p->unhandled_reported) {
             report_unhandled_rejection(p);

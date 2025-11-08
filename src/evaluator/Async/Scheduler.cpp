@@ -49,7 +49,9 @@ bool Scheduler::run_one() {
     }
 
     if (mtask) {
-        try { mtask(); } catch (...) {}
+        try {
+            mtask();
+        } catch (...) {}
         return true;
     }
     return false;

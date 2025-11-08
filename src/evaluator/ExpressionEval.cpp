@@ -166,10 +166,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             frame->is_suspended = true;
             throw SuspendExecution();
         }
-        
+
         if (p->state == PromiseValue::State::REJECTED) {
             std::exception_ptr eptr;
-            try { throw std::runtime_error(to_string_value(p->result)); } catch (...) { eptr = std::current_exception(); }
+            try {
+                throw std::runtime_error(to_string_value(p->result));
+            } catch (...) { eptr = std::current_exception(); }
             frame->awaited_exceptions[aid] = eptr;
 
             PromisePtr callPromise = frame->pending_promise;
@@ -215,11 +217,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             frame->is_suspended = true;
             throw SuspendExecution();
         }
-        
+
         // Pending -> register then/catch callbacks that stamp resolution into frame->awaited_*[aid]
         {
             PromisePtr pcopy = p;
-            size_t captured_aid = aid; // capture stable id for lambdas below
+            size_t captured_aid = aid;  // capture stable id for lambdas below
 
             pcopy->then_callbacks.push_back([this, wf = std::weak_ptr<CallFrame>(frame), captured_aid](Value res) {
                 auto f_locked = wf.lock();
@@ -233,30 +235,42 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         if (!f) return;
                         bool present = false;
                         for (auto& ff : this->call_stack_) {
-                            if (ff == f) { present = true; break; }
+                            if (ff == f) {
+                                present = true;
+                                break;
+                            }
                         }
                         if (!present) return;
                         f->is_suspended = false;
-                        try { execute_frame_until_await_or_return(f, callPromise); } catch (...) {}
+                        try {
+                            execute_frame_until_await_or_return(f, callPromise);
+                        } catch (...) {}
                     });
                 } else {
                     auto f = wf.lock();
                     if (!f) return;
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
-                        if (ff == f) { present = true; break; }
+                        if (ff == f) {
+                            present = true;
+                            break;
+                        }
                     }
                     if (!present) return;
                     f->is_suspended = false;
-                    try { execute_frame_until_await_or_return(f, callPromise); } catch (...) {}
+                    try {
+                        execute_frame_until_await_or_return(f, callPromise);
+                    } catch (...) {}
                 }
             });
-            
+
             pcopy->catch_callbacks.push_back([this, wf = std::weak_ptr<CallFrame>(frame), captured_aid](Value reason) {
                 auto f_locked = wf.lock();
                 if (!f_locked) return;
                 std::exception_ptr eptr;
-                try { throw std::runtime_error(to_string_value(reason)); } catch (...) { eptr = std::current_exception(); }
+                try {
+                    throw std::runtime_error(to_string_value(reason));
+                } catch (...) { eptr = std::current_exception(); }
                 f_locked->awaited_exceptions[captured_aid] = eptr;
 
                 PromisePtr callPromise = f_locked->pending_promise;
@@ -266,30 +280,39 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         if (!f) return;
                         bool present = false;
                         for (auto& ff : this->call_stack_) {
-                            if (ff == f) { present = true; break; }
+                            if (ff == f) {
+                                present = true;
+                                break;
+                            }
                         }
                         if (!present) return;
                         f->is_suspended = false;
-                        try { execute_frame_until_await_or_return(f, callPromise); } catch (...) {}
+                        try {
+                            execute_frame_until_await_or_return(f, callPromise);
+                        } catch (...) {}
                     });
                 } else {
                     auto f = wf.lock();
                     if (!f) return;
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
-                        if (ff == f) { present = true; break; }
+                        if (ff == f) {
+                            present = true;
+                            break;
+                        }
                     }
                     if (!present) return;
                     f->is_suspended = false;
-                    try { execute_frame_until_await_or_return(f, callPromise); } catch (...) {}
+                    try {
+                        execute_frame_until_await_or_return(f, callPromise);
+                    } catch (...) {}
                 }
             });
             frame->is_suspended = true;
             throw SuspendExecution();
         }
     }
-    
-    
+
     // Template literal evaluation: concatenate quasis and evaluated expressions.
     if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {
         // quasis.size() is expected to be expressions.size() + 1, but tolerate mismatches.
@@ -634,7 +657,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 reject_next(std::string("unknown exception"));
                             }
                         };
-                        
+
                         prom_local->handled = true;
 
                         // attach to original promise
@@ -703,7 +726,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 reject_next(std::string("unknown"));
                             }
                         };
-                        
+
                         prom_local->handled = true;
 
                         if (prom_local->state == PromiseValue::State::REJECTED) {
@@ -758,7 +781,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             else
                                 resolve_next(outcome);
                         };
-                        
+
                         prom_local->handled = true;
 
                         if (prom_local->state == PromiseValue::State::PENDING) {

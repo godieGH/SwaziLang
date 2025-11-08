@@ -10,7 +10,7 @@
 
 // Simple scheduler that holds microtask and macrotask queues.
 class Scheduler {
-public:
+   public:
     Scheduler();
     ~Scheduler();
 
@@ -32,7 +32,7 @@ public:
     // subsystems (timers) to wake the scheduler when their state changes.
     void notify();
 
-private:
+   private:
     std::deque<Continuation> microtasks;
     std::deque<Continuation> macrotasks;
 
@@ -47,4 +47,4 @@ private:
 void register_scheduler_runner(Scheduler* s, std::function<void(void*)> runner);
 void enqueue_callback_global(void* boxed_payload);
 
-#endif // SWAZI_SCHEDULER_HPP
+#endif  // SWAZI_SCHEDULER_HPP

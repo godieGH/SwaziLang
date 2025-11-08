@@ -24,7 +24,7 @@ enum class TokenType {
     TUMIA,   // 'tumia' (import)
     KUTOKA,  // 'kutoka' (from)
     RUHUSU,  // 'ruhusu' (export)
-    
+
     //-----------------------
     // asyncronous
     //-----------------------
@@ -144,7 +144,7 @@ enum class TokenType {
     OR,
     NOT,
     AINA,
-    
+
     // -----------------------
     // errors & throws
     // -----------------------

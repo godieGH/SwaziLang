@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-#include "SwaziError.hpp"
 #include "ClassRuntime.hpp"
+#include "SwaziError.hpp"
 #include "muda_time_utils.hpp"
 #include "token.hpp"  // for TokenLocation
 
@@ -668,7 +668,7 @@ void init_muda_class(EnvPtr env) {
         p_fmt->is_rest = false;
         p_fmt->rest_required_count = 0;
         auto defFmt = std::make_unique<StringLiteralNode>();
-        defFmt->value = "";      // default -> optional
+        defFmt->value = "";  // default -> optional
         p_fmt->defaultValue = std::move(defFmt);
         m->params.push_back(std::move(p_fmt));
 

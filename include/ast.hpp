@@ -823,7 +823,7 @@ struct FunctionExpressionNode : public ExpressionNode {
         n->token = token;  // Node::token
         n->name = name;
         n->is_getter = is_getter;
-        n->is_async = is_async; // copy async flag
+        n->is_async = is_async;  // copy async flag
         n->parameters.reserve(parameters.size());
         for (const auto& p : parameters) n->parameters.push_back(p ? p->clone() : nullptr);
         n->body.reserve(body.size());
@@ -1068,7 +1068,7 @@ struct ClassMethodNode : public Node {
     bool is_constructor = false;
     bool is_destructor = false;
 
-    bool is_async = false; // NEW
+    bool is_async = false;  // NEW
 
     std::unique_ptr<ClassMethodNode> clone() const {
         auto n = std::make_unique<ClassMethodNode>();
@@ -1080,7 +1080,7 @@ struct ClassMethodNode : public Node {
         n->is_getter = is_getter;
         n->is_constructor = is_constructor;
         n->is_destructor = is_destructor;
-        n->is_async = is_async; // copy async flag
+        n->is_async = is_async;  // copy async flag
 
         n->params.reserve(params.size());
         for (const auto& p : params) n->params.push_back(p ? p->clone() : nullptr);

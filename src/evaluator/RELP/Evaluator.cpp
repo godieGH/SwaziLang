@@ -1,8 +1,9 @@
 #include "evaluator.hpp"
-#include <iostream>
+
 #include <cmath>
-#include <stdexcept>
+#include <iostream>
 #include <sstream>
+#include <stdexcept>
 
 // Evaluate a single expression using the evaluator's global_env.
 // Delegates to the existing private evaluate_expression(expr, env).
@@ -24,12 +25,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr) {
         run_env = repl_env;
     }
 
-    return evaluate_expression(expr, run_env); // delegate to the two-arg evaluator
+    return evaluate_expression(expr, run_env);  // delegate to the two-arg evaluator
 }
 std::string Evaluator::value_to_string(const Value& v) {
-   return to_string_value(v); // reuse your existing private formatter
+    return to_string_value(v);  // reuse your existing private formatter
 }
 
 bool Evaluator::is_void(const Value& v) {
-   return std::holds_alternative < std::monostate > (v);
+    return std::holds_alternative<std::monostate>(v);
 }

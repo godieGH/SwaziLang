@@ -1,14 +1,15 @@
 #include "set_class.hpp"
-#include "ClassRuntime.hpp"
 
 #include <algorithm>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 #include <unordered_set>
-#include <iomanip>
+#include <vector>
+
+#include "ClassRuntime.hpp"
 
 // Local helper: compare Values using a strict-like behavior that is safe for runtime helpers.
 // This mirrors the strict-equality idea used elsewhere: same variant type => compare contents,
@@ -53,7 +54,7 @@ static bool values_equal(const Value& a, const Value& b) {
 // Array helpers (operate on ArrayPtr used as internal storage)
 static bool array_contains(const ArrayPtr& a, const Value& v) {
     if (!a) return false;
-    for (const auto &e : a->elements) {
+    for (const auto& e : a->elements) {
         if (values_equal(e, v)) return true;
     }
     return false;
@@ -88,7 +89,7 @@ static ArrayPtr build_array_from_ctor_args(const std::vector<Value>& args) {
         if (std::holds_alternative<ObjectPtr>(args[0])) {
             ObjectPtr src = std::get<ObjectPtr>(args[0]);
             if (src) {
-                for (const auto &kv : src->properties) {
+                for (const auto& kv : src->properties) {
                     arr->elements.push_back(kv.second.value);
                 }
             }
@@ -109,10 +110,13 @@ static Value native_Set_ctor(const std::vector<Value>& args, EnvPtr /*env*/, con
 
     // make unique preserving first occurrence using values_equal
     auto uniq = std::make_shared<ArrayValue>();
-    for (const auto &v : arr->elements) {
+    for (const auto& v : arr->elements) {
         bool found = false;
-        for (const auto &u : uniq->elements) {
-            if (values_equal(u, v)) { found = true; break; }
+        for (const auto& u : uniq->elements) {
+            if (values_equal(u, v)) {
+                found = true;
+                break;
+            }
         }
         if (!found) uniq->elements.push_back(v);
     }

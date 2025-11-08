@@ -319,7 +319,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         // control-flow keywords
         {"kama", TokenType::KAMA},              // if
         {"vinginevyo", TokenType::VINGINEVYO},  // else
-        {"sivyo", TokenType::VINGINEVYO},  // else alias
+        {"sivyo", TokenType::VINGINEVYO},       // else alias
 
         {"jaribu", TokenType::JARIBU},
         {"makosa", TokenType::MAKOSA},
@@ -335,7 +335,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"fanya", TokenType::DOWHILE},
         {"simama", TokenType::SIMAMA},
         {"endelea", TokenType::ENDELEA},
-        
+
         // keyword literals and constants
         {"null", TokenType::NULL_LITERAL},  // null token
         {"nan", TokenType::NAN_LITERAL},
@@ -343,12 +343,12 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
 
         {"__block__", TokenType::BLOCK_DU},
         {"__line__", TokenType::LINE_DU},
-        
+
         // asyncronous async/await
         {"ASYNC", TokenType::ASYNC},
         {"async", TokenType::ASYNC},
         {"await", TokenType::AWAIT}
-        
+
     };
 
     auto it = keywords.find(id);
@@ -396,19 +396,19 @@ void Lexer::handle_newline(std::vector<Token>& out) {
                 break;
         }
     }
-    
+
     if (!continuation) {
-          size_t p = i;
-          // skip only spaces/tabs on the following line (we're already positioned at the start of the next line)
-          while (p < src.size() && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r')) p++;
-          if (p < src.size()) {
-              // simple checks on the raw source: '.' (member), '[' (index), or '?.' (optional member)
-              if (src[p] == '.' || src[p] == '[' || (src[p] == '?' && p + 1 < src.size() && src[p + 1] == '.')) {
-                  // treat as continuation: don't emit NEWLINE
-                  return;
-              }
-          }
-      }
+        size_t p = i;
+        // skip only spaces/tabs on the following line (we're already positioned at the start of the next line)
+        while (p < src.size() && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r')) p++;
+        if (p < src.size()) {
+            // simple checks on the raw source: '.' (member), '[' (index), or '?.' (optional member)
+            if (src[p] == '.' || src[p] == '[' || (src[p] == '?' && p + 1 < src.size() && src[p + 1] == '.')) {
+                // treat as continuation: don't emit NEWLINE
+                return;
+            }
+        }
+    }
 
     // inside parentheses/brackets OR after a continuation operator: skip NEWLINE
     if (paren_level > 0 || continuation) {

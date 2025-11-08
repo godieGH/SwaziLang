@@ -1,6 +1,6 @@
-#include "colors.hpp"
 #include "repl.hpp"
 
+#include "colors.hpp"
 
 // Improved REPL indentation/block handling
 // - More robust comment detection
@@ -19,7 +19,6 @@ static bool is_likely_incomplete_input(const std::string& err) {
         err.find("Expected ']'") != std::string::npos;
 }
 
-
 // --- Multiline-mode helper --------------------------------------------------
 // Enter a simple "multiline editor" session. The user types lines and finishes
 // the block by entering a single "." or ".end" line. Prompts used inside the
@@ -27,7 +26,7 @@ static bool is_likely_incomplete_input(const std::string& err) {
 static std::string read_multiline_block() {
     bool use_color = Color::supports_color();
     std::string mlbuf;
-    std::string ss = use_color ?  (Color::bright_black + "... " + Color::reset) : "... ";
+    std::string ss = use_color ? (Color::bright_black + "... " + Color::reset) : "... ";
     while (true) {
         char* raw = linenoise(ss.c_str());
         if (!raw) {
@@ -43,8 +42,6 @@ static std::string read_multiline_block() {
     }
     return mlbuf;
 }
-
-
 
 // --- Helpers for REPL indentation and block detection ---
 
@@ -227,7 +224,7 @@ void run_repl_mode() {
     evaluator.set_entry_point("");  // REPL: sets __name__ to "<repl>" and __main__ true
     std::vector<IndentFrame> indent_stack;
     bool use_color = Color::supports_color();
-    
+
     std::cout << "swazi v" << SWAZI_VERSION << " | built on " << __DATE__ << "\n";
     std::cout << "Swazi REPL — type 'exit' or 'quit' or Ctrl-D to quit\n";
 
@@ -254,10 +251,9 @@ void run_repl_mode() {
     // #endif
 
     while (true) {
-        
         std::string prompt;
         if (buffer.empty()) {
-            prompt = ">>> "; // primary prompt remains plain (no color)
+            prompt = ">>> ";  // primary prompt remains plain (no color)
         } else {
             if (use_color) {
                 prompt = Color::bright_black + std::string("... ") + Color::reset;
@@ -280,7 +276,7 @@ void run_repl_mode() {
 
         // Normalise tabs early so all indent calculations are consistent.
         line = expand_tabs(line, 4);
-        
+
         // Multiline-mode toggle command.
         if (line == "---ml---" || line == "---multiline---") {
             std::cout << "(entering multiline mode — terminate with '---end---')\n";
@@ -338,7 +334,6 @@ void run_repl_mode() {
             }
             continue;
         }
-
 
         if (line == "exit" || line == "quit") break;
 

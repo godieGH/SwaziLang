@@ -1,10 +1,11 @@
 #include "time.hpp"
+
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
-#include <regex>
 
 // epoch ms now (UTC)
 double epoch_ms_now() {
@@ -27,7 +28,7 @@ std::tm tm_from_ms(double ms) {
 }
 
 // parse offset strings like +03:00 into seconds
-static int parse_offset_seconds(const std::string &zone) {
+static int parse_offset_seconds(const std::string& zone) {
     if (zone.empty()) return 0;
     if (zone == "UTC" || zone == "Z" || zone == "z") return 0;
     std::smatch m;
@@ -47,17 +48,21 @@ static std::string ordinal_suffix(int day) {
     int d = day % 100;
     if (d >= 11 && d <= 13) return "th";
     switch (day % 10) {
-        case 1: return "st";
-        case 2: return "nd";
-        case 3: return "rd";
-        default: return "th";
+        case 1:
+            return "st";
+        case 2:
+            return "nd";
+        case 3:
+            return "rd";
+        default:
+            return "th";
     }
 }
 
 // Very small formatter tailored to the tokens in your spec.
 std::string format_time_from_ms(double ms, const std::string& fmt, const std::string& zone) {
     int offset = parse_offset_seconds(zone);
-    double adjusted_ms = ms + static_cast<double>(offset) * 1000.0; // show in that zone
+    double adjusted_ms = ms + static_cast<double>(offset) * 1000.0;  // show in that zone
     std::tm t = tm_from_ms(adjusted_ms);
 
     // millisecond part (absolute modulo, handle negatives)
@@ -85,39 +90,106 @@ std::string format_time_from_ms(double ms, const std::string& fmt, const std::st
         // 4-char tokens
         if (i + 4 <= fmt.size()) {
             std::string s4 = fmt.substr(i, 4);
-            if (s4 == "YYYY") { out << year; i += 4; continue; }
-            if (s4 == "dddd") { std::ostringstream tmp; tmp << std::put_time(&t, "%A"); out << tmp.str(); i += 4; continue; }
-            if (s4 == "MMMM") { std::ostringstream tmp; tmp << std::put_time(&t, "%B"); out << tmp.str(); i += 4; continue; }
+            if (s4 == "YYYY") {
+                out << year;
+                i += 4;
+                continue;
+            }
+            if (s4 == "dddd") {
+                std::ostringstream tmp;
+                tmp << std::put_time(&t, "%A");
+                out << tmp.str();
+                i += 4;
+                continue;
+            }
+            if (s4 == "MMMM") {
+                std::ostringstream tmp;
+                tmp << std::put_time(&t, "%B");
+                out << tmp.str();
+                i += 4;
+                continue;
+            }
         }
 
         // 3-char tokens
         if (i + 3 <= fmt.size()) {
             std::string s3 = fmt.substr(i, 3);
-            if (s3 == "MMM") { std::ostringstream tmp; tmp << std::put_time(&t, "%b"); out << tmp.str(); i += 3; continue; }
-            if (s3 == "ddd") { std::ostringstream tmp; tmp << std::put_time(&t, "%a"); out << tmp.str(); i += 3; continue; }
-            if (s3 == "SSS") { out << std::setw(3) << std::setfill('0') << milli; i += 3; continue; }
+            if (s3 == "MMM") {
+                std::ostringstream tmp;
+                tmp << std::put_time(&t, "%b");
+                out << tmp.str();
+                i += 3;
+                continue;
+            }
+            if (s3 == "ddd") {
+                std::ostringstream tmp;
+                tmp << std::put_time(&t, "%a");
+                out << tmp.str();
+                i += 3;
+                continue;
+            }
+            if (s3 == "SSS") {
+                out << std::setw(3) << std::setfill('0') << milli;
+                i += 3;
+                continue;
+            }
         }
 
         // 2-char tokens
         if (i + 2 <= fmt.size()) {
             std::string s2 = fmt.substr(i, 2);
-            if (s2 == "YY") { out << std::setw(2) << std::setfill('0') << (year % 100); i += 2; continue; }
-            if (s2 == "MM") { out << std::setw(2) << std::setfill('0') << month; i += 2; continue; }
-            if (s2 == "DD") { out << std::setw(2) << std::setfill('0') << day; i += 2; continue; }
-            if (s2 == "HH") { out << std::setw(2) << std::setfill('0') << hour; i += 2; continue; }
-            if (s2 == "hh") { int hh = hour % 12; if (hh == 0) hh = 12; out << std::setw(2) << std::setfill('0') << hh; i += 2; continue; }
-            if (s2 == "mm") { out << std::setw(2) << std::setfill('0') << minute; i += 2; continue; }
-            if (s2 == "ss") { out << std::setw(2) << std::setfill('0') << second; i += 2; continue; }
-            if (s2 == "Do") { out << day << ordinal_suffix(day); i += 2; continue; }
-            if (s2 == "ZZ") { // +HHMM
+            if (s2 == "YY") {
+                out << std::setw(2) << std::setfill('0') << (year % 100);
+                i += 2;
+                continue;
+            }
+            if (s2 == "MM") {
+                out << std::setw(2) << std::setfill('0') << month;
+                i += 2;
+                continue;
+            }
+            if (s2 == "DD") {
+                out << std::setw(2) << std::setfill('0') << day;
+                i += 2;
+                continue;
+            }
+            if (s2 == "HH") {
+                out << std::setw(2) << std::setfill('0') << hour;
+                i += 2;
+                continue;
+            }
+            if (s2 == "hh") {
+                int hh = hour % 12;
+                if (hh == 0) hh = 12;
+                out << std::setw(2) << std::setfill('0') << hh;
+                i += 2;
+                continue;
+            }
+            if (s2 == "mm") {
+                out << std::setw(2) << std::setfill('0') << minute;
+                i += 2;
+                continue;
+            }
+            if (s2 == "ss") {
+                out << std::setw(2) << std::setfill('0') << second;
+                i += 2;
+                continue;
+            }
+            if (s2 == "Do") {
+                out << day << ordinal_suffix(day);
+                i += 2;
+                continue;
+            }
+            if (s2 == "ZZ") {  // +HHMM
                 int off = parse_offset_seconds(zone);
                 int sign = off >= 0 ? 1 : -1;
                 int aoff = std::abs(off);
                 int oh = aoff / 3600;
                 int om = (aoff % 3600) / 60;
-                std::ostringstream z; z << (sign >= 0 ? "+" : "-")
-                                       << std::setw(2) << std::setfill('0') << oh
-                                       << std::setw(2) << std::setfill('0') << om;
+                std::ostringstream z;
+                z << (sign >= 0 ? "+" : "-")
+                  << std::setw(2) << std::setfill('0') << oh
+                  << std::setw(2) << std::setfill('0') << om;
                 out << z.str();
                 i += 2;
                 continue;
@@ -126,31 +198,80 @@ std::string format_time_from_ms(double ms, const std::string& fmt, const std::st
 
         // 1-char tokens
         char c = fmt[i];
-        if (c == 'Y') { out << year; ++i; continue; }
-        if (c == 'M') { out << month; ++i; continue; }
-        if (c == 'D') { out << day; ++i; continue; }
-        if (c == 'H') { out << hour; ++i; continue; }
-        if (c == 'h') { int hh = hour % 12; if (hh == 0) hh = 12; out << hh; ++i; continue; }
-        if (c == 'm') { out << minute; ++i; continue; }
-        if (c == 's') { out << second; ++i; continue; }
-        if (c == 'S') { // single-digit fractional seconds (hundreds)
-            // S -> first digit of milliseconds, SS -> two digits, SSS -> three digits handled above
-            out << (milli / 100); ++i; continue;
+        if (c == 'Y') {
+            out << year;
+            ++i;
+            continue;
         }
-        if (c == 'a') { out << (hour < 12 ? "am" : "pm"); ++i; continue; }
-        if (c == 'A') { out << (hour < 12 ? "AM" : "PM"); ++i; continue; }
-        if (c == 'Z') { // +HH:MM
+        if (c == 'M') {
+            out << month;
+            ++i;
+            continue;
+        }
+        if (c == 'D') {
+            out << day;
+            ++i;
+            continue;
+        }
+        if (c == 'H') {
+            out << hour;
+            ++i;
+            continue;
+        }
+        if (c == 'h') {
+            int hh = hour % 12;
+            if (hh == 0) hh = 12;
+            out << hh;
+            ++i;
+            continue;
+        }
+        if (c == 'm') {
+            out << minute;
+            ++i;
+            continue;
+        }
+        if (c == 's') {
+            out << second;
+            ++i;
+            continue;
+        }
+        if (c == 'S') {  // single-digit fractional seconds (hundreds)
+            // S -> first digit of milliseconds, SS -> two digits, SSS -> three digits handled above
+            out << (milli / 100);
+            ++i;
+            continue;
+        }
+        if (c == 'a') {
+            out << (hour < 12 ? "am" : "pm");
+            ++i;
+            continue;
+        }
+        if (c == 'A') {
+            out << (hour < 12 ? "AM" : "PM");
+            ++i;
+            continue;
+        }
+        if (c == 'Z') {  // +HH:MM
             int off = parse_offset_seconds(zone);
             int oh = std::abs(off) / 3600;
             int om = (std::abs(off) % 3600) / 60;
-            std::ostringstream z; z << (off >= 0 ? "+" : "-")
-                                   << std::setw(2) << std::setfill('0') << oh << ":" << std::setw(2) << std::setfill('0') << om;
+            std::ostringstream z;
+            z << (off >= 0 ? "+" : "-")
+              << std::setw(2) << std::setfill('0') << oh << ":" << std::setw(2) << std::setfill('0') << om;
             out << z.str();
             ++i;
             continue;
         }
-        if (c == 'x') { out << msll; ++i; continue; } // unix ms
-        if (c == 'X') { out << (msll / 1000); ++i; continue; } // unix seconds
+        if (c == 'x') {
+            out << msll;
+            ++i;
+            continue;
+        }  // unix ms
+        if (c == 'X') {
+            out << (msll / 1000);
+            ++i;
+            continue;
+        }  // unix seconds
 
         // default: literal char
         out << c;
@@ -165,7 +286,11 @@ double parse_time_to_ms(const std::string& s, const std::string& fmt, const std:
     std::smatch m;
     std::regex num_re(R"(^\s*\d+\s*$)");
     if (std::regex_match(s, m, num_re)) {
-        try { long long v = std::stoll(s); return static_cast<double>(v); } catch(...) { /* fallthrough */ }
+        try {
+            long long v = std::stoll(s);
+            return static_cast<double>(v);
+        } catch (...) { /* fallthrough */
+        }
     }
 
     std::tm t{};
@@ -173,9 +298,12 @@ double parse_time_to_ms(const std::string& s, const std::string& fmt, const std:
 
     if (!fmt.empty()) {
         std::string mapped;
-        if (fmt == "YYYY-MM-DD") mapped = "%Y-%m-%d";
-        else if (fmt == "YYYY-MM-DD H:mm:ss") mapped = "%Y-%m-%d %H:%M:%S";
-        else mapped = "%Y-%m-%d"; // fallback guess
+        if (fmt == "YYYY-MM-DD")
+            mapped = "%Y-%m-%d";
+        else if (fmt == "YYYY-MM-DD H:mm:ss")
+            mapped = "%Y-%m-%d %H:%M:%S";
+        else
+            mapped = "%Y-%m-%d";  // fallback guess
 
         std::istringstream iss(s);
         iss >> std::get_time(&t, mapped.c_str());
@@ -184,11 +312,13 @@ double parse_time_to_ms(const std::string& s, const std::string& fmt, const std:
         // try ISO-like attempts
         std::istringstream iss1(s);
         iss1 >> std::get_time(&t, "%Y-%m-%dT%H:%M:%S");
-        if (!iss1.fail()) ok = true;
+        if (!iss1.fail())
+            ok = true;
         else {
             std::istringstream iss2(s);
             iss2 >> std::get_time(&t, "%Y-%m-%d %H:%M:%S");
-            if (!iss2.fail()) ok = true;
+            if (!iss2.fail())
+                ok = true;
             else {
                 std::istringstream iss3(s);
                 iss3 >> std::get_time(&t, "%Y-%m-%d");
@@ -224,7 +354,7 @@ void init_time(EnvPtr env) {
     auto add_fn = [&](const std::string& name,
                       std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
         auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
-        Environment::Variable var { fn, true };
+        Environment::Variable var{fn, true};
         env->set(name, var);
     };
 

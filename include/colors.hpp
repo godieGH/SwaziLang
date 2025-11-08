@@ -1,7 +1,7 @@
 
-#include <string>    // for std::string
 #include <unistd.h>  // for isatty(), STDOUT_FILENO
 
+#include <string>  // for std::string
 
 namespace Color {
 bool supports_color() {

@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Source files
-file(GLOB_RECURSE SOURCES "src/*.cpp")
+file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.cc" "src/*.c")
 
 add_library(linenoise thirdparty/linenoise/linenoise.c)
 target_include_directories(linenoise PUBLIC thirdparty/linenoise/)
@@ -14,7 +14,7 @@ target_include_directories(linenoise PUBLIC thirdparty/linenoise/)
 # Create executable target
 add_executable(swazi ${SOURCES})
 # Include headers for this target
-target_include_directories(swazi PRIVATE include)
+target_include_directories(swazi PRIVATE include thirdparty/libuv-1.51.0/include)
 
 # make the project version available as SWAZI_VERSION (a C string) to the compiler
 # use the PROJECT_VERSION variable set by `project(... VERSION ...)`
@@ -41,6 +41,16 @@ endif()
 # target_link_libraries(swazi PRIVATE <lib>)
 
 target_link_libraries(swazi PRIVATE linenoise)
+
+# --- Build and include local libuv from the thirdparty directory ---
+# Add libuv's CMakeLists.txt to the build. This makes libuv's targets available.
+add_subdirectory(thirdparty/libuv-1.51.0)
+
+# Link the libuv target to your executable.
+# The target name provided by libuv's own CMake is 'uv'.
+target_link_libraries(swazi PRIVATE uv)
+# --- End local libuv integration ---
+
 
 # --- BEGIN embed builtins: regenerate when any lib/*.sl or lib/*.swz changes ---
 find_package(Python COMPONENTS Interpreter REQUIRED)
@@ -78,3 +88,15 @@ target_include_directories(swazi PRIVATE "${GENERATED_DIR}" "${CMAKE_SOURCE_DIR}
 target_sources(swazi PRIVATE "${GENERATED_BUILTIN_CPP}")
 add_dependencies(swazi generate_builtins)
 # --- END embed builtins ---
+
+
+
+
+# --- INSTALLATION RULES ---
+
+# Install the 'swazi' executable to the 'bin' directory 
+# under the installation prefix (CMAKE_INSTALL_PREFIX).
+install(TARGETS swazi DESTINATION bin)
+
+# You may also want to install project headers if they are used by others
+# install(DIRECTORY include/ DESTINATION include) 

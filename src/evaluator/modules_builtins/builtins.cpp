@@ -656,8 +656,7 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             if (res != CURLE_OK) {
                 throw SwaziError("HttpError", std::string("http.get failed: ") + curl_easy_strerror(res), token.loc);
             }
-            return Value{ ctx.buf };
-        }, env);
+            return Value{ ctx.buf }; }, env);
         obj->properties["get"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
@@ -700,34 +699,25 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             if (res != CURLE_OK) {
                 throw SwaziError("HttpError", std::string("http.post failed: ") + curl_easy_strerror(res), token.loc);
             }
-            return Value{ ctx.buf };
-        }, env);
+            return Value{ ctx.buf }; }, env);
         obj->properties["post"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // http.createServer(handler) -> throws (not implemented in builtin). We provide a clear error.
     {
-        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            throw SwaziError("NotImplementedError", "http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar).", token.loc);
-        }, env);
+        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("NotImplementedError", "http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar).", token.loc); }, env);
         obj->properties["createServer"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
 #else
     // Stubs when libcurl is not available
-    auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        throw SwaziError("HttpError", "http.get native module requires libcurl support. Build with libcurl or provide an external http module.", token.loc);
-    }, env);
+    auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("HttpError", "http.get native module requires libcurl support. Build with libcurl or provide an external http module.", token.loc); }, env);
     obj->properties["get"] = PropertyDescriptor{fn_get, false, false, false, Token()};
 
-    auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        throw SwaziError("HttpError", "http.post native module requires libcurl support. Build with libcurl or provide an external http module.", token.loc);
-    }, env);
+    auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("HttpError", "http.post native module requires libcurl support. Build with libcurl or provide an external http module.", token.loc); }, env);
     obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
 
-    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        throw SwaziError("NotImplementedError", "http.createServer is not available in builtin without a server backend.", token.loc);
-    }, env);
+    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("NotImplementedError", "http.createServer is not available in builtin without a server backend.", token.loc); }, env);
     obj->properties["createServer"] = PropertyDescriptor{fn_server, false, false, false, Token()};
 #endif
 
@@ -942,13 +932,13 @@ static std::string json_stringify_value(const Value& v, std::unordered_set<const
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr a = std::get<ArrayPtr>(v);
-        
+
         ArrayValue* p = a.get();
-        if(arrvisited.count(p)) {
-          throw SwaziError("JsonError", "Converting circular structure to JSON", token.loc);
+        if (arrvisited.count(p)) {
+            throw SwaziError("JsonError", "Converting circular structure to JSON", token.loc);
         };
         arrvisited.insert(p);
-        
+
         std::ostringstream ss;
         ss << '[';
         bool first = true;
@@ -962,13 +952,13 @@ static std::string json_stringify_value(const Value& v, std::unordered_set<const
     }
     if (std::holds_alternative<ObjectPtr>(v)) {
         ObjectPtr o = std::get<ObjectPtr>(v);
-        
+
         ObjectValue* p = o.get();
-        if(objvisited.count(p)) {
-          throw SwaziError("JsonError", "Converting circular structure to JSON", token.loc);
+        if (objvisited.count(p)) {
+            throw SwaziError("JsonError", "Converting circular structure to JSON", token.loc);
         };
         objvisited.insert(p);
-        
+
         std::ostringstream ss;
         ss << '{';
         bool first = true;

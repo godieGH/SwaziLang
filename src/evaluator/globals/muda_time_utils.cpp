@@ -1,32 +1,35 @@
-#include "token.hpp"
-#include "SwaziError.hpp"
 #include "muda_time_utils.hpp"
-#include <sstream>
-#include <stdexcept>
+
 #include <algorithm>
 #include <cstring>
+#include <sstream>
+#include <stdexcept>
+
+#include "SwaziError.hpp"
+#include "token.hpp"
 
 #if !defined(_WIN32)
-#include <time.h> // strptime, timegm
+#include <time.h>  // strptime, timegm
 #endif
 
 using namespace std;
 
 // A few permissive ISO-like parses: epoch (digits), YYYY-MM-DD[ H:MM[:SS]]
-double parse_iso_like_local(const std::string &s, Token token) {
+double parse_iso_like_local(const std::string& s, Token token) {
     // numeric epoch ms?
-    bool allDigits = !s.empty() && (std::all_of(s.begin(), s.end(), [](char c){
-        return std::isdigit((unsigned char)c) || c=='+' || c=='-' || c=='.';
+    bool allDigits = !s.empty() && (std::all_of(s.begin(), s.end(), [](char c) {
+        return std::isdigit((unsigned char)c) || c == '+' || c == '-' || c == '.';
     }));
     if (allDigits) {
         try {
             long long v = std::stoll(s);
             return static_cast<double>(v);
-        } catch (...) { /* fallthrough */ }
+        } catch (...) { /* fallthrough */
+        }
     }
 
-    int year=0, mon=0, day=0, hour=0, min=0, sec=0;
-    if (sscanf(s.c_str(), "%4d-%2d-%2d %2d:%2d:%2d", &year,&mon,&day,&hour,&min,&sec) >= 3) {
+    int year = 0, mon = 0, day = 0, hour = 0, min = 0, sec = 0;
+    if (sscanf(s.c_str(), "%4d-%2d-%2d %2d:%2d:%2d", &year, &mon, &day, &hour, &min, &sec) >= 3) {
         std::tm tm = {};
         tm.tm_year = year - 1900;
         tm.tm_mon = mon - 1;
@@ -41,7 +44,7 @@ double parse_iso_like_local(const std::string &s, Token token) {
 #endif
         return static_cast<double>(static_cast<long long>(tt) * 1000LL);
     }
-    if (sscanf(s.c_str(), "%4d-%2d-%2d %2d:%2d", &year,&mon,&day,&hour,&min) >= 3) {
+    if (sscanf(s.c_str(), "%4d-%2d-%2d %2d:%2d", &year, &mon, &day, &hour, &min) >= 3) {
         std::tm tm = {};
         tm.tm_year = year - 1900;
         tm.tm_mon = mon - 1;
@@ -56,7 +59,7 @@ double parse_iso_like_local(const std::string &s, Token token) {
 #endif
         return static_cast<double>(static_cast<long long>(tt) * 1000LL);
     }
-    if (sscanf(s.c_str(), "%4d-%2d-%2d", &year,&mon,&day) == 3) {
+    if (sscanf(s.c_str(), "%4d-%2d-%2d", &year, &mon, &day) == 3) {
         std::tm tm = {};
         tm.tm_year = year - 1900;
         tm.tm_mon = mon - 1;
@@ -72,11 +75,11 @@ double parse_iso_like_local(const std::string &s, Token token) {
 }
 
 // parse with user-provided format through strptime (POSIX) or std::get_time on Windows
-double parse_date_string_with_format_local(const std::string &input, const std::string &userFmt, Token token) {
+double parse_date_string_with_format_local(const std::string& input, const std::string& userFmt, Token token) {
     // map user tokens to strptime tokens, simple mapping
-    auto convert_user_fmt_to_strptime = [](const std::string &fmt)->std::string {
+    auto convert_user_fmt_to_strptime = [](const std::string& fmt) -> std::string {
         std::string out = fmt;
-        auto replace_all = [&](const std::string &from, const std::string &to) {
+        auto replace_all = [&](const std::string& from, const std::string& to) {
             size_t pos = 0;
             while ((pos = out.find(from, pos)) != std::string::npos) {
                 out.replace(pos, from.size(), to);
@@ -101,7 +104,7 @@ double parse_date_string_with_format_local(const std::string &input, const std::
     std::tm tm = {};
 #if !defined(_WIN32)
     // POSIX: use strptime which is widely available on Linux/Android
-    char *res = strptime(input.c_str(), fmt.c_str(), &tm);
+    char* res = strptime(input.c_str(), fmt.c_str(), &tm);
     if (!res) {
         throw SwaziError("RuntimeError", std::string("Failed to parse date '") + input + "' with format '" + userFmt + "'", token.loc);
     }
@@ -132,7 +135,7 @@ double parse_date_string_with_format_local(const std::string &input, const std::
 double value_to_ms_or_throw(const Value& v, Token token) {
     if (std::holds_alternative<double>(v)) return std::get<double>(v);
     if (std::holds_alternative<std::string>(v)) {
-        const std::string &s = std::get<std::string>(v);
+        const std::string& s = std::get<std::string>(v);
         // try numeric string first
         try {
             long long val = std::stoll(s);

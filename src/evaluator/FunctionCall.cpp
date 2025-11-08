@@ -27,13 +27,13 @@ void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromiseP
             evaluate_statement(stmt, frame->env, &ret_val, &did_return);
 
             if (did_return) {
-    if (promise) {
-        // Use the evaluator helper so resolution is always delivered via microtasks
-        this->fulfill_promise(promise, ret_val);
-    }
-    pop_frame();
-    return;
-}
+                if (promise) {
+                    // Use the evaluator helper so resolution is always delivered via microtasks
+                    this->fulfill_promise(promise, ret_val);
+                }
+                pop_frame();
+                return;
+            }
 
             // advance to next statement only on successful evaluation (no suspension)
             frame->next_statement_index++;
@@ -43,15 +43,15 @@ void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromiseP
         } catch (const std::exception& e) {
             // Fatal exception while executing an async function -> reject the promise
             if (promise) {
-              this->reject_promise(promise, Value{std::string(e.what())});
+                this->reject_promise(promise, Value{std::string(e.what())});
             }
             pop_frame();
             return;
         } catch (...) {
             // unknown throw -> reject with a generic reason
             if (promise) {
-    this->reject_promise(promise, Value{std::string("unknown exception")});
-}
+                this->reject_promise(promise, Value{std::string("unknown exception")});
+            }
             pop_frame();
             return;
         }
@@ -59,7 +59,7 @@ void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromiseP
 
     // Function completed without explicit return -> resolve undefined
     if (promise) {
-      this->fulfill_promise(promise, std::monostate{});
+        this->fulfill_promise(promise, std::monostate{});
     }
     pop_frame();
 }
@@ -246,10 +246,9 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             pop_frame();
             return promise;
         } catch (...) {
-          this->reject_promise(promise, Value{std::string("unknown exception")});
-          pop_frame();
-          return promise;
-          
+            this->reject_promise(promise, Value{std::string("unknown exception")});
+            pop_frame();
+            return promise;
         }
 
         // Return the promise (either pending because we suspended, or already fulfilled)

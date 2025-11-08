@@ -54,8 +54,7 @@ using Value = std::variant<
     ArrayPtr,
     ObjectPtr,
     ClassPtr,
-    PromisePtr
->;
+    PromisePtr>;
 
 struct PropertyDescriptor {
     Value value;
@@ -79,7 +78,9 @@ struct ObjectValue {
 };
 
 struct PromiseValue {
-    enum class State { PENDING, FULFILLED, REJECTED };
+    enum class State { PENDING,
+        FULFILLED,
+        REJECTED };
     State state = State::PENDING;
     Value result;  // fulfilled value or rejection reason
 
@@ -121,7 +122,7 @@ struct FunctionValue {
         const std::shared_ptr<FunctionDeclarationNode>& b,
         const EnvPtr& env,
         const Token& tok) : name(nm),
-                            parameters(),     // default-initialize parameters, we'll fill below
+                            parameters(),  // default-initialize parameters, we'll fill below
                             body(b),
                             closure(env),
                             token(tok),
@@ -199,12 +200,11 @@ struct LoopControl {
     bool did_continue = false;
 };
 
-
 struct SuspendExecution : public std::exception {
-     // Exception used to short-circuit evaluation when an async await suspends the current frame.
-     // It's not an error — the executor will catch it, keep the frame on the stack and return.
-     const char* what() const noexcept override { return "Execution suspended for await"; }
- };
+    // Exception used to short-circuit evaluation when an async await suspends the current frame.
+    // It's not an error — the executor will catch it, keep the frame on the stack and return.
+    const char* what() const noexcept override { return "Execution suspended for await"; }
+};
 
 // Evaluator
 class Evaluator {
@@ -222,18 +222,17 @@ class Evaluator {
 
     void set_entry_point(const std::string& filename);
     void set_cli_args(const std::vector<std::string>& args);
-    
+
     // Accessor for the scheduler (non-owning for now).
     Scheduler* scheduler() { return scheduler_.get(); }
-    
+
     // Public wrapper that lets native builtins synchronously invoke interpreter-callable functions.
     // This is a thin public forwarder to the private call_function implementation.
     Value invoke_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
-    
+
     void fulfill_promise(PromisePtr p, const Value& value);
     void reject_promise(PromisePtr p, const Value& reason);
     void report_unhandled_rejection(PromisePtr p);
-    
 
    private:
     EnvPtr global_env;
@@ -243,7 +242,7 @@ class Evaluator {
     std::vector<std::string> cli_args;
 
     ClassPtr current_class_context = nullptr;
-    
+
     // Scheduler instance used to host microtasks/macrotasks and future frame continuations.
     // Initialized in constructor (Phase 0). Using unique_ptr to avoid problems with header inclusion order.
     std::unique_ptr<Scheduler> scheduler_;
@@ -255,8 +254,7 @@ class Evaluator {
     CallFramePtr current_frame();
     void execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise);
     void execute_frame_until_return(CallFramePtr frame);
-    
-    
+
     void populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main);
 
     // Module loader records for caching and circular dependency handling.
