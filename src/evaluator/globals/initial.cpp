@@ -1299,6 +1299,90 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
         var.is_constant = true;
         env->set("Promise", var);
     }
+    
+ 
+    {
+        // Ensure we have an ObjectValue to host the static methods:
+        ObjectPtr promise_holder = nullptr;
+    
+        if (env->has("Promise")) {
+            Value pv = env->get("Promise").value;
+            if (std::holds_alternative<ObjectPtr>(pv)) {
+                promise_holder = std::get<ObjectPtr>(pv);
+            } else if (std::holds_alternative<ClassPtr>(pv)) {
+                ClassPtr cp = std::get<ClassPtr>(pv);
+                if (cp) promise_holder = cp->static_table;
+            }
+        }
+    
+        // If no existing Promise object/class, create a plain object and bind it as Promise
+        if (!promise_holder) {
+            promise_holder = std::make_shared<ObjectValue>();
+            Environment::Variable v;
+            v.value = promise_holder;
+            v.is_constant = true;
+            env->set("Promise", v);
+        }
+    
+        // token used for diagnostics on native functions
+        Token tResolve;
+        tResolve.type = TokenType::IDENTIFIER;
+        tResolve.loc = TokenLocation("<builtin:Promise.resolve>", 0, 0, 0);
+    
+        // Promise.resolve(value)
+        auto native_promise_resolve = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+            // No arg -> fulfilled undefined
+            if (args.empty()) {
+                auto p = std::make_shared<PromiseValue>();
+                p->state = PromiseValue::State::FULFILLED;
+                p->result = std::monostate{};
+                return Value{p};
+            }
+    
+            // If already a proper PromisePtr, return it directly
+            if (std::holds_alternative<PromisePtr>(args[0])) {
+                return args[0];
+            }
+    
+            // If an object that wraps a promise (has "__promise__"), unwrap and return that
+            if (std::holds_alternative<ObjectPtr>(args[0])) {
+                ObjectPtr o = std::get<ObjectPtr>(args[0]);
+                if (o) {
+                    auto it = o->properties.find("__promise__");
+                    if (it != o->properties.end() && std::holds_alternative<PromisePtr>(it->second.value)) {
+                        return it->second.value;
+                    }
+                }
+            }
+    
+            // Otherwise create a fulfilled promise with provided value
+            auto p = std::make_shared<PromiseValue>();
+            p->state = PromiseValue::State::FULFILLED;
+            p->result = args[0];
+            return Value{p};
+        };
+    
+        Token tReject;
+        tReject.type = TokenType::IDENTIFIER;
+        tReject.loc = TokenLocation("<builtin:Promise.reject>", 0, 0, 0);
+    
+        // Promise.reject(reason)
+        auto native_promise_reject = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+            auto p = std::make_shared<PromiseValue>();
+            p->state = PromiseValue::State::REJECTED;
+            if (args.empty()) p->result = std::monostate{};
+            else p->result = args[0];
+            return Value{p};
+        };
+    
+        // Create FunctionValue wrappers and attach as properties
+        auto fnResolve = std::make_shared<FunctionValue>(std::string("native:Promise.resolve"), native_promise_resolve, nullptr, tResolve);
+        promise_holder->properties["resolve"] = PropertyDescriptor{fnResolve, false, false, false, tResolve};
+    
+        auto fnReject = std::make_shared<FunctionValue>(std::string("native:Promise.reject"), native_promise_reject, nullptr, tReject);
+        promise_holder->properties["reject"] = PropertyDescriptor{fnReject, false, false, false, tReject};
+    }
+    
 
     // -----------------------
     // End Promise runtime
