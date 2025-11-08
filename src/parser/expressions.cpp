@@ -1021,6 +1021,8 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         node->token = awaitTok;
         // 'await' binds to a unary expression in many JS-like grammars
         node->expression = parse_unary();
+        static size_t next_await_id = 1;
+        node->await_id = next_await_id++;
         return node;
     }
 

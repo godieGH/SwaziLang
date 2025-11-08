@@ -52,36 +52,52 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
     // --- await expression (suspends current async frame) ---
     if (auto awaitNode = dynamic_cast<AwaitExpressionNode*>(expr)) {
-        // Short-circuit: if resumption already happened, return result or rethrow stored exception
+        // Use stable await_id as the key (assigned by parser). Cloning AST will preserve await_id.
         auto frame = current_frame();
+
+        if (!awaitNode->await_id) {
+            // missing id indicates parser didn't assign ids — fail fast with explanatory error
+            throw SwaziError("InternalError", "Await expression missing await_id; parser must assign stable ids.", awaitNode->token.loc);
+        }
+        size_t aid = awaitNode->await_id;
+
+        // Short-circuit: if resumption already happened, return result or rethrow stored exception
         if (frame) {
-            // If this await was already settled during a prior resume, use stored result
-            auto it_res = frame->awaited_results.find(awaitNode);
+            auto it_res = frame->awaited_results.find(aid);
             if (it_res != frame->awaited_results.end()) {
                 Value v = it_res->second;
                 // erase state now (one-time consumption)
                 frame->awaited_results.erase(it_res);
-                frame->awaited_promises.erase(awaitNode);
+                frame->awaited_promises.erase(aid);
                 return v;
             }
-            auto it_ex = frame->awaited_exceptions.find(awaitNode);
+            auto it_ex = frame->awaited_exceptions.find(aid);
             if (it_ex != frame->awaited_exceptions.end()) {
                 std::exception_ptr ep = it_ex->second;
                 frame->awaited_exceptions.erase(it_ex);
-                frame->awaited_promises.erase(awaitNode);
+                frame->awaited_promises.erase(aid);
                 std::rethrow_exception(ep);
             }
         }
 
-        // Evaluate operand exactly once -> must capture the resulting Promise so we do not re-run call
+        // Evaluate operand exactly once -> must capture resulting Promise
         Value operand = evaluate_expression(awaitNode->expression.get(), env);
 
         // Accept either a raw PromisePtr or an object that contains a "__promise__" slot.
+        auto extract_promise_from_value = [](const Value& v) -> PromisePtr {
+            if (std::holds_alternative<PromisePtr>(v)) return std::get<PromisePtr>(v);
+            if (std::holds_alternative<ObjectPtr>(v)) {
+                ObjectPtr obj = std::get<ObjectPtr>(v);
+                if (!obj) return nullptr;
+                auto it = obj->properties.find("__promise__");
+                if (it == obj->properties.end()) return nullptr;
+                if (std::holds_alternative<PromisePtr>(it->second.value)) return std::get<PromisePtr>(it->second.value);
+            }
+            return nullptr;
+        };
+
         PromisePtr p = extract_promise_from_value(operand);
 
-        // If operand is not a Promise-like, wrap it as a fulfilled Promise (Promise.resolve behavior).
-        // This makes `await <non-promise>` suspend & resume asynchronously (microtask),
-        // matching the JS semantics described by the user.
         if (!p) {
             auto resolved = std::make_shared<PromiseValue>();
             resolved->state = PromiseValue::State::FULFILLED;
@@ -89,134 +105,93 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             p = resolved;
         }
 
-        // Ensure await is used only inside async function frames
         bool inAsync = false;
         if (frame) {
-            // Accept either the frame flag (set by call_function) OR the underlying FunctionValue's is_async
             inAsync = frame->is_async || (frame->function && frame->function->is_async);
         }
         if (!inAsync) {
             throw SwaziError("RuntimeError", "await can only be used inside an async function.", awaitNode->token.loc);
         }
 
-        // store promise reference in the frame to avoid re-evaluation on resume
-        frame->awaited_promises[awaitNode] = p;
+        // store promise reference by numeric id
+        frame->awaited_promises[aid] = p;
 
-        // If promise already settled, stamp result/exception now.
+        // If promise already settled -> stamp result/exception and schedule resume
         if (p->state == PromiseValue::State::FULFILLED) {
-            frame->awaited_results[awaitNode] = p->result;
-            // schedule microtask to resume execution of this frame (ensures asynchronous resumption)
+            frame->awaited_results[aid] = p->result;
             if (scheduler()) {
                 PromisePtr callPromise = frame->pending_promise;
                 scheduler()->enqueue_microtask([this, frame, callPromise]() {
                     frame->is_suspended = false;
-                    try {
-                        execute_frame_until_await_or_return(frame, callPromise);
-                    } catch (...) {
-                        // swallow; caller handles logging if needed
-                    }
+                    try { execute_frame_until_await_or_return(frame, callPromise); } catch (...) {}
                 });
             } else {
-                // no scheduler available — resume immediately on this thread (still treat as suspension)
                 frame->is_suspended = false;
-                try {
-                    execute_frame_until_await_or_return(frame, frame->pending_promise);
-                } catch (...) {
-                }
+                try { execute_frame_until_await_or_return(frame, frame->pending_promise); } catch (...) {}
             }
-            // mark suspended and unwind using existing control flow mechanism
             frame->is_suspended = true;
             throw SuspendExecution();
         }
 
-        // use the frame's pending_promise when scheduling the resume (rejection path)
         if (p->state == PromiseValue::State::REJECTED) {
-            // capture exception information; store as exception_ptr so we rethrow on resume
             std::exception_ptr eptr;
-            try {
-                throw std::runtime_error(to_string_value(p->result));
-            } catch (...) {
-                eptr = std::current_exception();
-            }
-            frame->awaited_exceptions[awaitNode] = eptr;
-
+            try { throw std::runtime_error(to_string_value(p->result)); } catch (...) { eptr = std::current_exception(); }
+            frame->awaited_exceptions[aid] = eptr;
             if (scheduler()) {
                 PromisePtr callPromise = frame->pending_promise;
                 scheduler()->enqueue_microtask([this, frame, callPromise]() {
                     frame->is_suspended = false;
-                    try {
-                        execute_frame_until_await_or_return(frame, callPromise);
-                    } catch (...) {
-                    }
+                    try { execute_frame_until_await_or_return(frame, callPromise); } catch (...) {}
                 });
             } else {
                 frame->is_suspended = false;
-                try {
-                    execute_frame_until_await_or_return(frame, frame->pending_promise);
-                } catch (...) {
-                }
+                try { execute_frame_until_await_or_return(frame, frame->pending_promise); } catch (...) {}
             }
             frame->is_suspended = true;
             throw SuspendExecution();
         }
 
-        // Pending -> register then/catch callbacks that stamp the resolution into frame->awaited_results/awaited_exceptions
-        // and enqueue a microtask that resumes frame execution.
+        // Pending -> register then/catch callbacks that stamp resolution into frame->awaited_*[aid]
         {
             PromisePtr pcopy = p;
-            Token resumeTok = awaitNode->token;
+            size_t captured_aid = aid; // capture stable id for lambdas below
 
-            pcopy->then_callbacks.push_back([this, frame, awaitNode](Value res) {
-                frame->awaited_results[awaitNode] = res;
+            pcopy->then_callbacks.push_back([this, frame, captured_aid](Value res) {
+                frame->awaited_results[captured_aid] = res;
                 if (scheduler()) {
                     PromisePtr callPromise = frame->pending_promise;
                     scheduler()->enqueue_microtask([this, frame, callPromise]() {
                         frame->is_suspended = false;
-                        try {
-                            execute_frame_until_await_or_return(frame, callPromise);
-                        } catch (...) {
-                        }
+                        try { execute_frame_until_await_or_return(frame, callPromise); } catch (...) {}
                     });
                 } else {
                     frame->is_suspended = false;
-                    try {
-                        execute_frame_until_await_or_return(frame, frame->pending_promise);
-                    } catch (...) {
-                    }
+                    try { execute_frame_until_await_or_return(frame, frame->pending_promise); } catch (...) {}
                 }
             });
-            pcopy->catch_callbacks.push_back([this, frame, awaitNode](Value reason) {
+
+            pcopy->catch_callbacks.push_back([this, frame, captured_aid](Value reason) {
                 std::exception_ptr eptr;
-                try {
-                    throw std::runtime_error(to_string_value(reason));
-                } catch (...) {
-                    eptr = std::current_exception();
-                }
-                frame->awaited_exceptions[awaitNode] = eptr;
+                try { throw std::runtime_error(to_string_value(reason)); } catch (...) { eptr = std::current_exception(); }
+                frame->awaited_exceptions[captured_aid] = eptr;
                 if (scheduler()) {
                     PromisePtr callPromise = frame->pending_promise;
                     scheduler()->enqueue_microtask([this, frame, callPromise]() {
                         frame->is_suspended = false;
-                        try {
-                            execute_frame_until_await_or_return(frame, callPromise);
-                        } catch (...) {
-                        }
+                        try { execute_frame_until_await_or_return(frame, callPromise); } catch (...) {}
                     });
                 } else {
                     frame->is_suspended = false;
-                    try {
-                        execute_frame_until_await_or_return(frame, frame->pending_promise);
-                    } catch (...) {
-                    }
+                    try { execute_frame_until_await_or_return(frame, frame->pending_promise); } catch (...) {}
                 }
             });
 
-            // mark suspended and unwind using existing control flow mechanism
             frame->is_suspended = true;
             throw SuspendExecution();
         }
     }
-
+    
+    
     // Template literal evaluation: concatenate quasis and evaluated expressions.
     if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {
         // quasis.size() is expected to be expressions.size() + 1, but tolerate mismatches.

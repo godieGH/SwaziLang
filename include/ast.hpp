@@ -150,7 +150,7 @@ struct CallExpressionNode : public ExpressionNode {
 
 struct AwaitExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> expression;  // the operand to await
-
+    size_t await_id = 0;
     std::string to_string() const override {
         return "await " + (expression ? expression->to_string() : "<null>");
     }
@@ -158,6 +158,7 @@ struct AwaitExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> clone() const override {
         auto n = std::make_unique<AwaitExpressionNode>();
         n->token = token;
+        n->await_id = await_id;
         n->expression = expression ? expression->clone() : nullptr;
         return n;
     }
