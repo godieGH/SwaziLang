@@ -27,19 +27,13 @@ void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromiseP
             evaluate_statement(stmt, frame->env, &ret_val, &did_return);
 
             if (did_return) {
-                // Fulfill the promise with return value
-                if (promise) {
-                    promise->state = PromiseValue::State::FULFILLED;
-                    promise->result = ret_val;
-                    // schedule then callbacks as microtasks
-                    for (auto& cb : promise->then_callbacks) {
-                        Value rv = ret_val;
-                        scheduler()->enqueue_microtask([cb, rv]() { try { cb(rv); } catch (...) {} });
-                    }
-                }
-                pop_frame();
-                return;
-            }
+    if (promise) {
+        // Use the evaluator helper so resolution is always delivered via microtasks
+        this->fulfill_promise(promise, ret_val);
+    }
+    pop_frame();
+    return;
+}
 
             // advance to next statement only on successful evaluation (no suspension)
             frame->next_statement_index++;
@@ -49,26 +43,15 @@ void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromiseP
         } catch (const std::exception& e) {
             // Fatal exception while executing an async function -> reject the promise
             if (promise) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = std::string(e.what());
-                // schedule catch callbacks as microtasks
-                for (auto& cb : promise->catch_callbacks) {
-                    Value reason = promise->result;
-                    scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
-                }
+              this->reject_promise(promise, Value{std::string(e.what())});
             }
             pop_frame();
             return;
         } catch (...) {
             // unknown throw -> reject with a generic reason
             if (promise) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = std::string("unknown exception");
-                for (auto& cb : promise->catch_callbacks) {
-                    Value reason = promise->result;
-                    scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
-                }
-            }
+    this->reject_promise(promise, Value{std::string("unknown exception")});
+}
             pop_frame();
             return;
         }
@@ -76,11 +59,7 @@ void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromiseP
 
     // Function completed without explicit return -> resolve undefined
     if (promise) {
-        promise->state = PromiseValue::State::FULFILLED;
-        promise->result = std::monostate{};
-        for (auto& cb : promise->then_callbacks) {
-            scheduler()->enqueue_microtask([cb]() { try { cb(std::monostate{}); } catch (...) {} });
-        }
+      this->fulfill_promise(promise, std::monostate{});
     }
     pop_frame();
 }
@@ -262,38 +241,15 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             // the promise is still pending. Resume will be scheduled by await code.
             return promise;
         } catch (const std::exception& e) {
-            // Unexpected exception while starting async function -> reject promise
-            promise->state = PromiseValue::State::REJECTED;
-            promise->result = std::string(e.what());
-            // schedule catch callbacks as microtasks (best-effort)
-            for (auto& cb : promise->catch_callbacks) {
-                Value reason = promise->result;
-                if (scheduler()) {
-                    scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
-                } else {
-                    try {
-                        cb(reason);
-                    } catch (...) {}
-                }
-            }
+            this->reject_promise(promise, Value{std::string(e.what())});
             // ensure frame popped if not already
             pop_frame();
             return promise;
         } catch (...) {
-            promise->state = PromiseValue::State::REJECTED;
-            promise->result = std::string("unknown exception");
-            for (auto& cb : promise->catch_callbacks) {
-                Value reason = promise->result;
-                if (scheduler()) {
-                    scheduler()->enqueue_microtask([cb, reason]() { try { cb(reason); } catch (...) {} });
-                } else {
-                    try {
-                        cb(reason);
-                    } catch (...) {}
-                }
-            }
-            pop_frame();
-            return promise;
+          this->reject_promise(promise, Value{std::string("unknown exception")});
+          pop_frame();
+          return promise;
+          
         }
 
         // Return the promise (either pending because we suspended, or already fulfilled)

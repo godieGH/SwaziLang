@@ -294,8 +294,8 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         return rec->exports;
     }
 
-    if (module_spec == "async" || module_spec == "swazi:async") {
-        const std::string key = "__builtin__:async";
+    if (module_spec == "timers" || module_spec == "swazi:timers") {
+        const std::string key = "__builtin__:timers";
         auto it = module_cache.find(key);
         if (it != module_cache.end()) return it->second->exports;
 
@@ -305,9 +305,9 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         rec->path = key;
         rec->module_env = std::make_shared<Environment>(global_env);
         module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "async", false);
+        populate_module_metadata(rec->module_env, rec->path, "timers", false);
 
-        rec->exports = make_async_exports(rec->module_env);
+        rec->exports = make_timers_exports(rec->module_env);
 
         rec->state = ModuleRecord::State::Loaded;
         return rec->exports;

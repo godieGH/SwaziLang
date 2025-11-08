@@ -181,8 +181,8 @@ static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(c
     throw std::runtime_error("Timer: expected arguments (ms, cb, ...) or (cb, ms, ...) at " + token.loc.to_string());
 }
 
-// Builtin factory: make_async_exports (extended with tolerant timers and nap)
-std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
+// Builtin factory: make_timers_exports (extended with tolerant timers and nap)
+std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto obj = std::make_shared<ObjectValue>();
 
     // Async.subiri(cb, ...args)
@@ -197,8 +197,8 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
     };
     Token tsub;
     tsub.type = TokenType::IDENTIFIER;
-    tsub.loc = TokenLocation("<async>", 0, 0, 0);
-    auto fn_sub = std::make_shared<FunctionValue>(std::string("native:async.subiri"), native_subiri, nullptr, tsub);
+    tsub.loc = TokenLocation("<timers>", 0, 0, 0);
+    auto fn_sub = std::make_shared<FunctionValue>(std::string("native:timers.subiri"), native_subiri, nullptr, tsub);
     obj->properties["subiri"] = PropertyDescriptor{fn_sub, false, false, false, tsub};
 
     // Async.setTimeout(ms, cb) or (cb, ms)
@@ -212,8 +212,8 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
     };
     Token tSet;
     tSet.type = TokenType::IDENTIFIER;
-    tSet.loc = TokenLocation("<async>", 0, 0, 0);
-    auto fn_set = std::make_shared<FunctionValue>(std::string("native:async.setTimeout"), native_setTimeout, nullptr, tSet);
+    tSet.loc = TokenLocation("<timers>", 0, 0, 0);
+    auto fn_set = std::make_shared<FunctionValue>(std::string("native:timers.setTimeout"), native_setTimeout, nullptr, tSet);
     obj->properties["setTimeout"] = PropertyDescriptor{fn_set, false, false, false, tSet};
 
     // Async.clearTimeout(id)
@@ -226,8 +226,8 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
     };
     Token tClear;
     tClear.type = TokenType::IDENTIFIER;
-    tClear.loc = TokenLocation("<async>", 0, 0, 0);
-    auto fn_clear = std::make_shared<FunctionValue>(std::string("native:async.clearTimeout"), native_clearTimeout, nullptr, tClear);
+    tClear.loc = TokenLocation("<timers>", 0, 0, 0);
+    auto fn_clear = std::make_shared<FunctionValue>(std::string("native:timers.clearTimeout"), native_clearTimeout, nullptr, tClear);
     obj->properties["clearTimeout"] = PropertyDescriptor{fn_clear, false, false, false, tClear};
 
     // Async.setInterval(ms, cb) or (cb, ms)
@@ -241,8 +241,8 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
     };
     Token tInt;
     tInt.type = TokenType::IDENTIFIER;
-    tInt.loc = TokenLocation("<async>", 0, 0, 0);
-    auto fn_int = std::make_shared<FunctionValue>(std::string("native:async.setInterval"), native_setInterval, nullptr, tInt);
+    tInt.loc = TokenLocation("<timers>", 0, 0, 0);
+    auto fn_int = std::make_shared<FunctionValue>(std::string("native:timers.setInterval"), native_setInterval, nullptr, tInt);
     obj->properties["setInterval"] = PropertyDescriptor{fn_int, false, false, false, tInt};
 
     // Async.clearInterval(id) -> same as clearTimeout
@@ -277,8 +277,8 @@ std::shared_ptr<ObjectValue> make_async_exports(EnvPtr /*env*/) {
     };
     Token tNap;
     tNap.type = TokenType::IDENTIFIER;
-    tNap.loc = TokenLocation("<async>", 0, 0, 0);
-    auto fn_nap = std::make_shared<FunctionValue>(std::string("native:async.nap"), native_nap, nullptr, tNap);
+    tNap.loc = TokenLocation("<timers>", 0, 0, 0);
+    auto fn_nap = std::make_shared<FunctionValue>(std::string("native:timers.nap"), native_nap, nullptr, tNap);
     obj->properties["nap"] = PropertyDescriptor{fn_nap, false, false, false, tNap};
 
     return obj;

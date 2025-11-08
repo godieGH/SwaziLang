@@ -188,3 +188,85 @@ void Evaluator::set_cli_args(const std::vector<std::string>& args) {
         this->global_env->set("argv", var);
     }
 }
+
+
+
+
+
+// --- Promise resolution helpers (deliver via microtasks and support unhandled rejection reporting) ---
+void Evaluator::fulfill_promise(PromisePtr p, const Value& value) {
+    if (!p) return;
+    if (p->state != PromiseValue::State::PENDING) return;
+    p->state = PromiseValue::State::FULFILLED;
+    p->result = value;
+
+    // Snapshot then callbacks to avoid races if callbacks mutate promise
+    auto callbacks = p->then_callbacks;
+
+    if (scheduler()) {
+        scheduler()->enqueue_microtask([callbacks, value]() mutable {
+            for (auto& cb : callbacks) {
+                try { cb(value); } catch (...) {}
+            }
+        });
+    } else {
+        // Fallback: execute directly (best-effort for no-scheduler mode)
+        for (auto& cb : callbacks) {
+            try { cb(value); } catch (...) {}
+        }
+    }
+}
+
+void Evaluator::reject_promise(PromisePtr p, const Value& reason) {
+    if (!p) return;
+    if (p->state != PromiseValue::State::PENDING) return;
+
+    p->state = PromiseValue::State::REJECTED;
+    p->result = reason;
+
+    // Snapshot catch callbacks
+    auto callbacks = p->catch_callbacks;
+
+    if (scheduler()) {
+        // Deliver catch callbacks in a microtask. After that microtask we schedule
+        // a single additional microtask that checks whether the promise was handled;
+        // we only schedule that "unhandled check" once per promise using the flag.
+        scheduler()->enqueue_microtask([this, p, callbacks, reason]() mutable {
+            // Run user catch callbacks (they may call .then/.catch on the promise)
+            for (auto& cb : callbacks) {
+                try { cb(reason); } catch (...) {}
+            }
+
+            // Schedule the unhandled-rejection check in a subsequent microtask,
+            // but only once for this promise.
+            // This allows handlers attached in the same microtask to be considered.
+            if (!p->unhandled_check_scheduled) {
+                p->unhandled_check_scheduled = true;
+                scheduler()->enqueue_microtask([this, p]() {
+                    if (!p) return;
+                    if (!p->handled && !p->unhandled_reported) {
+                        report_unhandled_rejection(p);
+                    }
+                });
+            }
+        });
+    } else {
+        // No scheduler: run handlers immediately then report if unhandled (best-effort)
+        for (auto& cb : callbacks) {
+            try { cb(reason); } catch (...) {}
+        }
+        if (!p->handled && !p->unhandled_reported) {
+            report_unhandled_rejection(p);
+        }
+    }
+}
+
+void Evaluator::report_unhandled_rejection(PromisePtr p) {
+    if (!p) return;
+    if (p->unhandled_reported) return;
+    p->unhandled_reported = true;
+
+    // Default behavior: print a warning to stderr with reason
+    std::string reason_str = to_string_value(p->result);
+    std::cerr << "UnhandledPromiseRejectionWarning: " << reason_str << std::endl;
+}

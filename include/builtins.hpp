@@ -13,4 +13,4 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env);
 
-std::shared_ptr<ObjectValue> make_async_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr env);

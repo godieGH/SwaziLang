@@ -82,12 +82,20 @@ struct PromiseValue {
     enum class State { PENDING, FULFILLED, REJECTED };
     State state = State::PENDING;
     Value result;  // fulfilled value or rejection reason
-    
+
     // Continuations to run when resolved
     std::vector<std::function<void(Value)>> then_callbacks;
     std::vector<std::function<void(Value)>> catch_callbacks;
-};
 
+    // NEW: whether this promise has an attached handler (then/catch). Used for unhandled rejection detection.
+    bool handled = false;
+
+    // (optional) you can add a small marker if you want to avoid printing multiple times
+    bool unhandled_reported = false;
+
+    // NEW: ensure we only schedule the "unhandled check" microtask once per rejection
+    bool unhandled_check_scheduled = false;
+};
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
     // We keep simple contiguous vector storage, but elements can now be HoleValue
@@ -221,6 +229,11 @@ class Evaluator {
     // Public wrapper that lets native builtins synchronously invoke interpreter-callable functions.
     // This is a thin public forwarder to the private call_function implementation.
     Value invoke_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
+    
+    void fulfill_promise(PromisePtr p, const Value& value);
+    void reject_promise(PromisePtr p, const Value& reason);
+    void report_unhandled_rejection(PromisePtr p);
+    
 
    private:
     EnvPtr global_env;

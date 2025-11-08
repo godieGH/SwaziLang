@@ -1029,363 +1029,328 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     }
     
     
-    
     // -----------------------
-    // Promise runtime (ClassValue) & native helpers
-    // -----------------------
-    // Native: create a PromiseValue that wraps on-instance "__promise__" slot and
-    // provide resolve/reject wrappers that the executor will receive.
-    // We must capture the Evaluator* so we can synchronously call the executor function.
-    auto make_native_fn = [&](const std::string& name,
-                              std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
-        auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
-        Environment::Variable var{fn, true};
-        env->set(name, var);
-    };
+// Promise runtime (ClassValue) & native helpers
+// -----------------------
+// Native: create a PromiseValue that wraps on-instance "__promise__" slot and
+// provide resolve/reject wrappers that the executor will receive.
+// We must capture the Evaluator* so we can synchronously call the executor function.
+auto make_native_fn = [&](const std::string& name,
+                          std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
+    auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
+    Environment::Variable var{fn, true};
+    env->set(name, var);
+};
 
-    // Promise_native_ctor(this, executor)
-    auto native_Promise_native_ctor = [evaluator](const std::vector<Value>& args, EnvPtr callEnv, const Token& tok) -> Value {
-        // Expect: this bound as first arg? In constructor AST we will call Promise_native_ctor(this, executor)
-        if (args.size() < 2) {
-            throw SwaziError("TypeError", "Promise constructor requires an executor function", tok.loc);
-        }
-        // thisObj must be an ObjectPtr (the Promise instance)
-        if (!std::holds_alternative<ObjectPtr>(args[0])) {
-            throw SwaziError("TypeError", "Promise constructor internal error: missing receiver", tok.loc);
-        }
-        ObjectPtr thisObj = std::get<ObjectPtr>(args[0]);
+// Promise_native_ctor(this, executor)
+auto native_Promise_native_ctor = [evaluator](const std::vector<Value>& args, EnvPtr callEnv, const Token& tok) -> Value {
+    // Expect: this bound as first arg? In constructor AST we will call Promise_native_ctor(this, executor)
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "Promise constructor requires an executor function", tok.loc);
+    }
+    // thisObj must be an ObjectPtr (the Promise instance)
+    if (!std::holds_alternative<ObjectPtr>(args[0])) {
+        throw SwaziError("TypeError", "Promise constructor internal error: missing receiver", tok.loc);
+    }
+    ObjectPtr thisObj = std::get<ObjectPtr>(args[0]);
 
-        // Executor may be a FunctionPtr or a native wrapper closure; if not, error
-        if (!std::holds_alternative<FunctionPtr>(args[1])) {
-            throw SwaziError("TypeError", "Promise executor must be a function", tok.loc);
-        }
-        FunctionPtr executor = std::get<FunctionPtr>(args[1]);
+    // Executor may be a FunctionPtr or a native wrapper closure; if not, error
+    if (!std::holds_alternative<FunctionPtr>(args[1])) {
+        throw SwaziError("TypeError", "Promise executor must be a function", tok.loc);
+    }
+    FunctionPtr executor = std::get<FunctionPtr>(args[1]);
 
-        // Create the underlying PromiseValue and attach to instance as private slot "__promise__"
-        auto p = std::make_shared<PromiseValue>();
-        p->state = PromiseValue::State::PENDING;
-        // store into instance
-        PropertyDescriptor pd;
-        pd.value = p;
-        pd.is_private = true;
-        pd.is_readonly = false;
-        pd.is_locked = false;
-        pd.token = tok;
-        thisObj->properties["__promise__"] = std::move(pd);
+    // Create the underlying PromiseValue and attach to instance as private slot "__promise__"
+    auto p = std::make_shared<PromiseValue>();
+    p->state = PromiseValue::State::PENDING;
+    p->handled = false;
+    p->unhandled_reported = false;
 
-        // Build language-callable resolve/reject functions that close over `p`
-        // These are FunctionValue objects (native) that language code can call.
-        // They capture the evaluator pointer so they can schedule microtasks and use evaluator->invoke_function indirectly.
-        auto make_resolve_fn = [evaluator, p](bool isResolve) -> FunctionPtr {
-            auto impl = [evaluator, p, isResolve](const std::vector<Value>& implArgs, EnvPtr /*env*/, const Token& token) -> Value {
-                // resolve(value) or reject(reason)
-                Value val = implArgs.empty() ? std::monostate{} : implArgs[0];
+    // store into instance
+    PropertyDescriptor pd;
+    pd.value = p;
+    pd.is_private = true;
+    pd.is_readonly = false;
+    pd.is_locked = false;
+    pd.token = tok;
+    thisObj->properties["__promise__"] = std::move(pd);
 
-                // Only allow state transition if pending
-                if (p->state != PromiseValue::State::PENDING) return std::monostate{};
+    // Build language-callable resolve/reject functions that close over `p`
+    // These are FunctionValue objects (native) that language code can call.
+    // They capture the evaluator pointer so they can schedule microtasks and use evaluator->invoke_function indirectly.
+    auto make_resolve_fn = [evaluator, p](bool isResolve) -> FunctionPtr {
+        auto impl = [evaluator, p, isResolve](const std::vector<Value>& implArgs, EnvPtr /*env*/, const Token& /*token*/) -> Value {
+            // resolve(value) or reject(reason)
+            Value val = implArgs.empty() ? std::monostate{} : implArgs[0];
 
-                if (isResolve) {
+            // Only allow state transition if pending
+            if (p->state != PromiseValue::State::PENDING) return std::monostate{};
+
+            // Use evaluator helpers so resolution/rejection always schedule microtasks and report unhandled rejections.
+            if (isResolve) {
+                if (evaluator) {
+                    evaluator->fulfill_promise(p, val);
+                } else {
+                    // Fallback: behave like before if evaluator missing
                     p->state = PromiseValue::State::FULFILLED;
                     p->result = val;
-                    // schedule then callbacks as microtasks so they run after current job
-                    for (auto& cb : p->then_callbacks) {
-                        Value rv = p->result;
-                        if (evaluator && evaluator->scheduler()) {
-                            evaluator->scheduler()->enqueue_microtask([cb, rv]() {
-                                try { cb(rv); } catch (...) {}
-                            });
-                        } else {
-                            // fallback: call directly (not ideal)
-                            try { cb(rv); } catch (...) {}
-                        }
-                    }
+                }
+            } else {
+                if (evaluator) {
+                    evaluator->reject_promise(p, val);
                 } else {
                     p->state = PromiseValue::State::REJECTED;
                     p->result = val;
-                    for (auto& cb : p->catch_callbacks) {
-                        Value reason = p->result;
-                        if (evaluator && evaluator->scheduler()) {
-                            evaluator->scheduler()->enqueue_microtask([cb, reason]() {
-                                try { cb(reason); } catch (...) {}
-                            });
-                        } else {
-                            try { cb(reason); } catch (...) {}
-                        }
-                    }
                 }
-                return std::monostate{};
-            };
-            // Provide a helpful name
-            std::string nm = isResolve ? "native:promise.resolve_callback" : "native:promise.reject_callback";
-            return std::make_shared<FunctionValue>(nm, impl, nullptr, Token{});
+            }
+            return std::monostate{};
         };
+        std::string nm = isResolve ? "native:promise.resolve_callback" : "native:promise.reject_callback";
+        return std::make_shared<FunctionValue>(nm, impl, nullptr, Token{});
+    };
 
-        FunctionPtr resolve_fn = make_resolve_fn(true);
-        FunctionPtr reject_fn = make_resolve_fn(false);
+    FunctionPtr resolve_fn = make_resolve_fn(true);
+    FunctionPtr reject_fn = make_resolve_fn(false);
 
-        // Now synchronously invoke the executor with (resolve_fn, reject_fn).
-        // We use evaluator->invoke_function to run the executor in the interpreter context:
-        try {
-            if (!evaluator) throw std::runtime_error("internal: evaluator missing for Promise constructor");
-            // call executor synchronously with two args (resolve, reject). The executor is a FunctionPtr.
-            evaluator->invoke_function(executor, { resolve_fn, reject_fn }, executor->closure, tok);
-        } catch (const std::exception& ex) {
-            // If executor throws synchronously, reject the promise
-            if (p->state == PromiseValue::State::PENDING) {
+    // Now synchronously invoke the executor with (resolve_fn, reject_fn).
+    // We use evaluator->invoke_function to run the executor in the interpreter context:
+    try {
+        if (!evaluator) throw std::runtime_error("internal: evaluator missing for Promise constructor");
+        // call executor synchronously with two args (resolve, reject). The executor is a FunctionPtr.
+        evaluator->invoke_function(executor, { resolve_fn, reject_fn }, executor->closure, tok);
+    } catch (const std::exception& ex) {
+        // If executor throws synchronously, reject the promise using evaluator helper
+        if (p->state == PromiseValue::State::PENDING) {
+            if (evaluator) {
+                evaluator->reject_promise(p, Value{std::string(ex.what())});
+            } else {
                 p->state = PromiseValue::State::REJECTED;
                 p->result = std::string(ex.what());
-                // schedule catch callbacks
-                if (evaluator && evaluator->scheduler()) {
-                    for (auto& cb : p->catch_callbacks) {
-                        Value reason = p->result;
-                        evaluator->scheduler()->enqueue_microtask([cb, reason]() {
-                            try { cb(reason); } catch (...) {}
-                        });
-                    }
-                } else {
-                    for (auto& cb : p->catch_callbacks) {
-                        try { cb(p->result); } catch (...) {}
-                    }
-                }
-            }
-        } catch (...) {
-            if (p->state == PromiseValue::State::PENDING) {
-                p->state = PromiseValue::State::REJECTED;
-                p->result = std::string("unknown exception in Promise executor");
-                if (evaluator && evaluator->scheduler()) {
-                    for (auto& cb : p->catch_callbacks) {
-                        Value reason = p->result;
-                        evaluator->scheduler()->enqueue_microtask([cb, reason]() {
-                            try { cb(reason); } catch (...) {}
-                        });
-                    }
-                } else {
-                    for (auto& cb : p->catch_callbacks) {
-                        try { cb(p->result); } catch (...) {}
-                    }
-                }
             }
         }
+    } catch (...) {
+        if (p->state == PromiseValue::State::PENDING) {
+            if (evaluator) {
+                evaluator->reject_promise(p, Value{std::string("unknown exception in Promise executor")});
+            } else {
+                p->state = PromiseValue::State::REJECTED;
+                p->result = std::string("unknown exception in Promise executor");
+            }
+        }
+    }
 
-        return std::monostate{};  // constructor assignments already done on instance
-    };
+    return std::monostate{};  // constructor assignments already done on instance
+};
 
-    // Register native helper so class constructor AST can call it
-    make_native_fn("Promise_native_ctor", native_Promise_native_ctor);
+// Register native helper so class constructor AST can call it
+make_native_fn("Promise_native_ctor", native_Promise_native_ctor);
 
-    // Static Promise.resolve(value) and Promise.reject(reason)
-    auto native_Promise_static_resolve = [](const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*tok*/) -> Value {
+// Promise.static.resolve
+auto native_Promise_static_resolve = [evaluator](const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*tok*/) -> Value {
+    // No arg -> fulfilled undefined
+    if (args.empty()) {
         auto p = std::make_shared<PromiseValue>();
-        p->state = PromiseValue::State::FULFILLED;
-        if (!args.empty()) p->result = args[0];
-        else p->result = std::monostate{};
+        if (evaluator) {
+            evaluator->fulfill_promise(p, std::monostate{});
+        } else {
+            p->state = PromiseValue::State::FULFILLED;
+            p->result = std::monostate{};
+        }
         return Value{p};
-    };
-    make_native_fn("Promise_static_resolve", native_Promise_static_resolve);
+    }
 
-    auto native_Promise_static_reject = [](const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*tok*/) -> Value {
-        auto p = std::make_shared<PromiseValue>();
+    // If already a proper PromisePtr, return it directly
+    if (std::holds_alternative<PromisePtr>(args[0])) {
+        return args[0];
+    }
+
+    // If an object that wraps a promise (has "__promise__"), unwrap and return that
+    if (std::holds_alternative<ObjectPtr>(args[0])) {
+        ObjectPtr o = std::get<ObjectPtr>(args[0]);
+        if (o) {
+            auto it = o->properties.find("__promise__");
+            if (it != o->properties.end() && std::holds_alternative<PromisePtr>(it->second.value)) {
+                return it->second.value;
+            }
+        }
+    }
+
+    // Otherwise create a fulfilled promise with provided value
+    auto p = std::make_shared<PromiseValue>();
+    if (evaluator) {
+        evaluator->fulfill_promise(p, args[0]);
+    } else {
+        p->state = PromiseValue::State::FULFILLED;
+        p->result = args[0];
+    }
+    return Value{p};
+};
+
+// Promise.static.reject
+auto native_Promise_static_reject = [evaluator](const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*tok*/) -> Value {
+    auto p = std::make_shared<PromiseValue>();
+    if (evaluator) {
+        Value reason = args.empty() ? std::monostate{} : args[0];
+        evaluator->reject_promise(p, reason);
+    } else {
         p->state = PromiseValue::State::REJECTED;
         if (!args.empty()) p->result = args[0];
         else p->result = std::monostate{};
-        return Value{p};
-    };
-    make_native_fn("Promise_static_reject", native_Promise_static_reject);
-
-    // Build the ClassValue descriptor for Promise
-    auto classDesc = std::make_shared<ClassValue>();
-    classDesc->name = "Promise";
-    classDesc->token = Token{};
-    classDesc->body = std::make_unique<ClassBodyNode>();
-
-    // private property '__promise__' (internal slot)
-    {
-        auto pprop = std::make_unique<ClassPropertyNode>();
-        pprop->name = "__promise__";
-        pprop->is_private = true;
-        pprop->is_locked = true;
-        classDesc->body->properties.push_back(std::move(pprop));
     }
+    return Value{p};
+};
 
-    // constructor method AST: this.__promise__ = Promise_native_ctor(this, executor)
-    {
-        auto ctor = std::make_unique<ClassMethodNode>();
-        ctor->name = classDesc->name;
-        ctor->is_constructor = true;
-        ctor->is_locked = true;
-        ctor->is_private = false;
-        // parameter: executor
-        auto pnode = std::make_unique<ParameterNode>();
-        pnode->token = Token{};
-        pnode->name = "executor";
-        pnode->is_rest = false;
-        pnode->rest_required_count = 0;
-        pnode->defaultValue = nullptr;
-        ctor->params.push_back(std::move(pnode));
+// Build the ClassValue descriptor for Promise
+auto classDesc = std::make_shared<ClassValue>();
+classDesc->name = "Promise";
+classDesc->token = Token{};
+classDesc->body = std::make_unique<ClassBodyNode>();
 
-        // Build call: Promise_native_ctor(this, executor)
-        auto call = std::make_unique<CallExpressionNode>();
-        call->callee = std::make_unique<IdentifierNode>();
-        static_cast<IdentifierNode*>(call->callee.get())->name = "Promise_native_ctor";
-        call->arguments.push_back(std::make_unique<ThisExpressionNode>());
-        auto execId = std::make_unique<IdentifierNode>();
-        execId->name = "executor";
-        call->arguments.push_back(std::move(execId));
+// private property '__promise__' (internal slot)
+{
+    auto pprop = std::make_unique<ClassPropertyNode>();
+    pprop->name = "__promise__";
+    pprop->is_private = true;
+    pprop->is_locked = true;
+    classDesc->body->properties.push_back(std::move(pprop));
+}
 
-        // add call as an expression statement (we don't use returned value)
-        auto exprStmt = std::make_unique<ExpressionStatementNode>();
-        exprStmt->expression = std::move(call);
-        ctor->body.push_back(std::move(exprStmt));
+// constructor method AST: this.__promise__ = Promise_native_ctor(this, executor)
+{
+    auto ctor = std::make_unique<ClassMethodNode>();
+    ctor->name = classDesc->name;
+    ctor->is_constructor = true;
+    ctor->is_locked = true;
+    ctor->is_private = false;
+    // parameter: executor
+    auto pnode = std::make_unique<ParameterNode>();
+    pnode->token = Token{};
+    pnode->name = "executor";
+    pnode->is_rest = false;
+    pnode->rest_required_count = 0;
+    pnode->defaultValue = nullptr;
+    ctor->params.push_back(std::move(pnode));
 
-        classDesc->body->methods.push_back(std::move(ctor));
-    }
+    // Build call: Promise_native_ctor(this, executor)
+    auto call = std::make_unique<CallExpressionNode>();
+    call->callee = std::make_unique<IdentifierNode>();
+    static_cast<IdentifierNode*>(call->callee.get())->name = "Promise_native_ctor";
+    call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+    auto execId = std::make_unique<IdentifierNode>();
+    execId->name = "executor";
+    call->arguments.push_back(std::move(execId));
 
-    // static member: resolve
-    {
-        auto m = std::make_unique<ClassMethodNode>();
-        m->name = "resolve";
-        m->is_static = true;
-        m->is_locked = true;
-        m->is_private = false;
+    // add call as an expression statement (we don't use returned value)
+    auto exprStmt = std::make_unique<ExpressionStatementNode>();
+    exprStmt->expression = std::move(call);
+    ctor->body.push_back(std::move(exprStmt));
 
-        // Build call: return Promise_static_resolve(arg0)
-        auto call = std::make_unique<CallExpressionNode>();
-        call->callee = std::make_unique<IdentifierNode>();
-        static_cast<IdentifierNode*>(call->callee.get())->name = "Promise_static_resolve";
-        auto id0 = std::make_unique<IdentifierNode>();
-        id0->name = "v";
-        call->arguments.push_back(std::move(id0));
+    classDesc->body->methods.push_back(std::move(ctor));
+}
 
-        auto ret = std::make_unique<ReturnStatementNode>();
-        ret->value = std::move(call);
-        // parameter v
-        auto p = std::make_unique<ParameterNode>();
-        p->name = "v";
-        p->token = Token{};
-        m->params.push_back(std::move(p));
-        m->body.push_back(std::move(ret));
-        classDesc->body->methods.push_back(std::move(m));
-    }
+// static member: resolve
+{
+    auto m = std::make_unique<ClassMethodNode>();
+    m->name = "resolve";
+    m->is_static = true;
+    m->is_locked = true;
+    m->is_private = false;
 
-    // static member: reject
-    {
-        auto m = std::make_unique<ClassMethodNode>();
-        m->name = "reject";
-        m->is_static = true;
-        m->is_locked = true;
-        m->is_private = false;
+    // Build call: return Promise_static_resolve(arg0)
+    auto call = std::make_unique<CallExpressionNode>();
+    call->callee = std::make_unique<IdentifierNode>();
+    static_cast<IdentifierNode*>(call->callee.get())->name = "Promise_static_resolve";
+    auto id0 = std::make_unique<IdentifierNode>();
+    id0->name = "v";
+    call->arguments.push_back(std::move(id0));
 
-        auto call = std::make_unique<CallExpressionNode>();
-        call->callee = std::make_unique<IdentifierNode>();
-        static_cast<IdentifierNode*>(call->callee.get())->name = "Promise_static_reject";
-        auto id0 = std::make_unique<IdentifierNode>();
-        id0->name = "r";
-        call->arguments.push_back(std::move(id0));
+    auto ret = std::make_unique<ReturnStatementNode>();
+    ret->value = std::move(call);
+    // parameter v
+    auto p = std::make_unique<ParameterNode>();
+    p->name = "v";
+    p->token = Token{};
+    m->params.push_back(std::move(p));
+    m->body.push_back(std::move(ret));
+    classDesc->body->methods.push_back(std::move(m));
+}
 
-        auto ret = std::make_unique<ReturnStatementNode>();
-        ret->value = std::move(call);
-        auto p = std::make_unique<ParameterNode>();
-        p->name = "r";
-        p->token = Token{};
-        m->params.push_back(std::move(p));
-        m->body.push_back(std::move(ret));
-        classDesc->body->methods.push_back(std::move(m));
-    }
+// static member: reject
+{
+    auto m = std::make_unique<ClassMethodNode>();
+    m->name = "reject";
+    m->is_static = true;
+    m->is_locked = true;
+    m->is_private = false;
 
-    // register Promise class in the environment
-    {
-        Environment::Variable var;
-        var.value = classDesc;
-        var.is_constant = true;
-        env->set("Promise", var);
-    }
-    
- 
-    {
-        // Ensure we have an ObjectValue to host the static methods:
-        ObjectPtr promise_holder = nullptr;
-    
-        if (env->has("Promise")) {
-            Value pv = env->get("Promise").value;
-            if (std::holds_alternative<ObjectPtr>(pv)) {
-                promise_holder = std::get<ObjectPtr>(pv);
-            } else if (std::holds_alternative<ClassPtr>(pv)) {
-                ClassPtr cp = std::get<ClassPtr>(pv);
-                if (cp) promise_holder = cp->static_table;
-            }
+    auto call = std::make_unique<CallExpressionNode>();
+    call->callee = std::make_unique<IdentifierNode>();
+    static_cast<IdentifierNode*>(call->callee.get())->name = "Promise_static_reject";
+    auto id0 = std::make_unique<IdentifierNode>();
+    id0->name = "r";
+    call->arguments.push_back(std::move(id0));
+
+    auto ret = std::make_unique<ReturnStatementNode>();
+    ret->value = std::move(call);
+    auto p = std::make_unique<ParameterNode>();
+    p->name = "r";
+    p->token = Token{};
+    m->params.push_back(std::move(p));
+    m->body.push_back(std::move(ret));
+    classDesc->body->methods.push_back(std::move(m));
+}
+
+// register Promise class in the environment
+{
+    Environment::Variable var;
+    var.value = classDesc;
+    var.is_constant = true;
+    env->set("Promise", var);
+}
+
+{
+    // Ensure we have an ObjectValue to host the static methods:
+    ObjectPtr promise_holder = nullptr;
+
+    if (env->has("Promise")) {
+        Value pv = env->get("Promise").value;
+        if (std::holds_alternative<ObjectPtr>(pv)) {
+            promise_holder = std::get<ObjectPtr>(pv);
+        } else if (std::holds_alternative<ClassPtr>(pv)) {
+            ClassPtr cp = std::get<ClassPtr>(pv);
+            if (cp) promise_holder = cp->static_table;
         }
-    
-        // If no existing Promise object/class, create a plain object and bind it as Promise
-        if (!promise_holder) {
-            promise_holder = std::make_shared<ObjectValue>();
-            Environment::Variable v;
-            v.value = promise_holder;
-            v.is_constant = true;
-            env->set("Promise", v);
-        }
-    
-        // token used for diagnostics on native functions
-        Token tResolve;
-        tResolve.type = TokenType::IDENTIFIER;
-        tResolve.loc = TokenLocation("<builtin:Promise.resolve>", 0, 0, 0);
-    
-        // Promise.resolve(value)
-        auto native_promise_resolve = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            // No arg -> fulfilled undefined
-            if (args.empty()) {
-                auto p = std::make_shared<PromiseValue>();
-                p->state = PromiseValue::State::FULFILLED;
-                p->result = std::monostate{};
-                return Value{p};
-            }
-    
-            // If already a proper PromisePtr, return it directly
-            if (std::holds_alternative<PromisePtr>(args[0])) {
-                return args[0];
-            }
-    
-            // If an object that wraps a promise (has "__promise__"), unwrap and return that
-            if (std::holds_alternative<ObjectPtr>(args[0])) {
-                ObjectPtr o = std::get<ObjectPtr>(args[0]);
-                if (o) {
-                    auto it = o->properties.find("__promise__");
-                    if (it != o->properties.end() && std::holds_alternative<PromisePtr>(it->second.value)) {
-                        return it->second.value;
-                    }
-                }
-            }
-    
-            // Otherwise create a fulfilled promise with provided value
-            auto p = std::make_shared<PromiseValue>();
-            p->state = PromiseValue::State::FULFILLED;
-            p->result = args[0];
-            return Value{p};
-        };
-    
-        Token tReject;
-        tReject.type = TokenType::IDENTIFIER;
-        tReject.loc = TokenLocation("<builtin:Promise.reject>", 0, 0, 0);
-    
-        // Promise.reject(reason)
-        auto native_promise_reject = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            auto p = std::make_shared<PromiseValue>();
-            p->state = PromiseValue::State::REJECTED;
-            if (args.empty()) p->result = std::monostate{};
-            else p->result = args[0];
-            return Value{p};
-        };
-    
-        // Create FunctionValue wrappers and attach as properties
-        auto fnResolve = std::make_shared<FunctionValue>(std::string("native:Promise.resolve"), native_promise_resolve, nullptr, tResolve);
-        promise_holder->properties["resolve"] = PropertyDescriptor{fnResolve, false, false, false, tResolve};
-    
-        auto fnReject = std::make_shared<FunctionValue>(std::string("native:Promise.reject"), native_promise_reject, nullptr, tReject);
-        promise_holder->properties["reject"] = PropertyDescriptor{fnReject, false, false, false, tReject};
     }
-    
 
-    // -----------------------
-    // End Promise runtime
-    // -----------------------
+    // If no existing Promise object/class, create a plain object and bind it as Promise
+    if (!promise_holder) {
+        promise_holder = std::make_shared<ObjectValue>();
+        Environment::Variable v;
+        v.value = promise_holder;
+        v.is_constant = true;
+        env->set("Promise", v);
+    }
+
+    // Attach the static resolve/reject helpers that use evaluator helpers
+    Token tResolve;
+    tResolve.type = TokenType::IDENTIFIER;
+    tResolve.loc = TokenLocation("<builtin:Promise.resolve>", 0, 0, 0);
+
+    auto fnResolve = std::make_shared<FunctionValue>(std::string("native:Promise.resolve"), native_Promise_static_resolve, nullptr, tResolve);
+    promise_holder->properties["resolve"] = PropertyDescriptor{fnResolve, false, false, false, tResolve};
+
+    Token tReject;
+    tReject.type = TokenType::IDENTIFIER;
+    tReject.loc = TokenLocation("<builtin:Promise.reject>", 0, 0, 0);
+
+    auto fnReject = std::make_shared<FunctionValue>(std::string("native:Promise.reject"), native_Promise_static_reject, nullptr, tReject);
+    promise_holder->properties["reject"] = PropertyDescriptor{fnReject, false, false, false, tReject};
+}
+
+// -----------------------
+// End Promise runtime
+// -----------------------
+    
+    
     
 }
