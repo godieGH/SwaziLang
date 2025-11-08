@@ -134,7 +134,9 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<FunctionPtr>(v)) {
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string name = fn->name.empty() ? "<lambda>" : fn->name;
-        std::string s = use_color ? (Color::bright_cyan + "[kazi " + name + "]" + Color::reset) : "[kazi " + name + "]";
+        std::string s = use_color
+            ? (std::string(Color::bright_cyan) + "[" + (fn->is_async ? "Async->" : "") + "kazi " + name + "]" + Color::reset)
+            : ("[" + std::string(fn->is_async ? "Async->" : "") + "kazi " + name + "]");
         return s;
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
@@ -745,7 +747,7 @@ std::string Evaluator::print_value(
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string nm = fn->name.empty() ? "<lambda>" : fn->name;
         std::ostringstream ss;
-        ss << "[kazi " << nm << "]";
+        ss << "[" << (fn->is_async ? "Async->" : "") << "kazi " << nm << "]";
         return use_color ? (Color::bright_cyan + ss.str() + Color::reset) : ss.str();
     }
 
@@ -1064,7 +1066,7 @@ std::string Evaluator::print_object(
                     label << "[getter]";
                     if (use_color) oss << Color::bright_magenta;
                 } else {
-                    label << "[tabia " << nm << "]";
+                    label << "[" << (f->is_async ? "Async->" : "") << "tabia " << nm << "]";
                     if (use_color) oss << Color::bright_cyan;
                 }
 
