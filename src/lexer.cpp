@@ -395,6 +395,19 @@ void Lexer::handle_newline(std::vector<Token>& out) {
                 break;
         }
     }
+    
+    if (!continuation) {
+          size_t p = i;
+          // skip only spaces/tabs on the following line (we're already positioned at the start of the next line)
+          while (p < src.size() && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r')) p++;
+          if (p < src.size()) {
+              // simple checks on the raw source: '.' (member), '[' (index), or '?.' (optional member)
+              if (src[p] == '.' || src[p] == '[' || (src[p] == '?' && p + 1 < src.size() && src[p + 1] == '.')) {
+                  // treat as continuation: don't emit NEWLINE
+                  return;
+              }
+          }
+      }
 
     // inside parentheses/brackets OR after a continuation operator: skip NEWLINE
     if (paren_level > 0 || continuation) {
