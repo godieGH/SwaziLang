@@ -1,6 +1,7 @@
 // src/evaluator/Evaluator.cpp
 #include "evaluator.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -58,6 +59,20 @@ void Evaluator::pop_frame() {
 CallFramePtr Evaluator::current_frame() {
     if (call_stack_.empty()) return nullptr;
     return call_stack_.back();
+}
+
+void Evaluator::add_suspended_frame(CallFramePtr f) {
+    if (!f) return;
+    // keep one shared_ptr owning this suspended frame so it isn't destroyed
+    suspended_frames_.push_back(f);
+}
+
+void Evaluator::remove_suspended_frame(CallFramePtr f) {
+    if (!f) return;
+    auto it = std::find(suspended_frames_.begin(), suspended_frames_.end(), f);
+    if (it != suspended_frames_.end()) {
+        suspended_frames_.erase(it);
+    }
 }
 
 // Public wrapper so native builtins can invoke interpreter functions synchronously.

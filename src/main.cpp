@@ -70,7 +70,7 @@ static std::optional<fs::path> find_file_with_extensions(const fs::path& base) {
 }
 
 int main(int argc, char* argv[]) {
-    //uv_init();
+    // uv_init();
     auto print_usage = []() {
         std::cout << "Usage: swazi [options] [file]\n"
                   << "Options:\n"

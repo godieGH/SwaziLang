@@ -248,12 +248,17 @@ class Evaluator {
     std::unique_ptr<Scheduler> scheduler_;
     std::vector<CallFramePtr> call_stack_;
 
+    std::vector<CallFramePtr> suspended_frames_;
+
     // call frame helpers
     void push_frame(CallFramePtr f);
     void pop_frame();
     CallFramePtr current_frame();
     void execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise);
     void execute_frame_until_return(CallFramePtr frame);
+
+    void add_suspended_frame(CallFramePtr f);
+    void remove_suspended_frame(CallFramePtr f);
 
     void populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main);
 

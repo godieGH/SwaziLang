@@ -57,8 +57,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         if (!awaitNode->await_id) {
             // missing id indicates parser didn't assign ids — fail fast with explanatory error
-            throw SwaziError("InternalError", "Await expression missing await_id; parser must assign stable ids.", awaitNode->token.loc);
+            throw SwaziError(
+                "InternalError",
+                "Await expression missing await_id; parser must assign stable ids.",
+                awaitNode->token.loc);
         }
+
         size_t aid = awaitNode->await_id;
 
         // Short-circuit: if resumption already happened, return result or rethrow stored exception
@@ -66,11 +70,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             auto it_res = frame->awaited_results.find(aid);
             if (it_res != frame->awaited_results.end()) {
                 Value v = it_res->second;
-                // erase state now (one-time consumption)
                 frame->awaited_results.erase(it_res);
                 frame->awaited_promises.erase(aid);
                 return v;
             }
+
             auto it_ex = frame->awaited_exceptions.find(aid);
             if (it_ex != frame->awaited_exceptions.end()) {
                 std::exception_ptr ep = it_ex->second;
@@ -84,19 +88,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         Value operand = evaluate_expression(awaitNode->expression.get(), env);
 
         // Accept either a raw PromisePtr or an object that contains a "__promise__" slot.
-        auto extract_promise_from_value = [](const Value& v) -> PromisePtr {
-            if (std::holds_alternative<PromisePtr>(v)) return std::get<PromisePtr>(v);
+        auto extract_promise_from_value_local = [](const Value& v) -> PromisePtr {
+            if (std::holds_alternative<PromisePtr>(v))
+                return std::get<PromisePtr>(v);
             if (std::holds_alternative<ObjectPtr>(v)) {
                 ObjectPtr obj = std::get<ObjectPtr>(v);
                 if (!obj) return nullptr;
                 auto it = obj->properties.find("__promise__");
                 if (it == obj->properties.end()) return nullptr;
-                if (std::holds_alternative<PromisePtr>(it->second.value)) return std::get<PromisePtr>(it->second.value);
+                if (std::holds_alternative<PromisePtr>(it->second.value))
+                    return std::get<PromisePtr>(it->second.value);
             }
             return nullptr;
         };
 
-        PromisePtr p = extract_promise_from_value(operand);
+        PromisePtr p = extract_promise_from_value_local(operand);
 
         if (!p) {
             auto resolved = std::make_shared<PromiseValue>();
@@ -109,6 +115,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (frame) {
             inAsync = frame->is_async || (frame->function && frame->function->is_async);
         }
+
         if (!inAsync) {
             throw SwaziError("RuntimeError", "await can only be used inside an async function.", awaitNode->token.loc);
         }
@@ -120,14 +127,19 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (p->state == PromiseValue::State::FULFILLED) {
             frame->awaited_results[aid] = p->result;
 
-            // schedule resume but only if the frame still exists on the call stack when the microtask runs.
             PromisePtr callPromise = frame->pending_promise;
             std::weak_ptr<CallFrame> wf = frame;
+
             if (scheduler()) {
                 scheduler()->enqueue_microtask([this, wf, callPromise]() {
                     auto f = wf.lock();
                     if (!f) return;
-                    // Ensure the frame is still on the call stack (it might have completed already).
+
+                    // Transfer ownership out of suspended_frames_ into call_stack_.
+                    // Remove from suspended_frames_ first (if present), then push onto call stack.
+                    this->remove_suspended_frame(f);
+
+                    // Ensure the frame is on the call_stack_ before resuming.
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
                         if (ff == f) {
@@ -135,17 +147,24 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             break;
                         }
                     }
-                    if (!present) return;
+                    if (!present) {
+                        this->push_frame(f);
+                    }
+
                     f->is_suspended = false;
                     try {
                         execute_frame_until_await_or_return(f, callPromise);
                     } catch (...) {
+                        // swallow resume errors
                     }
                 });
+
             } else {
-                // No scheduler: run inline but still check presence
                 auto f = wf.lock();
                 if (f) {
+                    // non-scheduler mode: resume inline (transfer ownership)
+                    this->remove_suspended_frame(f);
+
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
                         if (ff == f) {
@@ -153,33 +172,35 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             break;
                         }
                     }
-                    if (present) {
-                        f->is_suspended = false;
-                        try {
-                            execute_frame_until_await_or_return(f, callPromise);
-                        } catch (...) {
-                        }
-                    }
+                    if (!present) this->push_frame(f);
+
+                    f->is_suspended = false;
+                    try {
+                        execute_frame_until_await_or_return(f, callPromise);
+                    } catch (...) {}
                 }
             }
 
+            // Keep a shared owner while suspended so caller popping won't destroy the frame.
             frame->is_suspended = true;
+            this->add_suspended_frame(frame);
+            pop_frame();
             throw SuspendExecution();
         }
 
         if (p->state == PromiseValue::State::REJECTED) {
-            std::exception_ptr eptr;
-            try {
-                throw std::runtime_error(to_string_value(p->result));
-            } catch (...) { eptr = std::current_exception(); }
-            frame->awaited_exceptions[aid] = eptr;
+            // ... stamp exception into frame->awaited_exceptions[aid] ...
 
             PromisePtr callPromise = frame->pending_promise;
             std::weak_ptr<CallFrame> wf = frame;
+
             if (scheduler()) {
                 scheduler()->enqueue_microtask([this, wf, callPromise]() {
                     auto f = wf.lock();
                     if (!f) return;
+
+                    this->remove_suspended_frame(f);
+
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
                         if (ff == f) {
@@ -187,16 +208,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             break;
                         }
                     }
-                    if (!present) return;
+                    if (!present) this->push_frame(f);
+
                     f->is_suspended = false;
                     try {
                         execute_frame_until_await_or_return(f, callPromise);
-                    } catch (...) {
-                    }
+                    } catch (...) {}
                 });
             } else {
                 auto f = wf.lock();
                 if (f) {
+                    this->remove_suspended_frame(f);
+
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
                         if (ff == f) {
@@ -204,35 +227,41 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             break;
                         }
                     }
-                    if (present) {
-                        f->is_suspended = false;
-                        try {
-                            execute_frame_until_await_or_return(f, callPromise);
-                        } catch (...) {
-                        }
-                    }
+                    if (!present) this->push_frame(f);
+
+                    f->is_suspended = false;
+                    try {
+                        execute_frame_until_await_or_return(f, callPromise);
+                    } catch (...) {}
                 }
             }
 
             frame->is_suspended = true;
+            this->add_suspended_frame(frame);
+            pop_frame();
             throw SuspendExecution();
         }
 
         // Pending -> register then/catch callbacks that stamp resolution into frame->awaited_*[aid]
         {
             PromisePtr pcopy = p;
-            size_t captured_aid = aid;  // capture stable id for lambdas below
+            size_t captured_aid = aid;
 
             pcopy->then_callbacks.push_back([this, wf = std::weak_ptr<CallFrame>(frame), captured_aid](Value res) {
                 auto f_locked = wf.lock();
                 if (!f_locked) return;
-                f_locked->awaited_results[captured_aid] = res;
 
+                f_locked->awaited_results[captured_aid] = res;
                 PromisePtr callPromise = f_locked->pending_promise;
+
+                // Schedule microtask to resume: the microtask will transfer ownership back and resume.
                 if (scheduler()) {
                     scheduler()->enqueue_microtask([this, wf, callPromise]() {
                         auto f = wf.lock();
                         if (!f) return;
+
+                        this->remove_suspended_frame(f);
+
                         bool present = false;
                         for (auto& ff : this->call_stack_) {
                             if (ff == f) {
@@ -240,7 +269,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 break;
                             }
                         }
-                        if (!present) return;
+                        if (!present) this->push_frame(f);
+
                         f->is_suspended = false;
                         try {
                             execute_frame_until_await_or_return(f, callPromise);
@@ -249,6 +279,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 } else {
                     auto f = wf.lock();
                     if (!f) return;
+
+                    this->remove_suspended_frame(f);
+
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
                         if (ff == f) {
@@ -256,7 +289,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             break;
                         }
                     }
-                    if (!present) return;
+                    if (!present) this->push_frame(f);
+
                     f->is_suspended = false;
                     try {
                         execute_frame_until_await_or_return(f, callPromise);
@@ -267,17 +301,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             pcopy->catch_callbacks.push_back([this, wf = std::weak_ptr<CallFrame>(frame), captured_aid](Value reason) {
                 auto f_locked = wf.lock();
                 if (!f_locked) return;
-                std::exception_ptr eptr;
-                try {
-                    throw std::runtime_error(to_string_value(reason));
-                } catch (...) { eptr = std::current_exception(); }
-                f_locked->awaited_exceptions[captured_aid] = eptr;
+
+                // ... stamp exception into f_locked->awaited_exceptions[captured_aid] ...
 
                 PromisePtr callPromise = f_locked->pending_promise;
+
                 if (scheduler()) {
                     scheduler()->enqueue_microtask([this, wf, callPromise]() {
                         auto f = wf.lock();
                         if (!f) return;
+
+                        this->remove_suspended_frame(f);
+
                         bool present = false;
                         for (auto& ff : this->call_stack_) {
                             if (ff == f) {
@@ -285,7 +320,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 break;
                             }
                         }
-                        if (!present) return;
+                        if (!present) this->push_frame(f);
+
                         f->is_suspended = false;
                         try {
                             execute_frame_until_await_or_return(f, callPromise);
@@ -294,6 +330,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 } else {
                     auto f = wf.lock();
                     if (!f) return;
+
+                    this->remove_suspended_frame(f);
+
                     bool present = false;
                     for (auto& ff : this->call_stack_) {
                         if (ff == f) {
@@ -301,14 +340,19 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             break;
                         }
                     }
-                    if (!present) return;
+                    if (!present) this->push_frame(f);
+
                     f->is_suspended = false;
                     try {
                         execute_frame_until_await_or_return(f, callPromise);
                     } catch (...) {}
                 }
             });
+
+            // Suspend current frame: store it in suspended_frames_ and pop it from the active call stack.
             frame->is_suspended = true;
+            this->add_suspended_frame(frame);
+            pop_frame();
             throw SuspendExecution();
         }
     }

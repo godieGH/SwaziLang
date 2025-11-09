@@ -13,6 +13,9 @@
 #include "builtins.hpp"
 #include "evaluator.hpp"
 
+// libuv
+#include "uv.h"
+
 // Timer bookkeeping (unchanged)...
 static std::mutex g_timers_mutex;
 static std::atomic<long long> g_next_timer_id{1};
@@ -23,6 +26,9 @@ struct TimerEntry {
     long long interval_ms;  // 0 for single-shot
     FunctionPtr cb;
     std::vector<Value> args;
+
+    // uv handle pointer (if using libuv)
+    uv_timer_t* uv_handle = nullptr;
 };
 static std::unordered_map<long long, std::shared_ptr<TimerEntry>> g_timers;
 
@@ -77,8 +83,86 @@ void Evaluator::run_event_loop() {
     return;
 }
 
-// Internal: spawn a timer worker thread for this entry (detached)
-static void spawn_timer_thread(std::shared_ptr<TimerEntry> te) {
+// --- libuv timer support --------------------------------------------------
+// We will create uv_timer_t handles on the Scheduler's loop if available.
+// If not available (no scheduler / no uv loop) we fall back to the original
+// thread-based implementation for compatibility.
+
+// Timer callback called on the scheduler's loop thread.
+static void uv_timer_callback(uv_timer_t* handle) {
+    if (!handle) return;
+    TimerEntry* te = static_cast<TimerEntry*>(handle->data);
+    if (!te) return;
+    if (te->cancelled.load()) {
+        return;
+    }
+    if (te->cb) enqueue_callback(te->cb, te->args);
+
+    // For single-shot timers, cleanup: stop & close the uv handle and remove entry.
+    if (te->interval_ms <= 0) {
+        // stop and close the handle
+        uv_timer_stop(handle);
+        // schedule close with a close callback to free handle memory
+        uv_close(reinterpret_cast<uv_handle_t*>(handle), [](uv_handle_t* h) {
+            uv_timer_t* t = reinterpret_cast<uv_timer_t*>(h);
+            // free the uv handle memory
+            delete t;
+        });
+
+        // remove from g_timers map
+        {
+            std::lock_guard<std::mutex> lk(g_timers_mutex);
+            g_timers.erase(te->id);
+        }
+    }
+}
+
+// Create/cancel timer helpers
+static long long create_timer(long long delay_ms, long long interval_ms, FunctionPtr cb, const std::vector<Value>& args) {
+    auto te = std::make_shared<TimerEntry>();
+    te->id = g_next_timer_id.fetch_add(1);
+    te->cancelled.store(false);
+    te->delay_ms = delay_ms;
+    te->interval_ms = interval_ms;
+    te->cb = cb;
+    te->args = args;
+    {
+        std::lock_guard<std::mutex> lk(g_timers_mutex);
+        g_timers[te->id] = te;
+    }
+
+    // If scheduler + uv loop exists, create the uv_timer_t on the loop thread via scheduler_run_on_loop.
+    uv_loop_t* loop = scheduler_get_loop();
+    if (loop) {
+        // Capture shared_ptr by value so it survives until the scheduled lambda runs.
+        std::shared_ptr<TimerEntry> te_copy = te;
+        scheduler_run_on_loop([loop, te_copy]() {
+            if (!te_copy) return;
+            // allocate handle on heap — must be freed by uv_close callback
+            uv_timer_t* timer_handle = new uv_timer_t;
+            timer_handle->data = te_copy.get();
+            te_copy->uv_handle = timer_handle;
+
+            // initialize & start on the loop thread
+            int r = uv_timer_init(loop, timer_handle);
+            if (r != 0) {
+                // initialization failed; clean up and remove entry
+                delete timer_handle;
+                {
+                    std::lock_guard<std::mutex> lk(g_timers_mutex);
+                    g_timers.erase(te_copy->id);
+                }
+                return;
+            }
+
+            uint64_t repeat = (te_copy->interval_ms > 0) ? static_cast<uint64_t>(te_copy->interval_ms) : 0;
+            uv_timer_start(timer_handle, uv_timer_callback, static_cast<uint64_t>(te_copy->delay_ms), repeat);
+        });
+
+        return te->id;
+    }
+
+    // Fallback: if no uv loop, create a thread as before (single-shot or repeating).
     std::thread([te]() {
         if (te->delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(te->delay_ms));
         while (true) {
@@ -98,31 +182,12 @@ static void spawn_timer_thread(std::shared_ptr<TimerEntry> te) {
         {
             std::lock_guard<std::mutex> lk(g_timers_mutex);
             g_timers.erase(te->id);
-            // We intentionally do not try to access internal scheduler globals here.
-            // Instead we will notify the scheduler via the public bridge below.
         }
-        // Wake the evaluator/scheduler bridge so run_until_idle's predicate can re-check timers.
-        // We create a small no-op CallbackPayload (null cb) that the global bridge will deliver
-        // to the evaluator; the evaluator's callback runner is responsible for deleting the payload.
+        // Wake the evaluator/scheduler bridge by enqueueing a noop payload
         CallbackPayload* wake = new CallbackPayload(nullptr, {});
         enqueue_callback_global(static_cast<void*>(wake));
     }).detach();
-}
 
-// Create/cancel timer helpers
-static long long create_timer(long long delay_ms, long long interval_ms, FunctionPtr cb, const std::vector<Value>& args) {
-    auto te = std::make_shared<TimerEntry>();
-    te->id = g_next_timer_id.fetch_add(1);
-    te->cancelled.store(false);
-    te->delay_ms = delay_ms;
-    te->interval_ms = interval_ms;
-    te->cb = cb;
-    te->args = args;
-    {
-        std::lock_guard<std::mutex> lk(g_timers_mutex);
-        g_timers[te->id] = te;
-    }
-    spawn_timer_thread(te);
     return te->id;
 }
 
@@ -134,7 +199,38 @@ static void cancel_timer(long long id) {
         if (it == g_timers.end()) return;
         te = it->second;
     }
-    if (te) te->cancelled.store(true);
+    if (!te) return;
+    te->cancelled.store(true);
+
+    // If a uv handle exists, schedule its stop/close on the loop thread.
+    if (te->uv_handle) {
+        // capture shared_ptr by value so it lives until the lambda runs
+        std::shared_ptr<TimerEntry> te_copy = te;
+        scheduler_run_on_loop([te_copy]() {
+            if (!te_copy) return;
+            uv_timer_t* h = te_copy->uv_handle;
+            if (h) {
+                uv_timer_stop(h);
+                uv_close(reinterpret_cast<uv_handle_t*>(h), [](uv_handle_t* hh) {
+                    uv_timer_t* th = reinterpret_cast<uv_timer_t*>(hh);
+                    delete th;
+                });
+                te_copy->uv_handle = nullptr;
+            }
+            // remove entry from map
+            {
+                std::lock_guard<std::mutex> lk(g_timers_mutex);
+                g_timers.erase(te_copy->id);
+            }
+        });
+        return;
+    }
+
+    // thread-based timers will observe cancelled flag and exit; remove entry now.
+    {
+        std::lock_guard<std::mutex> lk(g_timers_mutex);
+        g_timers.erase(id);
+    }
 }
 
 // Helpers to coerce and detect args
