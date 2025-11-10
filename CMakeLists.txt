@@ -20,41 +20,23 @@ target_include_directories(swazi PRIVATE include thirdparty/libuv-1.51.0/include
 # use the PROJECT_VERSION variable set by `project(... VERSION ...)`
 target_compile_definitions(swazi PRIVATE SWAZI_VERSION=\"${PROJECT_VERSION}\")
 
-
-
 find_package(CURL QUIET)
 
 if (CURL_FOUND)
     message(STATUS "libcurl found: enabling builtin http.get and linking libcurl")
-    # Ensure the compile unit sees HAVE_LIBCURL so the builtins unit compiles the real implementation.
     target_compile_definitions(swazi PRIVATE HAVE_LIBCURL=1)
-    # Link the libcurl library to the swazi target
     target_link_libraries(swazi PRIVATE CURL::libcurl)
 else()
     message(WARNING "libcurl not found: http builtin will use a stub that throws at runtime. To enable HTTP, install libcurl development package and re-run CMake.")
 endif()
 
-
-
-
-# Optional: link external libraries
-# target_link_libraries(swazi PRIVATE <lib>)
-
 target_link_libraries(swazi PRIVATE linenoise)
 
 # --- Build and include local libuv from the thirdparty directory ---
-# Add libuv's CMakeLists.txt to the build. This makes libuv's targets available.
 add_subdirectory(thirdparty/libuv-1.51.0)
-
-# Link the libuv target to your executable.
-# The target name provided by libuv's own CMake is 'uv'.
 target_link_libraries(swazi PRIVATE uv)
-
-# IMPORTANT: tell the compiler that libuv is present so builtins.cpp compiles the libuv-backed createServer.
-# Without this the http module builds the runtime stub that throws NotImplementedError.
 target_compile_definitions(swazi PRIVATE HAVE_LIBUV=1)
 # --- End local libuv integration ---
-
 
 # --- BEGIN embed builtins: regenerate when any lib/*.sl or lib/*.swz changes ---
 find_package(Python COMPONENTS Interpreter REQUIRED)
@@ -65,8 +47,6 @@ set(GENERATED_BUILTIN_CPP "${GENERATED_DIR}/builtin_sl.cpp")
 
 file(MAKE_DIRECTORY "${GENERATED_DIR}")
 
-# Glob lib files and make the configure step re-run if files are added/removed.
-# CMake's CONFIGURE_DEPENDS makes CMake re-evaluate the glob if the directory contents change.
 file(GLOB_RECURSE EMBED_LIB_FILES
      CONFIGURE_DEPENDS
      "${BUILTIN_LIB_DIR}/*.sl"
@@ -82,25 +62,61 @@ add_custom_command(
   VERBATIM
 )
 
-# Target that ensures generated file exists. Not necessary to be ALL but it's safe.
 add_custom_target(generate_builtins DEPENDS "${GENERATED_BUILTIN_CPP}")
 
-# Ensure the generated directory is visible for includes if generator emits headers there
 target_include_directories(swazi PRIVATE "${GENERATED_DIR}" "${CMAKE_SOURCE_DIR}/src/evaluator")
-
-# Add the generated cpp into the swazi target sources and ensure generation happens before building
 target_sources(swazi PRIVATE "${GENERATED_BUILTIN_CPP}")
 add_dependencies(swazi generate_builtins)
 # --- END embed builtins ---
 
-
-
-
 # --- INSTALLATION RULES ---
-
-# Install the 'swazi' executable to the 'bin' directory 
-# under the installation prefix (CMAKE_INSTALL_PREFIX).
 install(TARGETS swazi DESTINATION bin)
 
-# You may also want to install project headers if they are used by others
-# install(DIRECTORY include/ DESTINATION include) 
+# ===== Google Test Setup =====
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/release-1.12.1.zip
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+enable_testing()
+
+# Collect all test files
+file(GLOB_RECURSE TEST_SOURCES "tests/*.cc")
+
+# Create a library from sources (excluding main if you have one)
+file(GLOB_RECURSE LIB_SOURCES "src/*.cpp" "src/*.cc" "src/*.c")
+list(FILTER LIB_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
+
+add_library(swazi_lib ${LIB_SOURCES})
+target_include_directories(swazi_lib PUBLIC 
+    include 
+    thirdparty/libuv-1.51.0/include 
+    "${GENERATED_DIR}" 
+    "${CMAKE_SOURCE_DIR}/src/evaluator"
+)
+target_compile_definitions(swazi_lib PUBLIC 
+    SWAZI_VERSION=\"${PROJECT_VERSION}\" 
+    HAVE_LIBUV=1
+)
+target_link_libraries(swazi_lib PUBLIC linenoise uv)
+
+if (CURL_FOUND)
+    target_compile_definitions(swazi_lib PUBLIC HAVE_LIBCURL=1)
+    target_link_libraries(swazi_lib PUBLIC CURL::libcurl)
+endif()
+
+target_sources(swazi_lib PRIVATE "${GENERATED_BUILTIN_CPP}")
+add_dependencies(swazi_lib generate_builtins)
+
+# Update swazi executable to use the library
+target_link_libraries(swazi PRIVATE swazi_lib)
+
+# Create test executable
+add_executable(swazi_tests ${TEST_SOURCES})
+target_link_libraries(swazi_tests PRIVATE swazi_lib GTest::gtest_main)
+
+include(GoogleTest)
+gtest_discover_tests(swazi_tests)
