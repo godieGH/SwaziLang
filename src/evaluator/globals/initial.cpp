@@ -1340,6 +1340,142 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
         classDesc->body->methods.push_back(std::move(m));
     }
 
+    // native: Promise.all([...])
+    {
+        Token tAll;
+        tAll.type = TokenType::IDENTIFIER;
+        tAll.loc = TokenLocation("<Promise>", 0, 0, 0);
+
+        auto native_promise_all = [evaluator](const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "Promise.all requires an array argument", token.loc);
+            }
+            if (!std::holds_alternative<ArrayPtr>(args[0])) {
+                throw SwaziError("TypeError", "Promise.all requires an array argument", token.loc);
+            }
+
+            ArrayPtr input = std::get<ArrayPtr>(args[0]);
+            if (!input) {
+                // treat null array as empty -> resolve to []
+                auto empty = std::make_shared<ArrayValue>();
+                return Value{empty};
+            }
+
+            size_t n = input->elements.size();
+            auto outPromise = std::make_shared<PromiseValue>();
+            outPromise->state = PromiseValue::State::PENDING;
+
+            // Fast-path: empty iterable -> resolve immediately to empty array
+            if (n == 0) {
+                auto results_empty = std::make_shared<ArrayValue>();
+                evaluator->fulfill_promise(outPromise, Value{results_empty});
+                return outPromise;
+            }
+
+            // Shared results array and remaining count (shared so lambdas can capture safely)
+            auto results = std::make_shared<ArrayValue>();
+            results->elements.resize(n);
+            auto remaining = std::make_shared<size_t>(n);
+            // Flag to ensure only first rejection wins
+            auto settled = std::make_shared<std::atomic<bool>>(false);
+
+            for (size_t i = 0; i < n; ++i) {
+                Value v = input->elements[i];
+
+                // If it's a Promise, attach handlers
+                if (std::holds_alternative<PromisePtr>(v)) {
+                    PromisePtr ip = std::get<PromisePtr>(v);
+                    if (!ip) {
+                        // treat null promise as undefined fulfilled
+                        results->elements[i] = std::monostate{};
+                        if (--(*remaining) == 0) {
+                            evaluator->fulfill_promise(outPromise, Value{results});
+                        }
+                        continue;
+                    }
+
+                    // If already fulfilled or rejected, handle immediately
+                    if (ip->state == PromiseValue::State::FULFILLED) {
+                        results->elements[i] = ip->result;
+                        if (--(*remaining) == 0) {
+                            evaluator->fulfill_promise(outPromise, Value{results});
+                        }
+                        continue;
+                    }
+                    if (ip->state == PromiseValue::State::REJECTED) {
+                        // immediate reject the aggregate promise (first rejection wins)
+                        if (!settled->exchange(true)) {
+                            evaluator->reject_promise(outPromise, ip->result);
+                        }
+                        return outPromise;
+                    }
+
+                    // attach then & catch callbacks
+                    // then: store value at index, when all done fulfill outPromise
+                    ip->then_callbacks.push_back([evaluator, outPromise, results, remaining, i, settled](Value got) {
+                        // if already settled by a rejection, ignore
+                        if (settled->load()) return;
+                        results->elements[i] = got;
+                        if (--(*remaining) == 0) {
+                            evaluator->fulfill_promise(outPromise, Value{results});
+                        }
+                    });
+
+                    // catch: reject the aggregate promise immediately
+                    ip->catch_callbacks.push_back([evaluator, outPromise, settled](Value reason) {
+                        if (!settled->exchange(true)) {
+                            evaluator->reject_promise(outPromise, reason);
+                        }
+                    });
+
+                    // mark the observed promise (and ancestors) as having handlers so it's not considered "unhandled"
+                    evaluator->mark_promise_and_ancestors_handled(ip);
+
+                } else {
+                    // non-promise value counts as already fulfilled
+                    results->elements[i] = v;
+                    if (--(*remaining) == 0) {
+                        evaluator->fulfill_promise(outPromise, Value{results});
+                    }
+                }
+            }
+
+            return outPromise;
+        };
+
+        auto fn_all = std::make_shared<FunctionValue>(std::string("native:Promise.all"), native_promise_all, nullptr, tAll);
+
+        // Register as a global helper named "Promise_all" (fallback) so it's always available.
+        // Best effort: also attach as a static method on the Promise constructor if a Promise binding exists.
+        {
+            Environment::Variable var_all;
+            var_all.value = fn_all;
+            var_all.is_constant = true;
+            env->set("Promise_all", var_all);
+        }
+
+        // Attempt to attach as Promise.all if a Promise value is present in the globals.
+        auto it = env->values.find("Promise");
+        if (it != env->values.end()) {
+            // If Promise is an object (ObjectPtr) we can add a property "all"
+            if (std::holds_alternative<ObjectPtr>(it->second.value)) {
+                ObjectPtr pobj = std::get<ObjectPtr>(it->second.value);
+                pobj->properties["all"] = PropertyDescriptor{Value{fn_all}, false, false, false, tAll};
+            } else if (std::holds_alternative<ClassPtr>(it->second.value)) {
+                // If Promise is represented as a ClassPtr with a static_table, attach to that table
+                ClassPtr c = std::get<ClassPtr>(it->second.value);
+                if (c && c->static_table) {
+                    c->static_table->properties["all"] = PropertyDescriptor{Value{fn_all}, false, false, false, tAll};
+                }
+            } else if (std::holds_alternative<FunctionPtr>(it->second.value)) {
+                // If Promise is a raw function constructor, we cannot attach properties directly;
+                // some runtimes expose constructor as an object. As a conservative fallback we also
+                // set Promise_all (above) so callers can use Promise_all([...]) until you attach
+                // to the constructor in the appropriate place where constructor object is created.
+            }
+        }
+    }
+
     // register Promise class in the environment
     {
         Environment::Variable var;
@@ -1385,6 +1521,21 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
 
         auto fnReject = std::make_shared<FunctionValue>(std::string("native:Promise.reject"), native_Promise_static_reject, nullptr, tReject);
         promise_holder->properties["reject"] = PropertyDescriptor{fnReject, false, false, false, tReject};
+
+        // Attach Promise.all to the same promise_holder as resolve/reject if the
+        // fallback Promise_all was registered earlier. This ensures Promise.all()
+        // is available as a static method like Promise.resolve / Promise.reject.
+        Token tAllBuiltin;
+        tAllBuiltin.type = TokenType::IDENTIFIER;
+        tAllBuiltin.loc = TokenLocation("<builtin:Promise.all>", 0, 0, 0);
+
+        if (env->has("Promise_all")) {
+            Value pa = env->get("Promise_all").value;
+            if (std::holds_alternative<FunctionPtr>(pa)) {
+                FunctionPtr fnAll = std::get<FunctionPtr>(pa);
+                promise_holder->properties["all"] = PropertyDescriptor{fnAll, false, false, false, tAllBuiltin};
+            }
+        }
     }
 
     // -----------------------
