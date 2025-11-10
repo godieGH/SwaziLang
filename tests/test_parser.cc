@@ -373,7 +373,7 @@ TEST(ParserExpressions, ComputedPropertyName) {
 }
 
 TEST(ParserExpressions, ObjectMethod) {
-    string src = "data obj = { tabia greet(): chapisha(\"hi\") }\n";
+    string src = "data obj = { tabia greet():\n chapisha(\"hi\")\n}\n";
     ASSERT_NO_THROW(parseProgram(src));
 }
 
