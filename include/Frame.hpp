@@ -32,6 +32,16 @@ struct CallFrame {
     std::unordered_map<size_t, std::exception_ptr> awaited_exceptions;
 
     PromisePtr pending_promise = nullptr;
+    
+    Value generator_sent_value = std::monostate{};
+    bool generator_has_sent_value = false;
+    // pointer to the YieldExpressionNode where the generator is currently paused
+    // (null when not paused on a yield).
+    YieldExpressionNode* paused_yield = nullptr;
+    
+    Value generator_return_value = std::monostate{};
+    bool generator_requested_return = false;
+    
 };
 using CallFramePtr = std::shared_ptr<CallFrame>;
 

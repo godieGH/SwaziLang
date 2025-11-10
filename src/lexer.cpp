@@ -347,7 +347,9 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         // asyncronous async/await
         {"ASYNC", TokenType::ASYNC},
         {"async", TokenType::ASYNC},
-        {"await", TokenType::AWAIT}
+        {"await", TokenType::AWAIT},
+        
+        {"yield", TokenType::YIELD}
 
     };
 

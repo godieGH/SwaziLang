@@ -411,6 +411,60 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             throw SuspendExecution();
         }
     }
+    
+  if (auto y = dynamic_cast<YieldExpressionNode*>(expr)) {
+        // Ensure yield is used only inside generator functions at runtime:
+        CallFramePtr cf = current_frame();
+        if (!cf) {
+            throw SwaziError("SyntaxError", "'yield' used outside of a generator function.", y->token.loc);
+        }
+        if (!(cf->function && cf->function->is_generator)) {
+            throw SwaziError("SyntaxError", "'yield' used outside of a generator function.", y->token.loc);
+        }
+
+        // If the frame indicates we are resuming from this exact YieldExpressionNode,
+        // return the sent value (this is the value passed into gen.next(...)).
+        if (cf->paused_yield == y) {
+            // consume the paused marker
+            cf->paused_yield = nullptr;
+
+            // If caller invoked .return(...) while generator was paused, close generator now.
+            if (cf->generator_requested_return) {
+                Value rval = cf->generator_return_value;
+                cf->generator_requested_return = false;
+                cf->generator_return_value = std::monostate{};
+                // Throw a GeneratorReturn to indicate immediate completion without yielding.
+                throw GeneratorReturn(rval);
+            }
+
+            // Normal resume: return the sent value (or undefined)
+            Value sent = std::monostate{};
+            if (cf->generator_has_sent_value) {
+                sent = cf->generator_sent_value;
+                cf->generator_has_sent_value = false;
+                cf->generator_sent_value = std::monostate{};
+            }
+            return sent;
+        }
+
+        // First-time hit of this yield node while executing: evaluate operand (what we yield)
+        Value val = std::monostate{};
+        if (y->expression) {
+            // Evaluate operand in the generator's environment (use frame env if present).
+            EnvPtr evalEnv = cf->env ? cf->env : (cf->function ? cf->function->closure : nullptr);
+            val = evaluate_expression(y->expression.get(), evalEnv);
+        }
+
+        // Mark the frame as paused at this YieldExpressionNode so that when the
+        // generator is resumed, the resumed evaluation will detect the marker and
+        // return the value passed to .next(...)
+        cf->paused_yield = y;
+
+        // Throw GeneratorYield to short-circuit evaluation and return the yielded value
+        // to the generator caller. The resume path will re-enter evaluation and when
+        // it reaches this same YieldExpressionNode it will return the sent value.
+        throw GeneratorYield(val);
+    }
 
     // Template literal evaluation: concatenate quasis and evaluated expressions.
     if (auto tpl = dynamic_cast<TemplateLiteralNode*>(expr)) {

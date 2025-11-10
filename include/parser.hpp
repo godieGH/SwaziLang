@@ -16,6 +16,7 @@ class Parser {
     size_t position = 0;
 
     bool in_async_function = false;
+    bool in_generator_function = false;
 
     Token peek() const;
     Token peek_next(size_t offset = 1) const;

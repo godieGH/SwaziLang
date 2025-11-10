@@ -164,6 +164,23 @@ struct AwaitExpressionNode : public ExpressionNode {
     }
 };
 
+// Yield expression for generators. Similar to await but only valid inside generators.
+struct YieldExpressionNode : public ExpressionNode {
+    // optional operand: yield <expr>  (allow absent operand for `yield`)
+    std::unique_ptr<ExpressionNode> expression;
+    size_t yield_id = 0;  // optional unique id if desired
+    std::string to_string() const override {
+        return "yield " + (expression ? expression->to_string() : "<null>");
+    }
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<YieldExpressionNode>();
+        n->token = token;
+        n->yield_id = yield_id;
+        n->expression = expression ? expression->clone() : nullptr;
+        return n;
+    }
+};
+
 // Member expression: obj.prop (e.g., arr.idadi, str.herufi, arr.ongeza)
 struct MemberExpressionNode : public ExpressionNode {
     std::unique_ptr<ExpressionNode> object;
@@ -753,12 +770,14 @@ struct FunctionDeclarationNode : public StatementNode {
     std::vector<std::unique_ptr<StatementNode>> body;  // function body statements
 
     bool is_async = false;  // NEW: async modifier
-
+    bool is_generator = false;
+    
     std::unique_ptr<StatementNode> clone() const override {
         auto n = std::make_unique<FunctionDeclarationNode>();
         n->token = token;
         n->name = name;
         n->is_async = is_async;  // copy async flag
+        n->is_generator = is_generator;
         n->parameters.reserve(parameters.size());
         for (const auto& p : parameters) {
             n->parameters.push_back(p ? p->clone() : nullptr);

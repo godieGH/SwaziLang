@@ -299,6 +299,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         }
 
         persisted->is_async = fd->is_async;
+        persisted->is_generator = fd->is_generator;
 
         // Move or clone the body into persisted (we can move here since fd is ephemeral)
         persisted->body.reserve(fd->body.size());

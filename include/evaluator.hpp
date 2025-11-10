@@ -18,6 +18,10 @@ class Environment;
 // Forward-declare Scheduler so Evaluator can keep a pointer.
 class Scheduler;
 
+// Forward-declare GeneratorValue used for generator objects at runtime.
+struct GeneratorValue;
+using GeneratorPtr = std::shared_ptr<GeneratorValue>;
+
 // Our language's value types
 struct FunctionValue;
 using FunctionPtr = std::shared_ptr<FunctionValue>;
@@ -54,7 +58,8 @@ using Value = std::variant<
     ArrayPtr,
     ObjectPtr,
     ClassPtr,
-    PromisePtr>;
+    PromisePtr,
+    GeneratorPtr>;
 
 struct PropertyDescriptor {
     Value value;
@@ -102,6 +107,16 @@ struct PromiseValue {
     // is attached.
     std::weak_ptr<PromiseValue> parent;
 };
+
+// Generator runtime holder (declared above as forward); defined in evaluator.cpp or FunctionCall.cpp
+struct GeneratorValue {
+    enum class State { SuspendedStart, SuspendedYield, Executing, Completed };
+    CallFramePtr frame;            // frame that executes generator body
+    State state = State::SuspendedStart;
+    bool is_done = false;
+};
+
+
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
     // We keep simple contiguous vector storage, but elements can now be HoleValue
@@ -116,8 +131,8 @@ struct FunctionValue {
     std::shared_ptr<FunctionDeclarationNode> body;
     EnvPtr closure;
     Token token;
-    // new: mark whether this function was declared async in the AST
     bool is_async = false;
+    bool is_generator = false;
     bool is_native = false;
     std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> native_impl;
 
@@ -132,6 +147,7 @@ struct FunctionValue {
                             closure(env),
                             token(tok),
                             is_async(b ? b->is_async : false),
+                            is_generator(b ? b->is_generator : false),
                             is_native(false) {
         parameters.reserve(params.size());
         for (const auto& p : params) {
@@ -155,6 +171,7 @@ struct FunctionValue {
                             closure(env),
                             token(tok),
                             is_async(b ? b->is_async : false),
+                            is_generator(b ? b->is_generator : false),
                             is_native(false) {
     }
 
@@ -168,6 +185,7 @@ struct FunctionValue {
                             closure(env),
                             token(tok),
                             is_async(false),
+                            is_generator(false),
                             is_native(true),
                             native_impl(std::move(impl)) {
     }
@@ -209,6 +227,18 @@ struct SuspendExecution : public std::exception {
     // Exception used to short-circuit evaluation when an async await suspends the current frame.
     // It's not an error — the executor will catch it, keep the frame on the stack and return.
     const char* what() const noexcept override { return "Execution suspended for await"; }
+};
+// Exception thrown to indicate a generator `yield` — carries the yielded value.
+struct GeneratorYield : public std::exception {
+    Value value;
+    explicit GeneratorYield(const Value& v) : value(v) {}
+    const char* what() const noexcept override { return "Generator yielded"; }
+};
+
+struct GeneratorReturn : public std::exception {
+    Value value;
+    explicit GeneratorReturn(const Value& v) : value(v) {}
+    const char* what() const noexcept override { return "Generator return/close"; }
 };
 
 // Evaluator
@@ -335,6 +365,10 @@ class Evaluator {
 
     void run_event_loop();
     void schedule_callback(FunctionPtr cb, const std::vector<Value>& args);
+    
+    Value resume_generator(GeneratorPtr gen, const Value& arg, bool is_return, bool is_throw, bool& done);
+    void execute_frame_until_yield_or_return(CallFramePtr frame, Value* out_yielded_value, bool* did_return, Value* return_value);
+    
 };
 
 TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc);

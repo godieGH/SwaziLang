@@ -7,6 +7,7 @@
 
 #include "debugging/outputTry.hpp"
 #include "parser.hpp"
+#include "SwaziError.hpp"
 
 std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
     bool is_constant = false;
@@ -758,15 +759,32 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
         Parser& parser;
         bool prev;
         AsyncScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_async_function) {
-            parser.in_async_function = newVal;
+           parser.in_async_function = newVal;
         }
         ~AsyncScopeGuard() {
             parser.in_async_function = prev;
         }
     };
 
+    struct GeneratorScopeGuard {
+        Parser& parser;
+        bool prev;
+        GeneratorScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_generator_function) {
+            parser.in_generator_function = newVal;
+        }
+        ~GeneratorScopeGuard() {
+            parser.in_generator_function = prev;
+        }
+    };
+
     // The 'kazi' token was already consumed by parse_statement
     auto funcNode = std::make_unique<FunctionDeclarationNode>();
+
+    // NEW: optional generator marker immediately after 'kazi': `kazi* name ...`
+    if (peek().type == TokenType::STAR) {
+        consume();
+        funcNode->is_generator = true;
+    }
 
     // optional ASYNC modifier BEFORE the function name (syntax: 'kazi ASYNC name ...')
     if (peek().type == TokenType::ASYNC) {
@@ -776,6 +794,11 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
 
     expect(TokenType::IDENTIFIER, "Expected function name after 'kazi'");
     Token idTok = tokens[position - 1];
+    // Reject async generators per rule
+    if (funcNode->is_async && funcNode->is_generator) {
+        throw SwaziError("SyntaxError", "Async functions cannot be generators (kazi* cannot be async).", idTok.loc);
+    }
+    
     funcNode->name = idTok.value;
     funcNode->token = idTok;
 
@@ -940,6 +963,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
         expect(TokenType::INDENT, "Expected indented block for function body");
 
         AsyncScopeGuard async_guard(*this, funcNode->is_async);
+        GeneratorScopeGuard gen_guard(*this, funcNode->is_generator);
 
         // indentation-based body (defensive: parse_statement may return null at EOF)
         while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
@@ -952,6 +976,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
 
     } else if (match(TokenType::OPENBRACE)) {
         AsyncScopeGuard async_guard(*this, funcNode->is_async);
+        GeneratorScopeGuard gen_guard(*this, funcNode->is_generator);
 
         // --- Brace-based body ---
         // Loop but skip separators before attempting to parse a statement so that
@@ -969,7 +994,6 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
         }
 
         expect(TokenType::CLOSEBRACE, "Expected '}' to close function body");
-
     } else {
         // --- Syntax Error ---
         expect(TokenType::COLON, "Expected ':' or '{' to begin function body");

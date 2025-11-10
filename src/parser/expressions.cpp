@@ -392,6 +392,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
         throw SwaziError("ParseError", "Method function should start with 'tabia' keyword", peek().loc);
     }
 
+    // Generators are NOT allowed for tabia/methods per rule.
+    if (peek().type == TokenType::STAR) {
+        throw SwaziError("SyntaxError", "Generator methods ('tabia*') are not supported — generators are only allowed for top-level `kazi*` functions.", startTok.loc);
+    }
+
     bool is_async = false;
     if (peek().type == TokenType::ASYNC) {
         consume();
@@ -1023,6 +1028,36 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         node->expression = parse_unary();
         static size_t next_await_id = 1;
         node->await_id = next_await_id++;
+        return node;
+    }
+    
+    if (t.type == TokenType::YIELD) {
+        if (!in_generator_function) {
+            throw SwaziError("SyntaxError", "'yield' used outside of a generator function.", t.loc);
+        }
+        Token yieldTok = consume();  // consume 'yield'
+        auto node = std::make_unique<YieldExpressionNode>();
+        node->token = yieldTok;
+        // optional operand: try to parse a unary expression if present; if not, expression may be absent
+        // We'll allow `yield` alone (no operand) as well as `yield <expr>`.
+        // If the next token cannot start an expression, leave operand null.
+        Token nxt = peek();
+        bool can_start_expr =
+            nxt.type == TokenType::NUMBER || nxt.type == TokenType::STRING || nxt.type == TokenType::SINGLE_QUOTED_STRING ||
+            nxt.type == TokenType::OPENPARENTHESIS || nxt.type == TokenType::IDENTIFIER ||
+            nxt.type == TokenType::OPENBRACKET || nxt.type == TokenType::OPENBRACE ||
+            nxt.type == TokenType::SELF || nxt.type == TokenType::UNDA || nxt.type == TokenType::SUPA ||
+            nxt.type == TokenType::TEMPLATE_CHUNK || nxt.type == TokenType::TEMPLATE_STRING ||
+            nxt.type == TokenType::BOOLEAN || nxt.type == TokenType::NULL_LITERAL ||
+            nxt.type == TokenType::NAN_LITERAL || nxt.type == TokenType::INF_LITERAL;
+
+        if (can_start_expr) {
+            node->expression = parse_unary();
+        } else {
+            node->expression = nullptr;  // yield with no operand
+        }
+        static size_t next_yield_id = 1;
+        node->yield_id = next_yield_id++;
         return node;
     }
 

@@ -208,6 +208,11 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     node->is_constructor = isCtor;
     node->is_destructor = isDtor;
     node->is_getter = false;
+    
+    // Generators are NOT allowed for tabia/methods per rule.
+    if (peek().type == TokenType::STAR) {
+        throw SwaziError("SyntaxError", "Generator methods ('tabia*') are not supported — generators are only allowed for top-level `kazi*` functions.", peek().loc);
+    }
 
     if (peek().type == TokenType::ASYNC) {
         consume();

@@ -99,6 +99,154 @@ void Evaluator::execute_frame_until_return(CallFramePtr frame) {
     frame->did_return = false;  // no explicit 'return' statement, but completion yields undefined
 }
 
+// Run frame until the next 'yield' or until a return/completion occurs.
+// If a yield occurs, this function throws GeneratorYield which the caller can catch,
+// or we implement a variant that catches GeneratorYield and returns control with yielded value.
+// Replace the execute_frame_until_yield_or_return implementation with this snippet
+// (only the function is shown — apply into your existing FunctionCall.cpp)
+void Evaluator::execute_frame_until_yield_or_return(CallFramePtr frame, Value* out_yielded_value, bool* did_return, Value* return_value) {
+    if (!frame || !frame->function) return;
+
+    auto& body = frame->function->body->body;
+
+    while (frame->next_statement_index < body.size()) {
+        auto* stmt = body[frame->next_statement_index].get();
+        try {
+            Value ret_val;
+            bool local_return = false;
+
+            evaluate_statement(stmt, frame->env, &ret_val, &local_return);
+
+            if (local_return) {
+                if (did_return) *did_return = true;
+                if (return_value) *return_value = ret_val;
+                // advance so completion state is consistent
+                frame->next_statement_index++;
+                return;
+            }
+
+            // advance when statement completed normally
+            frame->next_statement_index++;
+        } catch (const GeneratorYield& gy) {
+            // A normal yield: return the yielded value to caller but do NOT advance
+            // next_statement_index — re-evaluation/resume must re-enter the same statement.
+            if (out_yielded_value) *out_yielded_value = gy.value;
+            if (did_return) *did_return = false;
+            return;
+        } catch (const GeneratorReturn& gr) {
+            // Iterator.return(...) requested the generator to close while suspended.
+            // Treat this as a completion: mark the frame as returned and propagate
+            // the return value back to the caller.
+            if (did_return) *did_return = true;
+            if (return_value) *return_value = gr.value;
+
+            // Also persist into the frame so resume_generator sees the completion.
+            frame->did_return = true;
+            frame->return_value = std::any(gr.value);
+
+            // consume paused_yield marker if present
+            frame->paused_yield = nullptr;
+            // clear any request flags
+            frame->generator_requested_return = false;
+            frame->generator_return_value = std::monostate{};
+
+            return;
+        } catch (const std::exception& ex) {
+            // Unexpected runtime error while executing generator -> mark frame completed and rethrow
+            frame->did_return = true;
+            frame->return_value = std::any(Value{std::string(ex.what())});
+            throw;
+        } catch (...) {
+            frame->did_return = true;
+            frame->return_value = std::any(Value{std::string("unknown exception")});
+            throw;
+        }
+    }
+
+    // Completed without explicit return -> done with undefined
+    if (did_return) *did_return = true;
+    if (return_value) *return_value = std::monostate{};
+}
+Value Evaluator::resume_generator(GeneratorPtr gen, const Value& arg, bool is_return, bool is_throw, bool& done) {
+    done = false;
+    if (!gen || !gen->frame || gen->is_done) {
+        done = true;
+        return std::monostate{};
+    }
+
+    auto frame = gen->frame;
+
+    // Handle the SuspendedStart + return() special case: per JS semantics, return(x)
+    // on a generator that hasn't started completes it immediately and returns x.
+    if (gen->state == GeneratorValue::State::SuspendedStart) {
+        if (is_return && !is_throw) {
+            // close without executing body
+            gen->state = GeneratorValue::State::Completed;
+            gen->is_done = true;
+            done = true;
+            return arg;
+        }
+        // Otherwise (normal first next) there is no sent value for the first resume.
+        if (frame) {
+            frame->generator_has_sent_value = false;
+            frame->generator_sent_value = std::monostate{};
+            frame->generator_requested_return = false;
+            frame->generator_return_value = std::monostate{};
+        }
+    } else {
+        // Not the first resume: record either a normal sent value or a return request.
+        if (frame) {
+            if (is_return && !is_throw) {
+                frame->generator_requested_return = true;
+                frame->generator_return_value = arg;
+                // Ensure we don't also expose this as a normal "sent value".
+                frame->generator_has_sent_value = false;
+                frame->generator_sent_value = std::monostate{};
+            } else {
+                frame->generator_requested_return = false;
+                frame->generator_return_value = std::monostate{};
+                frame->generator_sent_value = arg;
+                frame->generator_has_sent_value = true;
+            }
+        }
+    }
+
+    // Push frame onto call stack so evaluate_statement / evaluate_expression can use current_frame()
+    push_frame(frame);
+
+    // Mark executing
+    gen->state = GeneratorValue::State::Executing;
+
+    Value yielded = std::monostate{};
+    bool did_return = false;
+    Value retval = std::monostate{};
+
+    try {
+        execute_frame_until_yield_or_return(frame, &yielded, &did_return, &retval);
+    } catch (const std::exception& e) {
+        // If an exception escaped the generator, mark done and rethrow as runtime error
+        gen->state = GeneratorValue::State::Completed;
+        gen->is_done = true;
+        pop_frame();
+        throw;
+    }
+
+    // If a yield happened, we have a yielded value and generator remains suspended.
+    if (!did_return) {
+        gen->state = GeneratorValue::State::SuspendedYield;
+        pop_frame();
+        done = false;
+        return yielded;
+    }
+
+    // Generator completed (did_return true) — finalize
+    gen->state = GeneratorValue::State::Completed;
+    gen->is_done = true;
+    pop_frame();
+    done = true;
+    return retval;
+}
+
 Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
     if (!fn) {
         throw SwaziError(
@@ -153,18 +301,22 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
     frame->label = fn->name.empty() ? "<lambda>" : fn->name;
     frame->is_async = fn->is_async;
 
-    push_frame(frame);
-
     // create local environment whose parent is the function's closure
     auto local = std::make_shared<Environment>(fn->closure);
     frame->env = local;
 
-    // Bind parameters left-to-right. Rest parameter (if any) collects appropriate args.
+    // If this function is a generator, we must create a GeneratorValue instead of executing now.
+ 
+    if (fn->is_generator) {
+    auto gen = std::make_shared<GeneratorValue>();
+    gen->frame = frame;
+    gen->state = GeneratorValue::State::SuspendedStart;
+    gen->is_done = false;
+
+    // CRITICAL: Bind parameters to frame environment NOW (before first resume)
     size_t argIndex = 0;
     for (size_t i = 0; i < fn->parameters.size(); ++i) {
         auto& p = fn->parameters[i];
-
-        // defensive: if descriptor missing, bind positionally if available else undefined (skip binding name)
         if (!p) {
             if (argIndex < args.size()) argIndex++;
             continue;
@@ -176,21 +328,15 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
                 size_t remaining = (argIndex < args.size()) ? (args.size() - argIndex) : 0;
                 if (remaining < p->rest_required_count) {
                     std::ostringstream ss;
-                    ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
+                    ss << "Generator '" << (fn->name.empty() ? "<lambda>" : fn->name)
                        << "' rest parameter '" << p->name << "' requires at least " << p->rest_required_count
                        << " elements but got " << remaining;
-                    throw SwaziError(
-                        "TypeError",
-                        ss.str(),
-                        callToken.loc);
+                    throw SwaziError("TypeError", ss.str(), callToken.loc);
                 }
-                for (size_t k = 0; k < p->rest_required_count; ++k) {
+                for (size_t k = 0; k < p->rest_required_count; ++k)
                     arr->elements.push_back(args[argIndex++]);
-                }
             } else {
-                while (argIndex < args.size()) {
-                    arr->elements.push_back(args[argIndex++]);
-                }
+                while (argIndex < args.size()) arr->elements.push_back(args[argIndex++]);
             }
             Environment::Variable var;
             var.value = arr;
@@ -207,17 +353,64 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
                 var.value = evaluate_expression(p->defaultValue.get(), local);
             } else {
                 std::ostringstream ss;
-                ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
+                ss << "Generator '" << (fn->name.empty() ? "<anonymous>" : fn->name)
                    << "' missing required argument '" << p->name << "'";
-                throw SwaziError(
-                    "TypeError",
-                    ss.str(),
-                    callToken.loc);
+                throw SwaziError("TypeError", ss.str(), callToken.loc);
             }
         }
         var.is_constant = false;
         local->set(p->name, var);
     }
+
+    // Create generator object with methods
+    auto genObj = std::make_shared<ObjectValue>();
+    
+    // Store generator internally
+    PropertyDescriptor genDesc;
+    genDesc.value = gen;
+    genDesc.is_private = true;
+    genDesc.token = callToken;
+    genObj->properties["__generator__"] = genDesc;
+
+    // next() method
+    auto next_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
+        Value send = a.empty() ? std::monostate{} : a[0];
+        bool done = false;
+        Value yielded = this->resume_generator(gen, send, false, false, done);
+        auto obj = std::make_shared<ObjectValue>();
+        obj->properties["value"] = {yielded, false, false, false, tok};
+        obj->properties["done"] = {done, false, false, false, tok};
+        return obj;
+    };
+
+    // return() method
+    auto return_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
+        Value sent = a.empty() ? std::monostate{} : a[0];
+        bool done = false;
+        Value yielded = this->resume_generator(gen, sent, true, false, done);
+        auto obj = std::make_shared<ObjectValue>();
+        obj->properties["value"] = {yielded, false, false, false, tok};
+        obj->properties["done"] = {done, false, false, false, tok};
+        return obj;
+    };
+
+    // throw() method
+    auto throw_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
+        Value reason = a.empty() ? std::monostate{} : a[0];
+        bool done = false;
+        Value yielded = this->resume_generator(gen, reason, false, true, done);
+        auto obj = std::make_shared<ObjectValue>();
+        obj->properties["value"] = {yielded, false, false, false, tok};
+        obj->properties["done"] = {done, false, false, false, tok};
+        return obj;
+    };
+
+    Token methodTok = callToken;
+    genObj->properties["next"] = {std::make_shared<FunctionValue>("next", next_impl, nullptr, methodTok), false, false, false, methodTok};
+    genObj->properties["return"] = {std::make_shared<FunctionValue>("return", return_impl, nullptr, methodTok), false, false, false, methodTok};
+    
+    return genObj;
+}
 
     Value ret_val = std::monostate{};
     bool did_return = false;
@@ -284,7 +477,6 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
     pop_frame();
     return result;
 }
-
 Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
     if (!fn) {
         throw SwaziError(

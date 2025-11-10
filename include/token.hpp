@@ -30,6 +30,11 @@ enum class TokenType {
     //-----------------------
     ASYNC,
     AWAIT,
+    
+    //-----------------------
+    // generators
+    // -----------------------
+    YIELD,
 
     // -----------------------
     // Control-flow (if / else / switches / guards)
