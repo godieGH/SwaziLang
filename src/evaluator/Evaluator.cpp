@@ -11,6 +11,7 @@
 #include "ClassRuntime.hpp"
 #include "Frame.hpp"
 #include "Scheduler.hpp"
+#include "colors.hpp"
 #include "globals.hpp"
 namespace fs = std::filesystem;
 #include "AsyncBridge.hpp"
@@ -285,7 +286,28 @@ void Evaluator::report_unhandled_rejection(PromisePtr p) {
     if (p->unhandled_reported) return;
     p->unhandled_reported = true;
 
-    // Default behavior: print a warning to stderr with reason
     std::string reason_str = to_string_value(p->result);
-    std::cerr << "UnhandledPromiseRejectionWarning: " << reason_str << std::endl;
+
+    bool use_color = Color::supports_color();
+    const std::string& gray = use_color ? Color::bright_black : "";
+    const std::string& red = use_color ? Color::bright_red : "";
+    const std::string& yellow = use_color ? Color::bright_yellow : "";
+    const std::string& reset = use_color ? Color::reset : "";
+
+    std::cerr
+        << std::endl
+        << red << "UnhandledPromiseRejectionError" << reset << ": "
+        << reason_str << std::endl
+        << gray << "    at: promise rejection (async)" << reset << std::endl
+        << yellow << "⚠️  Tip:" << reset << " Use .catch(...) or try { await ... } catch (...) to handle this rejection." << std::endl
+        << gray << "    (This will terminate in future versions if not handled)" << reset << std::endl
+        << std::endl;
+}
+void Evaluator::mark_promise_and_ancestors_handled(PromisePtr p) {
+    while (p) {
+        if (p->handled) break;
+        p->handled = true;
+        auto wp = p->parent;
+        p = wp.lock();
+    }
 }

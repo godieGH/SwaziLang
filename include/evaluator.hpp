@@ -96,6 +96,11 @@ struct PromiseValue {
 
     // NEW: ensure we only schedule the "unhandled check" microtask once per rejection
     bool unhandled_check_scheduled = false;
+
+    // NEW: parent link for chained promises. When a promise A is created by calling B.then(...),
+    // set A->parent = B so we can walk ancestors and mark them handled when a downstream handler
+    // is attached.
+    std::weak_ptr<PromiseValue> parent;
 };
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
@@ -233,6 +238,9 @@ class Evaluator {
     void fulfill_promise(PromisePtr p, const Value& value);
     void reject_promise(PromisePtr p, const Value& reason);
     void report_unhandled_rejection(PromisePtr p);
+
+    // NEW: Mark promise and all ancestors as handled (walk parent links).
+    void mark_promise_and_ancestors_handled(PromisePtr p);
 
    private:
     EnvPtr global_env;

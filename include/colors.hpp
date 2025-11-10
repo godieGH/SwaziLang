@@ -4,7 +4,7 @@
 #include <string>  // for std::string
 
 namespace Color {
-bool supports_color() {
+inline bool supports_color() {
     return isatty(STDOUT_FILENO);
 }
 const std::string reset = "\033[0m";
