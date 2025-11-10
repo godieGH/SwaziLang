@@ -11,10 +11,6 @@
 //   Those symbols appear referenced in your other code (AsyncBridge.hpp), so include that header.
 // - The code below uses small local helpers to convert Value -> string / number.
 
-#include "evaluator.hpp"
-#include "AsyncBridge.hpp"
-#include "SwaziError.hpp"
-#include "builtins.hpp" // for declaration of native_createServer (optional)
 #include <uv.h>
 
 #include <atomic>
@@ -27,11 +23,18 @@
 #include <string>
 #include <unordered_map>
 
+#include "AsyncBridge.hpp"
+#include "SwaziError.hpp"
+#include "builtins.hpp"  // for declaration of native_createServer (optional)
+#include "evaluator.hpp"
+
 // Local simple Value -> string/number helpers (similar to builtins.cpp)
 static std::string value_to_string_simple_local(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
     if (std::holds_alternative<double>(v)) {
-        std::ostringstream ss; ss << std::get<double>(v); return ss.str();
+        std::ostringstream ss;
+        ss << std::get<double>(v);
+        return ss.str();
     }
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
     return std::string();
@@ -39,7 +42,9 @@ static std::string value_to_string_simple_local(const Value& v) {
 static double value_to_number_simple_local(const Value& v) {
     if (std::holds_alternative<double>(v)) return std::get<double>(v);
     if (std::holds_alternative<std::string>(v)) {
-        try { return std::stod(std::get<std::string>(v)); } catch (...) { return 0.0; }
+        try {
+            return std::stod(std::get<std::string>(v));
+        } catch (...) { return 0.0; }
     }
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? 1.0 : 0.0;
     return 0.0;
@@ -91,7 +96,8 @@ struct HttpResponse {
         for (const auto& kv : headers) {
             response << kv.first << ": " << kv.second << "\r\n";
         }
-        response << "\r\n" << body;
+        response << "\r\n"
+                 << body;
 
         std::string out = response.str();
         // Allocate a copy for libuv write
@@ -185,7 +191,10 @@ static void on_connection(uv_stream_t* server, int status) {
             [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                 if (nread > 0) {
                     ServerInstance* srv = static_cast<ServerInstance*>(stream->data);
-                    if (!srv) { delete[] buf->base; return; }
+                    if (!srv) {
+                        delete[] buf->base;
+                        return;
+                    }
 
                     auto http_req = parse_http_request_simple(buf->base, nread);
                     if (http_req) {
@@ -193,16 +202,16 @@ static void on_connection(uv_stream_t* server, int status) {
 
                         // prepare request object (ObjectPtr)
                         auto req_obj = std::make_shared<ObjectValue>();
-                        req_obj->properties["method"] = { Value{http_req->method}, false, false, true, Token{} };
-                        req_obj->properties["path"] = { Value{http_req->path}, false, false, true, Token{} };
-                        req_obj->properties["query"] = { Value{http_req->query}, false, false, true, Token{} };
-                        req_obj->properties["body"] = { Value{http_req->body}, false, false, true, Token{} };
+                        req_obj->properties["method"] = {Value{http_req->method}, false, false, true, Token{}};
+                        req_obj->properties["path"] = {Value{http_req->path}, false, false, true, Token{}};
+                        req_obj->properties["query"] = {Value{http_req->query}, false, false, true, Token{}};
+                        req_obj->properties["body"] = {Value{http_req->body}, false, false, true, Token{}};
 
                         auto headers_obj = std::make_shared<ObjectValue>();
                         for (const auto& kv : http_req->headers) {
-                            headers_obj->properties[kv.first] = { Value{kv.second}, false, false, true, Token{} };
+                            headers_obj->properties[kv.first] = {Value{kv.second}, false, false, true, Token{}};
                         }
-                        req_obj->properties["headers"] = { Value{headers_obj}, false, false, true, Token{} };
+                        req_obj->properties["headers"] = {Value{headers_obj}, false, false, true, Token{}};
 
                         // response object
                         auto res_obj = std::make_shared<ObjectValue>();
@@ -224,7 +233,7 @@ static void on_connection(uv_stream_t* server, int status) {
                             return std::monostate{};
                         };
                         auto writeHead_fn = std::make_shared<FunctionValue>("res.writeHead", writeHead_impl, nullptr, Token{});
-                        res_obj->properties["writeHead"] = { Value{writeHead_fn}, false, false, true, Token{} };
+                        res_obj->properties["writeHead"] = {Value{writeHead_fn}, false, false, true, Token{}};
 
                         // res.end(data)
                         auto end_impl = [http_res](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
@@ -233,7 +242,7 @@ static void on_connection(uv_stream_t* server, int status) {
                             return std::monostate{};
                         };
                         auto end_fn = std::make_shared<FunctionValue>("res.end", end_impl, nullptr, Token{});
-                        res_obj->properties["end"] = { Value{end_fn}, false, false, true, Token{} };
+                        res_obj->properties["end"] = {Value{end_fn}, false, false, true, Token{}};
 
                         // enqueue invocation of request handler onto main scheduler loop
                         if (srv->request_handler) {
@@ -242,7 +251,7 @@ static void on_connection(uv_stream_t* server, int status) {
                             scheduler_run_on_loop([handler, req_obj, res_obj]() {
                                 try {
                                     // CallbackPayload is a type in your AsyncBridge — create a payload
-                                    CallbackPayload* payload = new CallbackPayload(handler, { Value{req_obj}, Value{res_obj} });
+                                    CallbackPayload* payload = new CallbackPayload(handler, {Value{req_obj}, Value{res_obj}});
                                     // Use the bridge API that accepts void* to avoid linking/type-mismatch.
                                     enqueue_callback_global(static_cast<void*>(payload));
                                 } catch (...) {}
@@ -313,7 +322,7 @@ Value native_createServer(const std::vector<Value>& args, EnvPtr /*env*/, const 
         return std::monostate{};
     };
     auto listen_fn = std::make_shared<FunctionValue>("server.listen", listen_impl, nullptr, Token{});
-    server_obj->properties["listen"] = { Value{listen_fn}, false, false, true, Token{} };
+    server_obj->properties["listen"] = {Value{listen_fn}, false, false, true, Token{}};
 
     // server.close(callback?)
     auto close_impl = [inst, id](const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*token*/) -> Value {
@@ -337,7 +346,7 @@ Value native_createServer(const std::vector<Value>& args, EnvPtr /*env*/, const 
         return std::monostate{};
     };
     auto close_fn = std::make_shared<FunctionValue>("server.close", close_impl, nullptr, Token{});
-    server_obj->properties["close"] = { Value{close_fn}, false, false, true, Token{} };
+    server_obj->properties["close"] = {Value{close_fn}, false, false, true, Token{}};
 
-    return Value{ server_obj };
+    return Value{server_obj};
 }

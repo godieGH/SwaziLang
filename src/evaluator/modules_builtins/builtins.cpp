@@ -711,10 +711,9 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
 #endif
 
-
-// --- excerpt/replace inside make_http_exports(...) where createServer is wired ---
-// Remove the old placement (it was inside the libcurl branch in your original file).
-// Replace with the following block (place after registering get/post):
+    // --- excerpt/replace inside make_http_exports(...) where createServer is wired ---
+    // Remove the old placement (it was inside the libcurl branch in your original file).
+    // Replace with the following block (place after registering get/post):
 
 #if defined(HAVE_LIBUV)
     // http.createServer(handler) -> server object (uses libuv)
@@ -725,15 +724,13 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 
         // native_createServer is implemented in HttpAPI.cpp and declared in builtins.hpp
         auto create_server_fn = std::make_shared<FunctionValue>("createServer", native_createServer, env, tok);
-        obj->properties["createServer"] = PropertyDescriptor{ Value{create_server_fn}, false, false, false, tok };
+        obj->properties["createServer"] = PropertyDescriptor{Value{create_server_fn}, false, false, false, tok};
     }
 #else
     // stub: clear error if libuv is not present
     {
-        auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            throw SwaziError("NotImplementedError", "http.createServer requires libuv support. Build with libuv or provide an external http module.", token.loc);
-        }, env);
-        obj->properties["createServer"] = PropertyDescriptor{ fn_server, false, false, false, Token() };
+        auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("NotImplementedError", "http.createServer requires libuv support. Build with libuv or provide an external http module.", token.loc); }, env);
+        obj->properties["createServer"] = PropertyDescriptor{fn_server, false, false, false, Token()};
     }
 #endif
 

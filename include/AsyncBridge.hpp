@@ -2,9 +2,11 @@
 // Small bridge payload type used to transfer callbacks from timer threads into the scheduler.
 // Only translation units that need to build or consume the payload should include this header.
 
-#include "evaluator.hpp"
-#include <functional>
 #include <uv.h>
+
+#include <functional>
+
+#include "evaluator.hpp"
 
 // Box passed across thread boundaries. The receiver is responsible for deleting it.
 struct CallbackPayload {
