@@ -49,6 +49,10 @@ add_subdirectory(thirdparty/libuv-1.51.0)
 # Link the libuv target to your executable.
 # The target name provided by libuv's own CMake is 'uv'.
 target_link_libraries(swazi PRIVATE uv)
+
+# IMPORTANT: tell the compiler that libuv is present so builtins.cpp compiles the libuv-backed createServer.
+# Without this the http module builds the runtime stub that throws NotImplementedError.
+target_compile_definitions(swazi PRIVATE HAVE_LIBUV=1)
 # --- End local libuv integration ---
 
 

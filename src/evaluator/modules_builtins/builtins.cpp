@@ -702,13 +702,6 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             return Value{ ctx.buf }; }, env);
         obj->properties["post"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
-
-    // http.createServer(handler) -> throws (not implemented in builtin). We provide a clear error.
-    {
-        auto fn = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("NotImplementedError", "http.createServer is not provided by the builtin module. For running servers, please use an external server module or bind to a library (e.g., cpp-httplib, boost::asio or similar).", token.loc); }, env);
-        obj->properties["createServer"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
 #else
     // Stubs when libcurl is not available
     auto fn_get = make_native_fn("http.get", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("HttpError", "http.get native module requires libcurl support. Build with libcurl or provide an external http module.", token.loc); }, env);
@@ -716,9 +709,32 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 
     auto fn_post = make_native_fn("http.post", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("HttpError", "http.post native module requires libcurl support. Build with libcurl or provide an external http module.", token.loc); }, env);
     obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
+#endif
 
-    auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("NotImplementedError", "http.createServer is not available in builtin without a server backend.", token.loc); }, env);
-    obj->properties["createServer"] = PropertyDescriptor{fn_server, false, false, false, Token()};
+
+// --- excerpt/replace inside make_http_exports(...) where createServer is wired ---
+// Remove the old placement (it was inside the libcurl branch in your original file).
+// Replace with the following block (place after registering get/post):
+
+#if defined(HAVE_LIBUV)
+    // http.createServer(handler) -> server object (uses libuv)
+    {
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<http>", 0, 0, 0);
+
+        // native_createServer is implemented in HttpAPI.cpp and declared in builtins.hpp
+        auto create_server_fn = std::make_shared<FunctionValue>("createServer", native_createServer, env, tok);
+        obj->properties["createServer"] = PropertyDescriptor{ Value{create_server_fn}, false, false, false, tok };
+    }
+#else
+    // stub: clear error if libuv is not present
+    {
+        auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            throw SwaziError("NotImplementedError", "http.createServer requires libuv support. Build with libuv or provide an external http module.", token.loc);
+        }, env);
+        obj->properties["createServer"] = PropertyDescriptor{ fn_server, false, false, false, Token() };
+    }
 #endif
 
     return obj;
