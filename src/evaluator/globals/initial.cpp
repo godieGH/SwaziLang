@@ -7,6 +7,7 @@
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <thread>
 
 #include "ClassRuntime.hpp"
 #include "Frame.hpp"
@@ -562,7 +563,21 @@ static Value builtin_cerr(const std::vector<Value>& args, EnvPtr env, const Toke
     std::cerr << msg << "\n";
     return Value();
 }
+static Value builtin_print(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    for (int i = 0; i < args.size(); ++i) {
+        std::string msg = value_to_string(args[i]);
+        std::cout << msg << " ";
+    }
+    std::cout << "\n";
+    return Value();
+}
+static Value builtin_sleep(const std::vector<Value>& args, EnvPtr, const Token& tok) {
+    if (args.empty()) return std::monostate{};
+    long long ms = static_cast<long long>(value_to_number(args[0]));
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    return std::monostate{};
+}
 // --------------------
 // Ordered map factory: Object.ordered([plainObject])
 // --------------------
@@ -845,6 +860,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     add_fn("Error", builtin_Error);
     add_fn("thibitisha", builtin_thibitisha);
     add_fn("assert", builtin_thibitisha);
+    add_fn("sleep", builtin_sleep);
 
     auto objectVal = std::make_shared<ObjectValue>();
 
@@ -978,21 +994,45 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     {
         auto programVal = std::make_shared<ObjectValue>();
         programVal->is_frozen = true;
-        auto add = [&](const std::string& name,
-                       std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
+
+        auto add_method = [&](std::shared_ptr<ObjectValue> obj,
+                              const std::string& name,
+                              std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) {
             auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
-            programVal->properties[name] = {
-                fn,
-                false,
-                false,
-                true,
-                Token{}};
+            obj->properties[name] = {fn, false, false, true, Token{}};
         };
 
-        add("exit", builtin_toka);
-        add("cerr", builtin_cerr);
-        add("cin", builtin_ingiza);
+        // --- stdout ---
+        auto stdoutVal = std::make_shared<ObjectValue>();
+        add_method(stdoutVal, "write", builtin_print);
 
+        // --- stderr ---
+        auto stderrVal = std::make_shared<ObjectValue>();
+        add_method(stderrVal, "write", builtin_cerr);
+
+        // --- stdin ---
+        auto stdinVal = std::make_shared<ObjectValue>();
+        add_method(stdinVal, "readLine", builtin_ingiza);
+
+        // Attach standard IO objects
+        programVal->properties["stdout"] = {stdoutVal, false, false, true, Token{}};
+        programVal->properties["stderr"] = {stderrVal, false, false, true, Token{}};
+        programVal->properties["stdin"] = {stdinVal, false, false, true, Token{}};
+
+        // --- top-level builtins ---
+        add_method(programVal, "exit", builtin_toka);
+        add_method(programVal, "log", builtin_print);
+
+        // --- backward compatibility aliases ---
+        // swazi.cin -> swazi.stdin.readLine
+        auto cinFn = std::make_shared<FunctionValue>("cin", builtin_ingiza, env, Token{});
+        programVal->properties["cin"] = {cinFn, false, false, true, Token{}};
+
+        // swazi.cerr -> swazi.stderr.write
+        auto cerrFn = std::make_shared<FunctionValue>("cerr", builtin_cerr, env, Token{});
+        programVal->properties["cerr"] = {cerrFn, false, false, true, Token{}};
+
+        // Finalize swazi global
         Environment::Variable program;
         program.value = programVal;
         program.is_constant = true;
