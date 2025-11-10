@@ -306,114 +306,164 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
     frame->env = local;
 
     // If this function is a generator, we must create a GeneratorValue instead of executing now.
- 
+
     if (fn->is_generator) {
-    auto gen = std::make_shared<GeneratorValue>();
-    gen->frame = frame;
-    gen->state = GeneratorValue::State::SuspendedStart;
-    gen->is_done = false;
+        auto gen = std::make_shared<GeneratorValue>();
+        gen->frame = frame;
+        gen->state = GeneratorValue::State::SuspendedStart;
+        gen->is_done = false;
 
-    // CRITICAL: Bind parameters to frame environment NOW (before first resume)
-    size_t argIndex = 0;
-    for (size_t i = 0; i < fn->parameters.size(); ++i) {
-        auto& p = fn->parameters[i];
-        if (!p) {
-            if (argIndex < args.size()) argIndex++;
-            continue;
-        }
+        // CRITICAL: Bind parameters to frame environment NOW (before first resume)
+        size_t argIndex = 0;
+        for (size_t i = 0; i < fn->parameters.size(); ++i) {
+            auto& p = fn->parameters[i];
+            if (!p) {
+                if (argIndex < args.size()) argIndex++;
+                continue;
+            }
 
-        if (p->is_rest) {
-            auto arr = std::make_shared<ArrayValue>();
-            if (p->rest_required_count > 0) {
-                size_t remaining = (argIndex < args.size()) ? (args.size() - argIndex) : 0;
-                if (remaining < p->rest_required_count) {
+            if (p->is_rest) {
+                auto arr = std::make_shared<ArrayValue>();
+                if (p->rest_required_count > 0) {
+                    size_t remaining = (argIndex < args.size()) ? (args.size() - argIndex) : 0;
+                    if (remaining < p->rest_required_count) {
+                        std::ostringstream ss;
+                        ss << "Generator '" << (fn->name.empty() ? "<lambda>" : fn->name)
+                           << "' rest parameter '" << p->name << "' requires at least " << p->rest_required_count
+                           << " elements but got " << remaining;
+                        throw SwaziError("TypeError", ss.str(), callToken.loc);
+                    }
+                    for (size_t k = 0; k < p->rest_required_count; ++k)
+                        arr->elements.push_back(args[argIndex++]);
+                } else {
+                    while (argIndex < args.size()) arr->elements.push_back(args[argIndex++]);
+                }
+                Environment::Variable var;
+                var.value = arr;
+                var.is_constant = false;
+                local->set(p->name, var);
+                continue;
+            }
+
+            Environment::Variable var;
+            if (argIndex < args.size()) {
+                var.value = args[argIndex++];
+            } else {
+                if (p->defaultValue) {
+                    var.value = evaluate_expression(p->defaultValue.get(), local);
+                } else {
                     std::ostringstream ss;
-                    ss << "Generator '" << (fn->name.empty() ? "<lambda>" : fn->name)
-                       << "' rest parameter '" << p->name << "' requires at least " << p->rest_required_count
-                       << " elements but got " << remaining;
+                    ss << "Generator '" << (fn->name.empty() ? "<anonymous>" : fn->name)
+                       << "' missing required argument '" << p->name << "'";
                     throw SwaziError("TypeError", ss.str(), callToken.loc);
                 }
-                for (size_t k = 0; k < p->rest_required_count; ++k)
-                    arr->elements.push_back(args[argIndex++]);
-            } else {
-                while (argIndex < args.size()) arr->elements.push_back(args[argIndex++]);
             }
-            Environment::Variable var;
-            var.value = arr;
             var.is_constant = false;
             local->set(p->name, var);
-            continue;
         }
 
-        Environment::Variable var;
-        if (argIndex < args.size()) {
-            var.value = args[argIndex++];
-        } else {
-            if (p->defaultValue) {
-                var.value = evaluate_expression(p->defaultValue.get(), local);
-            } else {
-                std::ostringstream ss;
-                ss << "Generator '" << (fn->name.empty() ? "<anonymous>" : fn->name)
-                   << "' missing required argument '" << p->name << "'";
-                throw SwaziError("TypeError", ss.str(), callToken.loc);
-            }
-        }
-        var.is_constant = false;
-        local->set(p->name, var);
+        // Create generator object with methods
+        auto genObj = std::make_shared<ObjectValue>();
+
+        // Store generator internally
+        PropertyDescriptor genDesc;
+        genDesc.value = gen;
+        genDesc.is_private = true;
+        genDesc.token = callToken;
+        genObj->properties["__generator__"] = genDesc;
+
+        // next() method
+        auto next_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
+            Value send = a.empty() ? std::monostate{} : a[0];
+            bool done = false;
+            Value yielded = this->resume_generator(gen, send, false, false, done);
+            auto obj = std::make_shared<ObjectValue>();
+            obj->properties["value"] = {yielded, false, false, false, tok};
+            obj->properties["done"] = {done, false, false, false, tok};
+            return obj;
+        };
+
+        // return() method
+        auto return_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
+            Value sent = a.empty() ? std::monostate{} : a[0];
+            bool done = false;
+            Value yielded = this->resume_generator(gen, sent, true, false, done);
+            auto obj = std::make_shared<ObjectValue>();
+            obj->properties["value"] = {yielded, false, false, false, tok};
+            obj->properties["done"] = {done, false, false, false, tok};
+            return obj;
+        };
+
+        // throw() method
+        auto throw_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
+            Value reason = a.empty() ? std::monostate{} : a[0];
+            bool done = false;
+            Value yielded = this->resume_generator(gen, reason, false, true, done);
+            auto obj = std::make_shared<ObjectValue>();
+            obj->properties["value"] = {yielded, false, false, false, tok};
+            obj->properties["done"] = {done, false, false, false, tok};
+            return obj;
+        };
+
+        Token methodTok = callToken;
+        genObj->properties["next"] = {std::make_shared<FunctionValue>("next", next_impl, nullptr, methodTok), false, false, false, methodTok};
+        genObj->properties["return"] = {std::make_shared<FunctionValue>("return", return_impl, nullptr, methodTok), false, false, false, methodTok};
+
+        return genObj;
     }
-
-    // Create generator object with methods
-    auto genObj = std::make_shared<ObjectValue>();
-    
-    // Store generator internally
-    PropertyDescriptor genDesc;
-    genDesc.value = gen;
-    genDesc.is_private = true;
-    genDesc.token = callToken;
-    genObj->properties["__generator__"] = genDesc;
-
-    // next() method
-    auto next_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
-        Value send = a.empty() ? std::monostate{} : a[0];
-        bool done = false;
-        Value yielded = this->resume_generator(gen, send, false, false, done);
-        auto obj = std::make_shared<ObjectValue>();
-        obj->properties["value"] = {yielded, false, false, false, tok};
-        obj->properties["done"] = {done, false, false, false, tok};
-        return obj;
-    };
-
-    // return() method
-    auto return_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
-        Value sent = a.empty() ? std::monostate{} : a[0];
-        bool done = false;
-        Value yielded = this->resume_generator(gen, sent, true, false, done);
-        auto obj = std::make_shared<ObjectValue>();
-        obj->properties["value"] = {yielded, false, false, false, tok};
-        obj->properties["done"] = {done, false, false, false, tok};
-        return obj;
-    };
-
-    // throw() method
-    auto throw_impl = [this, gen](const std::vector<Value>& a, EnvPtr, const Token& tok) -> Value {
-        Value reason = a.empty() ? std::monostate{} : a[0];
-        bool done = false;
-        Value yielded = this->resume_generator(gen, reason, false, true, done);
-        auto obj = std::make_shared<ObjectValue>();
-        obj->properties["value"] = {yielded, false, false, false, tok};
-        obj->properties["done"] = {done, false, false, false, tok};
-        return obj;
-    };
-
-    Token methodTok = callToken;
-    genObj->properties["next"] = {std::make_shared<FunctionValue>("next", next_impl, nullptr, methodTok), false, false, false, methodTok};
-    genObj->properties["return"] = {std::make_shared<FunctionValue>("return", return_impl, nullptr, methodTok), false, false, false, methodTok};
-    
-    return genObj;
-}
-
+    push_frame(frame);
     Value ret_val = std::monostate{};
     bool did_return = false;
+
+    {
+        size_t argIndex = 0;
+        for (size_t i = 0; i < fn->parameters.size(); ++i) {
+            auto& p = fn->parameters[i];
+            if (!p) {
+                if (argIndex < args.size()) argIndex++;
+                continue;
+            }
+
+            if (p->is_rest) {
+                auto arr = std::make_shared<ArrayValue>();
+                if (p->rest_required_count > 0) {
+                    size_t remaining = (argIndex < args.size()) ? (args.size() - argIndex) : 0;
+                    if (remaining < p->rest_required_count) {
+                        std::ostringstream ss;
+                        ss << "Function '" << (fn->name.empty() ? "<lambda>" : fn->name)
+                           << "' rest parameter '" << p->name << "' requires at least " << p->rest_required_count
+                           << " elements but got " << remaining;
+                        throw SwaziError("TypeError", ss.str(), callToken.loc);
+                    }
+                    for (size_t k = 0; k < p->rest_required_count; ++k)
+                        arr->elements.push_back(args[argIndex++]);
+                } else {
+                    while (argIndex < args.size()) arr->elements.push_back(args[argIndex++]);
+                }
+                Environment::Variable var;
+                var.value = arr;
+                var.is_constant = false;
+                local->set(p->name, var);
+                continue;
+            }
+
+            Environment::Variable var;
+            if (argIndex < args.size()) {
+                var.value = args[argIndex++];
+            } else {
+                if (p->defaultValue) {
+                    var.value = evaluate_expression(p->defaultValue.get(), local);
+                } else {
+                    std::ostringstream ss;
+                    ss << "Function '" << (fn->name.empty() ? "<anonymous>" : fn->name)
+                       << "' missing required argument '" << p->name << "'";
+                    throw SwaziError("TypeError", ss.str(), callToken.loc);
+                }
+            }
+            var.is_constant = false;
+            local->set(p->name, var);
+        }
+    }
 
     // If async function, create and return a Promise immediately.
     // Start executing the async function synchronously on the calling thread

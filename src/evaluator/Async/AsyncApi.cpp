@@ -402,6 +402,26 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto fn_nap = std::make_shared<FunctionValue>(std::string("native:timers.nap"), native_nap, nullptr, tNap);
     obj->properties["nap"] = PropertyDescriptor{fn_nap, false, false, false, tNap};
 
+    // timers.queueMicrotask(cb, ...args)
+    auto native_queueMicrotask = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) throw std::runtime_error("timers.queueMicrotask requires callback at " + token.loc.to_string());
+        if (!is_function_value(args[0])) throw std::runtime_error("timers.queueMicrotask first arg must be a function at " + token.loc.to_string());
+        FunctionPtr cb = std::get<FunctionPtr>(args[0]);
+        std::vector<Value> cb_args;
+        for (size_t i = 1; i < args.size(); ++i) cb_args.push_back(args[i]);
+
+        // Build the boxed payload and hand to the scheduler bridge that enqueues microtasks.
+        // CallbackPayload is the same type used by enqueue_callback.
+        CallbackPayload* box = new CallbackPayload(cb, cb_args);
+        enqueue_microtask_global(static_cast<void*>(box));
+        return std::monostate{};
+    };
+    Token tmicro;
+    tmicro.type = TokenType::IDENTIFIER;
+    tmicro.loc = TokenLocation("<timers>", 0, 0, 0);
+    auto fn_micro = std::make_shared<FunctionValue>(std::string("native:timers.queueMicrotask"), native_queueMicrotask, nullptr, tmicro);
+    obj->properties["queueMicrotask"] = PropertyDescriptor{fn_micro, false, false, false, tmicro};
+
     return obj;
 }
 

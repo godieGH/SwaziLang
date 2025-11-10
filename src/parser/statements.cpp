@@ -5,9 +5,9 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "SwaziError.hpp"
 #include "debugging/outputTry.hpp"
 #include "parser.hpp"
-#include "SwaziError.hpp"
 
 std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
     bool is_constant = false;
@@ -759,7 +759,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
         Parser& parser;
         bool prev;
         AsyncScopeGuard(Parser& p, bool newVal) : parser(p), prev(p.in_async_function) {
-           parser.in_async_function = newVal;
+            parser.in_async_function = newVal;
         }
         ~AsyncScopeGuard() {
             parser.in_async_function = prev;
@@ -798,7 +798,7 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
     if (funcNode->is_async && funcNode->is_generator) {
         throw SwaziError("SyntaxError", "Async functions cannot be generators (kazi* cannot be async).", idTok.loc);
     }
-    
+
     funcNode->name = idTok.value;
     funcNode->token = idTok;
 

@@ -311,4 +311,3 @@ void Evaluator::mark_promise_and_ancestors_handled(PromisePtr p) {
         p = wp.lock();
     }
 }
-

@@ -10,9 +10,9 @@
 #include <unordered_set>
 
 #include "ClassRuntime.hpp"
+#include "Frame.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
-#include "Frame.hpp"
 
 bool supports_color() {
     return isatty(STDOUT_FILENO);
@@ -211,24 +211,32 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             return std::string("Promise {<REJECTED>}");
         }
     }
-    
+
     if (std::holds_alternative<GeneratorPtr>(v)) {
-    GeneratorPtr g = std::get<GeneratorPtr>(v);
-    if (!g || !g->frame || !g->frame->function) {
-        return use_color ? (Color::bright_blue + "[generator <dead>]" + Color::reset) : "[generator <dead>]";
+        GeneratorPtr g = std::get<GeneratorPtr>(v);
+        if (!g || !g->frame || !g->frame->function) {
+            return use_color ? (Color::bright_blue + "[generator <dead>]" + Color::reset) : "[generator <dead>]";
+        }
+        std::string fname = g->frame->function->name.empty() ? "<lambda>" : g->frame->function->name;
+        std::string state_str;
+        switch (g->state) {
+            case GeneratorValue::State::SuspendedStart:
+                state_str = "suspended-start";
+                break;
+            case GeneratorValue::State::SuspendedYield:
+                state_str = "suspended";
+                break;
+            case GeneratorValue::State::Executing:
+                state_str = "executing";
+                break;
+            case GeneratorValue::State::Completed:
+                state_str = "closed";
+                break;
+        }
+        std::ostringstream ss;
+        ss << "[generator " << fname << " <" << state_str << ">]";
+        return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
     }
-    std::string fname = g->frame->function->name.empty() ? "<lambda>" : g->frame->function->name;
-    std::string state_str;
-    switch(g->state) {
-        case GeneratorValue::State::SuspendedStart: state_str = "suspended-start"; break;
-        case GeneratorValue::State::SuspendedYield: state_str = "suspended"; break;
-        case GeneratorValue::State::Executing: state_str = "executing"; break;
-        case GeneratorValue::State::Completed: state_str = "closed"; break;
-    }
-    std::ostringstream ss;
-    ss << "[generator " << fname << " <" << state_str << ">]";
-    return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
-}
 
     return "";
 }
@@ -904,24 +912,32 @@ std::string Evaluator::print_value(
         ss << Color::bright_blue << "Promise {" << Color::reset << (reject_str) << Color::bright_blue << "}" << Color::reset;
         return ss.str();
     }
-    
+
     if (std::holds_alternative<GeneratorPtr>(v)) {
-    GeneratorPtr g = std::get<GeneratorPtr>(v);
-    if (!g || !g->frame || !g->frame->function) {
-        return use_color ? (Color::bright_blue + "[generator <dead>]" + Color::reset) : "[generator <dead>]";
+        GeneratorPtr g = std::get<GeneratorPtr>(v);
+        if (!g || !g->frame || !g->frame->function) {
+            return use_color ? (Color::bright_blue + "[generator <dead>]" + Color::reset) : "[generator <dead>]";
+        }
+        std::string fname = g->frame->function->name.empty() ? "<lambda>" : g->frame->function->name;
+        std::string state_str;
+        switch (g->state) {
+            case GeneratorValue::State::SuspendedStart:
+                state_str = "suspended-start";
+                break;
+            case GeneratorValue::State::SuspendedYield:
+                state_str = "suspended";
+                break;
+            case GeneratorValue::State::Executing:
+                state_str = "executing";
+                break;
+            case GeneratorValue::State::Completed:
+                state_str = "closed";
+                break;
+        }
+        std::ostringstream ss;
+        ss << "[generator " << fname << " <" << state_str << ">]";
+        return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
     }
-    std::string fname = g->frame->function->name.empty() ? "<lambda>" : g->frame->function->name;
-    std::string state_str;
-    switch(g->state) {
-        case GeneratorValue::State::SuspendedStart: state_str = "suspended-start"; break;
-        case GeneratorValue::State::SuspendedYield: state_str = "suspended"; break;
-        case GeneratorValue::State::Executing: state_str = "executing"; break;
-        case GeneratorValue::State::Completed: state_str = "closed"; break;
-    }
-    std::ostringstream ss;
-    ss << "[generator " << fname << " <" << state_str << ">]";
-    return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
-}
 
     return "<?>";  // fallback
 }

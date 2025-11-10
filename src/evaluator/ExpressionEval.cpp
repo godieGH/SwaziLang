@@ -411,8 +411,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             throw SuspendExecution();
         }
     }
-    
-  if (auto y = dynamic_cast<YieldExpressionNode*>(expr)) {
+
+    if (auto y = dynamic_cast<YieldExpressionNode*>(expr)) {
         // Ensure yield is used only inside generator functions at runtime:
         CallFramePtr cf = current_frame();
         if (!cf) {

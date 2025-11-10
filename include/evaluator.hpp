@@ -110,12 +110,14 @@ struct PromiseValue {
 
 // Generator runtime holder (declared above as forward); defined in evaluator.cpp or FunctionCall.cpp
 struct GeneratorValue {
-    enum class State { SuspendedStart, SuspendedYield, Executing, Completed };
-    CallFramePtr frame;            // frame that executes generator body
+    enum class State { SuspendedStart,
+        SuspendedYield,
+        Executing,
+        Completed };
+    CallFramePtr frame;  // frame that executes generator body
     State state = State::SuspendedStart;
     bool is_done = false;
 };
-
 
 // Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
@@ -365,10 +367,9 @@ class Evaluator {
 
     void run_event_loop();
     void schedule_callback(FunctionPtr cb, const std::vector<Value>& args);
-    
+
     Value resume_generator(GeneratorPtr gen, const Value& arg, bool is_return, bool is_throw, bool& done);
     void execute_frame_until_yield_or_return(CallFramePtr frame, Value* out_yielded_value, bool* did_return, Value* return_value);
-    
 };
 
 TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc);

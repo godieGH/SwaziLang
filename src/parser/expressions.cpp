@@ -1030,7 +1030,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         node->await_id = next_await_id++;
         return node;
     }
-    
+
     if (t.type == TokenType::YIELD) {
         if (!in_generator_function) {
             throw SwaziError("SyntaxError", "'yield' used outside of a generator function.", t.loc);

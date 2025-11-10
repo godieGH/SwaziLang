@@ -771,7 +771,7 @@ struct FunctionDeclarationNode : public StatementNode {
 
     bool is_async = false;  // NEW: async modifier
     bool is_generator = false;
-    
+
     std::unique_ptr<StatementNode> clone() const override {
         auto n = std::make_unique<FunctionDeclarationNode>();
         n->token = token;

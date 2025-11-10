@@ -23,6 +23,9 @@ bool async_timers_exist();
 // Enqueue a boxed payload (type-erased pointer) to be delivered on the scheduler loop.
 // The implementation expects a pointer produced by `new CallbackPayload(...)` (but uses void* to avoid header cycles).
 void enqueue_callback_global(void* boxed_payload);
+// Enqueue a boxed payload (type-erased pointer) to be delivered as a microtask on the scheduler.
+// The implementation expects a pointer produced by `new CallbackPayload(...)` (but uses void* to avoid header cycles).
+void enqueue_microtask_global(void* boxed_payload);
 
 // Return the scheduler uv loop, or nullptr if no scheduler is available.
 uv_loop_t* scheduler_get_loop();

@@ -215,6 +215,22 @@ void enqueue_callback_global(void* boxed_payload) {
         }
     });
 }
+void enqueue_microtask_global(void* boxed_payload) {
+    if (!boxed_payload) return;
+    if (!g_scheduler_instance) return;
+
+    // Use scheduler enqueue_microtask so the runner runs as a microtask on the loop thread.
+    // The runner will be called with boxed_payload as its argument.
+    g_scheduler_instance->enqueue_microtask([boxed_payload]() {
+        if (g_scheduler_runner) {
+            try {
+                g_scheduler_runner(boxed_payload);
+            } catch (...) {
+                // runner should handle errors
+            }
+        }
+    });
+}
 
 uv_loop_t* scheduler_get_loop() {
     if (!g_scheduler_instance) return nullptr;
