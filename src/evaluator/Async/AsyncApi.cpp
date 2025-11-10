@@ -281,10 +281,10 @@ static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(c
 std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto obj = std::make_shared<ObjectValue>();
 
-    // timers.subiri(cb, ...args)
-    auto native_subiri = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("timers.subiri requires callback at " + token.loc.to_string());
-        if (!is_function_value(args[0])) throw std::runtime_error("timers.subiri first arg must be a function at " + token.loc.to_string());
+    // timers.queueMacrotask(cb, ...args)
+    auto native_queueMacrotask = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) throw std::runtime_error("timers.queueMacrotask requires callback at " + token.loc.to_string());
+        if (!is_function_value(args[0])) throw std::runtime_error("timers.queueMacrotask first arg must be a function at " + token.loc.to_string());
         FunctionPtr cb = std::get<FunctionPtr>(args[0]);
         std::vector<Value> cb_args;
         for (size_t i = 1; i < args.size(); ++i) cb_args.push_back(args[i]);
@@ -294,8 +294,8 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     Token tsub;
     tsub.type = TokenType::IDENTIFIER;
     tsub.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_sub = std::make_shared<FunctionValue>(std::string("native:timers.subiri"), native_subiri, nullptr, tsub);
-    obj->properties["subiri"] = PropertyDescriptor{fn_sub, false, false, false, tsub};
+    auto fn_sub = std::make_shared<FunctionValue>(std::string("native:timers.queueMacrotask"), native_queueMacrotask, nullptr, tsub);
+    obj->properties["queueMacrotask"] = PropertyDescriptor{fn_sub, false, false, false, tsub};
 
     // timers.setTimeout(ms, cb) or (cb, ms)
     auto native_setTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
