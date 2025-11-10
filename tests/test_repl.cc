@@ -37,7 +37,7 @@ TEST(REPLTest, VariableAssignment) {
 
 // Test incomplete input detection
 TEST(REPLTest, DetectsIncompleteInput) {
-    std::string incomplete = "kama x > 5 {}\n";
+    std::string incomplete = "kama x > 5:\n";
     Lexer lexer(incomplete, "<test>");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
