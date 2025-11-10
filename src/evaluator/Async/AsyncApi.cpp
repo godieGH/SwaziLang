@@ -281,10 +281,10 @@ static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(c
 std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto obj = std::make_shared<ObjectValue>();
 
-    // Async.subiri(cb, ...args)
+    // timers.subiri(cb, ...args)
     auto native_subiri = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("Async.subiri requires callback at " + token.loc.to_string());
-        if (!is_function_value(args[0])) throw std::runtime_error("Async.subiri first arg must be a function at " + token.loc.to_string());
+        if (args.empty()) throw std::runtime_error("timers.subiri requires callback at " + token.loc.to_string());
+        if (!is_function_value(args[0])) throw std::runtime_error("timers.subiri first arg must be a function at " + token.loc.to_string());
         FunctionPtr cb = std::get<FunctionPtr>(args[0]);
         std::vector<Value> cb_args;
         for (size_t i = 1; i < args.size(); ++i) cb_args.push_back(args[i]);
@@ -297,7 +297,7 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto fn_sub = std::make_shared<FunctionValue>(std::string("native:timers.subiri"), native_subiri, nullptr, tsub);
     obj->properties["subiri"] = PropertyDescriptor{fn_sub, false, false, false, tsub};
 
-    // Async.setTimeout(ms, cb) or (cb, ms)
+    // timers.setTimeout(ms, cb) or (cb, ms)
     auto native_setTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         long long ms;
         FunctionPtr cb;
@@ -312,10 +312,10 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto fn_set = std::make_shared<FunctionValue>(std::string("native:timers.setTimeout"), native_setTimeout, nullptr, tSet);
     obj->properties["setTimeout"] = PropertyDescriptor{fn_set, false, false, false, tSet};
 
-    // Async.clearTimeout(id)
+    // timers.clearTimeout(id)
     auto native_clearTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("Async.clearTimeout requires id at " + token.loc.to_string());
-        if (!std::holds_alternative<double>(args[0])) throw std::runtime_error("Async.clearTimeout id must be number at " + token.loc.to_string());
+        if (args.empty()) throw std::runtime_error("timers.clearTimeout requires id at " + token.loc.to_string());
+        if (!std::holds_alternative<double>(args[0])) throw std::runtime_error("timers.clearTimeout id must be number at " + token.loc.to_string());
         long long id = static_cast<long long>(std::get<double>(args[0]));
         cancel_timer(id);
         return std::monostate{};
@@ -326,7 +326,7 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto fn_clear = std::make_shared<FunctionValue>(std::string("native:timers.clearTimeout"), native_clearTimeout, nullptr, tClear);
     obj->properties["clearTimeout"] = PropertyDescriptor{fn_clear, false, false, false, tClear};
 
-    // Async.setInterval(ms, cb) or (cb, ms)
+    // timers.setInterval(ms, cb) or (cb, ms)
     auto native_setInterval = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         long long ms;
         FunctionPtr cb;
@@ -341,18 +341,43 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     auto fn_int = std::make_shared<FunctionValue>(std::string("native:timers.setInterval"), native_setInterval, nullptr, tInt);
     obj->properties["setInterval"] = PropertyDescriptor{fn_int, false, false, false, tInt};
 
-    // Async.clearInterval(id) -> same as clearTimeout
+    // timers.clearInterval(id) -> same as clearTimeout
     obj->properties["clearInterval"] = obj->properties["clearTimeout"];
 
-    // Async.nap(ms, cb?) — accept either (ms, cb) or (cb, ms) or (ms) (no cb).
+    // timers.nap(ms, cb?) — accept either (ms, cb) or (cb, ms) or (ms) (no cb).
+    // when used with only one arg ms it returns a promise so can be used to suspend awated promise
     auto native_nap = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("Async.nap requires at least ms argument at " + token.loc.to_string());
+        if (args.empty()) throw std::runtime_error("timers.nap requires at least ms argument at " + token.loc.to_string());
 
         // If single numeric arg: schedule timer with no callback and return id
         if (args.size() == 1 && std::holds_alternative<double>(args[0])) {
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            auto resolver = [promise](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                // Fulfill with undefined after delay
+                promise->state = PromiseValue::State::FULFILLED;
+                promise->result = std::monostate{};
+
+                // Trigger then callbacks via microtasks
+                for (auto& cb : promise->then_callbacks) {
+                    scheduler_run_on_loop([cb, v = promise->result]() {
+                        try {
+                            cb(v);
+                        } catch (...) {}
+                    });
+                }
+
+                return std::monostate{};
+            };
+
             long long ms = value_to_ms(args[0]);
             long long id = create_timer(ms, 0, nullptr, {});
-            return Value{static_cast<double>(id)};
+            auto resolver_fn = std::make_shared<FunctionValue>(
+                "nap_resolver", resolver, nullptr, token);
+
+            create_timer(ms, 0, resolver_fn, {});
+            return promise;
         }
 
         // If two args in either order where one is number and other function -> schedule
@@ -369,7 +394,7 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
             }
         }
 
-        throw std::runtime_error("Async.nap invalid arguments at " + token.loc.to_string());
+        throw std::runtime_error("timers.nap invalid arguments at " + token.loc.to_string());
     };
     Token tNap;
     tNap.type = TokenType::IDENTIFIER;
