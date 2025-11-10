@@ -1,15 +1,16 @@
 
 #include <gtest/gtest.h>
+
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
-#include <algorithm>
 
+#include "SwaziError.hpp"
+#include "ast.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
-#include "ast.hpp"
 #include "token.hpp"
-#include "SwaziError.hpp"
 
 using namespace std;
 
@@ -28,7 +29,7 @@ static vector<Token> lexTokens(const string& src, const string& filename = "<tes
 }
 
 static bool tokens_contain(const vector<Token>& toks, TokenType t) {
-    return any_of(toks.begin(), toks.end(), [&](const Token& tk){ return tk.type == t; });
+    return any_of(toks.begin(), toks.end(), [&](const Token& tk) { return tk.type == t; });
 }
 
 // --- Tests --------------------------------------------------------------
@@ -124,7 +125,7 @@ TEST(ParserClasses, ConstructorAndDestructor) {
     auto cls = dynamic_cast<ClassDeclarationNode*>(prog->body[0].get());
     ASSERT_NE(cls, nullptr);
     bool hasCtor = false, hasDtor = false;
-    for (auto &m : cls->body->methods) {
+    for (auto& m : cls->body->methods) {
         if (m->is_constructor) hasCtor = true;
         if (m->is_destructor) hasDtor = true;
     }

@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
+
 #include <sstream>
+
+#include "evaluator.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
-#include "evaluator.hpp"
 
 // Test basic expression evaluation
 TEST(REPLTest, EvaluateSimpleExpression) {
@@ -11,14 +13,14 @@ TEST(REPLTest, EvaluateSimpleExpression) {
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto ast = parser.parse();
-    
+
     Evaluator evaluator;
     evaluator.set_entry_point("");
-    
+
     ASSERT_EQ(ast->body.size(), 1);
     auto* exprStmt = dynamic_cast<ExpressionStatementNode*>(ast->body[0].get());
     ASSERT_NE(exprStmt, nullptr);
-    
+
     Value result = evaluator.evaluate_expression(exprStmt->expression.get());
     EXPECT_FALSE(evaluator.is_void(result));
 }
@@ -30,7 +32,7 @@ TEST(REPLTest, VariableAssignment) {
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto ast = parser.parse();
-    
+
     Evaluator evaluator;
     EXPECT_NO_THROW(evaluator.evaluate(ast.get()));
 }
@@ -41,8 +43,6 @@ TEST(REPLTest, DetectsIncompleteInput) {
     Lexer lexer(incomplete, "<test>");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
-    
-    EXPECT_THROW({
-        auto ast = parser.parse();
-    }, std::exception);
+
+    EXPECT_THROW({ auto ast = parser.parse(); }, std::exception);
 }

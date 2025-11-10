@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+
 #include "lexer.hpp"
 #include "token.hpp"
 
@@ -17,7 +18,7 @@ std::vector<TokenType> getTokenTypes(const std::string& source) {
 TEST(LexerTest, TokenizesNumbers) {
     Lexer lexer("123", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     ASSERT_GE(tokens.size(), 1);
     EXPECT_EQ(tokens[0].type, TokenType::NUMBER);
     EXPECT_EQ(tokens[0].value, "123");
@@ -26,7 +27,7 @@ TEST(LexerTest, TokenizesNumbers) {
 TEST(LexerTest, TokenizesFloats) {
     Lexer lexer("3.14", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     ASSERT_GE(tokens.size(), 1);
     EXPECT_EQ(tokens[0].type, TokenType::NUMBER);
     EXPECT_EQ(tokens[0].value, "3.14");
@@ -35,7 +36,7 @@ TEST(LexerTest, TokenizesFloats) {
 TEST(LexerTest, TokenizesIdentifiers) {
     Lexer lexer("variable", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     ASSERT_GE(tokens.size(), 1);
     EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
     EXPECT_EQ(tokens[0].value, "variable");
@@ -52,7 +53,7 @@ TEST(LexerTest, TokenizesKeywords) {
 TEST(LexerTest, TokenizesBooleans) {
     Lexer lexer("kweli sikweli", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].type, TokenType::BOOLEAN);
     EXPECT_EQ(tokens[0].value, "kweli");
     EXPECT_EQ(tokens[1].type, TokenType::BOOLEAN);
@@ -63,7 +64,7 @@ TEST(LexerTest, TokenizesBooleans) {
 TEST(LexerTest, TokenizesDoubleQuotedStrings) {
     Lexer lexer("\"hello world\"", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     ASSERT_GE(tokens.size(), 1);
     EXPECT_EQ(tokens[0].type, TokenType::STRING);
     EXPECT_EQ(tokens[0].value, "hello world");
@@ -72,7 +73,7 @@ TEST(LexerTest, TokenizesDoubleQuotedStrings) {
 TEST(LexerTest, TokenizesSingleQuotedStrings) {
     Lexer lexer("'hello'", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     ASSERT_GE(tokens.size(), 1);
     EXPECT_EQ(tokens[0].type, TokenType::SINGLE_QUOTED_STRING);
     EXPECT_EQ(tokens[0].value, "hello");
@@ -81,7 +82,7 @@ TEST(LexerTest, TokenizesSingleQuotedStrings) {
 TEST(LexerTest, HandlesStringEscapes) {
     Lexer lexer("\"line1\\nline2\"", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].value, "line1\nline2");
 }
 
@@ -125,7 +126,7 @@ TEST(LexerTest, TokenizesPowerOperator) {
 TEST(LexerTest, SkipsLineComments) {
     Lexer lexer("x # comment\ny", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     // Should have: x, NEWLINE, y, NEWLINE, EOF
     EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
     EXPECT_EQ(tokens[0].value, "x");
@@ -137,7 +138,7 @@ TEST(LexerTest, SkipsLineComments) {
 TEST(LexerTest, SkipsBlockComments) {
     Lexer lexer("x /* comment */ y", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
     EXPECT_EQ(tokens[0].value, "x");
     EXPECT_EQ(tokens[1].type, TokenType::IDENTIFIER);
@@ -148,14 +149,14 @@ TEST(LexerTest, SkipsBlockComments) {
 TEST(LexerTest, TracksIndentation) {
     Lexer lexer("x\n  y\nz", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     bool hasIndent = false;
     bool hasDedent = false;
     for (const auto& tok : tokens) {
         if (tok.type == TokenType::INDENT) hasIndent = true;
         if (tok.type == TokenType::DEDENT) hasDedent = true;
     }
-    
+
     EXPECT_TRUE(hasIndent);
     EXPECT_TRUE(hasDedent);
 }
@@ -164,7 +165,7 @@ TEST(LexerTest, TracksIndentation) {
 TEST(LexerTest, TokenizesTemplateLiterals) {
     Lexer lexer("`hello`", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].type, TokenType::TEMPLATE_CHUNK);
     EXPECT_EQ(tokens[1].type, TokenType::TEMPLATE_END);
 }
@@ -172,7 +173,7 @@ TEST(LexerTest, TokenizesTemplateLiterals) {
 TEST(LexerTest, TokenizesTemplateInterpolation) {
     Lexer lexer("`hello ${name}`", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].type, TokenType::TEMPLATE_CHUNK);
     EXPECT_EQ(tokens[1].type, TokenType::TEMPLATE_EXPR_START);
     EXPECT_EQ(tokens[2].type, TokenType::IDENTIFIER);
@@ -199,7 +200,7 @@ TEST(LexerTest, TokenizesQuestionDot) {
 TEST(LexerTest, TracksTokenLocation) {
     Lexer lexer("x", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].loc.filename, "<test>");
     EXPECT_EQ(tokens[0].loc.line, 1);
     EXPECT_GT(tokens[0].loc.col, 0);
@@ -209,7 +210,7 @@ TEST(LexerTest, TracksTokenLocation) {
 TEST(LexerTest, HandlesEmptyInput) {
     Lexer lexer("", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_GE(tokens.size(), 1);
     EXPECT_EQ(tokens.back().type, TokenType::EOF_TOKEN);
 }
@@ -217,7 +218,7 @@ TEST(LexerTest, HandlesEmptyInput) {
 TEST(LexerTest, HandlesNumberUnderscore) {
     Lexer lexer("1_000", "<test>");
     auto tokens = lexer.tokenize();
-    
+
     EXPECT_EQ(tokens[0].type, TokenType::NUMBER);
     EXPECT_EQ(tokens[0].value, "1000");
 }
