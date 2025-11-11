@@ -12,8 +12,10 @@
 #include <sstream>
 #include <thread>
 
+#include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+#include "uv.h"
 
 #ifdef __has_include
 #if __has_include(<curl/curl.h>)
@@ -614,6 +616,420 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 throw SwaziError("FilesystemError", std::string("fs.stat failed: ") + e.what(), token.loc);
             } }, env);
         obj->properties["stat"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    {  // ============= fs.promises API =============
+        // Create promises sub-object for async versions
+        auto promises_obj = std::make_shared<ObjectValue>();
+
+        // promises.readFile(path) -> Promise<string | null>
+        {
+            auto fn = make_native_fn("fs.promises.readFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.promises.readFile requires a path argument", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            // Schedule async read on loop thread
+            scheduler_run_on_loop([promise, path]() {
+                try {
+                    std::ifstream in(path, std::ios::binary);
+                    if (!in.is_open()) {
+                        // Reject with error
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("Failed to open file: ") + path};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                        return;
+                    }
+                    
+                    std::ostringstream ss;
+                    ss << in.rdbuf();
+                    
+                    // Fulfill promise
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{ss.str()};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::exception& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("Read error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["readFile"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.writeFile(path, content, [binary=false]) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.writeFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("RuntimeError", "fs.promises.writeFile requires path and content arguments", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+            std::string content = value_to_string_simple(args[1]);
+            bool binary = args.size() >= 3 && std::holds_alternative<bool>(args[2]) ? std::get<bool>(args[2]) : false;
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, path, content, binary]() {
+                try {
+                    std::ofstream out;
+                    if (binary) out.open(path, std::ios::binary);
+                    else out.open(path);
+                    
+                    if (!out.is_open()) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("Failed to open file for writing: ") + path};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                        return;
+                    }
+                    
+                    out << content;
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{true};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::exception& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("Write error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["writeFile"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.exists(path) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.exists", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.promises.exists requires a path argument", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, path]() {
+                bool exists = std::filesystem::exists(path);
+                promise->state = PromiseValue::State::FULFILLED;
+                promise->result = Value{exists};
+                for (auto& cb : promise->then_callbacks) {
+                    try { cb(promise->result); } catch(...) {}
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["exists"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.listDir(path) -> Promise<array>
+        {
+            auto fn = make_native_fn("fs.promises.listDir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            std::string path = args.empty() ? "." : value_to_string_simple(args[0]);
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, path]() {
+                try {
+                    auto arr = std::make_shared<ArrayValue>();
+                    for (auto& p : std::filesystem::directory_iterator(path)) {
+                        arr->elements.push_back(Value{p.path().filename().string()});
+                    }
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{arr};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::exception& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("List dir error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["listDir"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.copy(src, dest, [overwrite=false]) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.copy", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("RuntimeError", "fs.promises.copy requires src and dest arguments", token.loc);
+            }
+            std::string src = value_to_string_simple(args[0]);
+            std::string dest = value_to_string_simple(args[1]);
+            bool overwrite = args.size() >= 3 && std::holds_alternative<bool>(args[2]) ? std::get<bool>(args[2]) : false;
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, src, dest, overwrite]() {
+                try {
+                    std::filesystem::copy_options opts = std::filesystem::copy_options::none;
+                    if (overwrite) opts = static_cast<std::filesystem::copy_options>(opts | std::filesystem::copy_options::overwrite_existing);
+                    std::filesystem::copy(src, dest, opts);
+                    
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{true};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::filesystem::filesystem_error& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("Copy error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["copy"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.move(src, dest, [overwrite=false]) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.move", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("RuntimeError", "fs.promises.move requires src and dest arguments", token.loc);
+            }
+            std::string src = value_to_string_simple(args[0]);
+            std::string dest = value_to_string_simple(args[1]);
+            bool overwrite = args.size() >= 3 && std::holds_alternative<bool>(args[2]) ? std::get<bool>(args[2]) : false;
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, src, dest, overwrite]() {
+                try {
+                    if (std::filesystem::exists(dest)) {
+                        if (!overwrite) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("Destination exists and overwrite is false")};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        std::filesystem::remove_all(dest);
+                    }
+                    std::filesystem::rename(src, dest);
+                    
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{true};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::filesystem::filesystem_error&) {
+                    // Fallback: copy + remove for cross-device moves
+                    try {
+                        std::filesystem::copy(src, dest, std::filesystem::copy_options::recursive);
+                        std::filesystem::remove_all(src);
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{true};
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("Move error: ") + e.what()};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["move"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.remove(path) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.remove", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.promises.remove requires a path argument", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, path]() {
+                try {
+                    if (!std::filesystem::exists(path)) {
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{false};
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                        return;
+                    }
+                    std::uintmax_t removed = std::filesystem::remove_all(path);
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{removed > 0};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::filesystem::filesystem_error& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("Remove error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["remove"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.makeDir(path, [recursive=true]) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.makeDir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.promises.makeDir requires a path argument", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+            bool recursive = args.size() >= 2 && std::holds_alternative<bool>(args[1]) ? std::get<bool>(args[1]) : true;
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, path, recursive]() {
+                try {
+                    if (std::filesystem::exists(path)) {
+                        bool is_dir = std::filesystem::is_directory(path);
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{is_dir};
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                        return;
+                    }
+                    bool ok = recursive ? std::filesystem::create_directories(path) : std::filesystem::create_directory(path);
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{ok};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::filesystem::filesystem_error& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("MakeDir error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["makeDir"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.stat(path) -> Promise<object>
+        {
+            auto fn = make_native_fn("fs.promises.stat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.promises.stat requires a path argument", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+
+            auto promise = std::make_shared<PromiseValue>();
+            promise->state = PromiseValue::State::PENDING;
+
+            scheduler_run_on_loop([promise, path]() {
+                try {
+                    auto obj = std::make_shared<ObjectValue>();
+                    
+                    if (!std::filesystem::exists(path)) {
+                        obj->properties["exists"] = PropertyDescriptor{Value{false}, false, false, true, Token()};
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{obj};
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                        return;
+                    }
+
+                    auto status = std::filesystem::status(path);
+                    bool isFile = std::filesystem::is_regular_file(status);
+                    bool isDir = std::filesystem::is_directory(status);
+                    uintmax_t size = isFile ? std::filesystem::file_size(path) : 0;
+
+                    std::string modifiedStr;
+                    try {
+                        auto ftime = std::filesystem::last_write_time(path);
+                        auto st = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                            ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
+                        std::time_t tt = std::chrono::system_clock::to_time_t(st);
+                        std::tm tm{};
+#ifdef _MSC_VER
+                        gmtime_s(&tm, &tt);
+#else
+                        gmtime_r(&tt, &tm);
+#endif
+                        char buf[64];
+                        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+                        modifiedStr = buf;
+                    } catch (...) {
+                        modifiedStr = "";
+                    }
+
+                    auto perms = status.permissions();
+                    std::string permSummary;
+                    permSummary += ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) ? "r" : "-";
+                    permSummary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
+                    permSummary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
+
+                    obj->properties["exists"] = PropertyDescriptor{Value{true}, false, false, true, Token()};
+                    obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
+                    obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
+                    obj->properties["size"] = PropertyDescriptor{Value{static_cast<double>(size)}, false, false, true, Token()};
+                    obj->properties["modifiedAt"] = PropertyDescriptor{Value{modifiedStr}, false, false, true, Token()};
+                    obj->properties["permissions"] = PropertyDescriptor{Value{permSummary}, false, false, true, Token()};
+
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{obj};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                } catch (const std::filesystem::filesystem_error& e) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("Stat error: ") + e.what()};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                }
+            });
+
+            return Value{promise}; }, env);
+            promises_obj->properties["stat"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // Attach promises sub-object to main fs object
+        obj->properties["promises"] = PropertyDescriptor{Value{promises_obj}, false, false, true, Token()};
     }
 
     return obj;
