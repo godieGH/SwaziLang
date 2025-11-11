@@ -15,5 +15,7 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env);
 
 std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr env);
 
+std::shared_ptr<ObjectValue> make_child_process_exports(EnvPtr env, Evaluator* evaluator);
+
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);

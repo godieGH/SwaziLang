@@ -294,6 +294,26 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         return rec->exports;
     }
 
+    // child_process builtin
+    if (module_spec == "child_process" || module_spec == "swazi:child_process") {
+        const std::string key = "__builtin__:child_process";
+        auto it = module_cache.find(key);
+        if (it != module_cache.end()) return it->second->exports;
+
+        auto rec = std::make_shared<ModuleRecord>();
+        rec->state = ModuleRecord::State::Loading;
+        rec->exports = std::make_shared<ObjectValue>();
+        rec->path = key;
+        rec->module_env = std::make_shared<Environment>(global_env);
+        module_cache[key] = rec;
+        populate_module_metadata(rec->module_env, rec->path, "child_process", false);
+
+        rec->exports = make_child_process_exports(rec->module_env, this);
+
+        rec->state = ModuleRecord::State::Loaded;
+        return rec->exports;
+    }
+
     if (module_spec == "timers" || module_spec == "swazi:timers") {
         const std::string key = "__builtin__:timers";
         auto it = module_cache.find(key);
