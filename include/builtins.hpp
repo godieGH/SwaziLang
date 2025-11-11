@@ -19,3 +19,6 @@ std::shared_ptr<ObjectValue> make_child_process_exports(EnvPtr env, Evaluator* e
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);
+
+
+std::shared_ptr<ObjectValue> make_threads_exports(EnvPtr env);
