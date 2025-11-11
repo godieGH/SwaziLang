@@ -120,13 +120,3 @@ target_link_libraries(swazi_tests PRIVATE swazi_lib GTest::gtest_main)
 
 include(GoogleTest)
 gtest_discover_tests(swazi_tests)
-
-
-
-
-
-
-find_package(Threads REQUIRED)
-target_link_libraries(swazi PRIVATE Threads::Threads)
-target_link_libraries(swazi_lib PUBLIC Threads::Threads)
-target_link_libraries(swazi_tests PRIVATE Threads::Threads)
