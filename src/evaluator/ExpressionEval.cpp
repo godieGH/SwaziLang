@@ -1477,27 +1477,27 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             const std::string& prop = mem->property;
 
             // ---------- Properties ----------
-            if (prop == "siSahihi" || prop == "isNaN") {
+            if (prop == "isNaN") {
                 return Value{std::isnan(num)};
             }
             if (prop == "isInf") {
                 return Value{!std::isfinite(num)};
             }
-            if (prop == "niInt" || prop == "isInt") {
+            if (prop == "isInt") {
                 return Value{std::isfinite(num) && std::floor(num) == num};
             }
-            if (prop == "niDesimali" || prop == "isDecimal") {
+            if (prop == "nidesimali" || prop == "isDec") {
                 return Value{std::isfinite(num) && std::floor(num) != num};
             }
-            if (prop == "niChanya") {
+            if (prop == "nichanya" || prop == "isPos") {
                 return Value{num > 0};
             }
-            if (prop == "niHasi") {
+            if (prop == "nihasi" || prop == "isNeg") {
                 return Value{num < 0};
             }
 
             // boolean "is" properties: odd, even, prime
-            if (prop == "niWitiri" || prop == "niShufwa" || prop == "niTasa") {
+            if (prop == "niwitiri" || prop == "nishufwa" || prop == "nitasa" || prop == "isEven" || prop == "isOdd" || prop == "isPrime") {
                 if (!std::isfinite(num) || std::floor(num) != num) {
                     return Value{false};
                 }
@@ -1507,13 +1507,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                 long long n = static_cast<long long>(std::llround(num));
 
-                if (prop == "niWitiri") {
+                if (prop == "niwitiri" || prop == "isEven") {
                     return Value{(n % 2) != 0};
                 }
-                if (prop == "niShufwa") {
+                if (prop == "nishufwa" || prop == "isOdd") {
                     return Value{(n % 2) == 0};
                 }
-                if (prop == "niTasa") {
+                if (prop == "nitasa" || prop == "isPrime") {
                     if (n < 2) return Value{false};
                     if (n % 2 == 0) return Value{n == 2};
                     long long limit = static_cast<long long>(std::sqrt((long double)n));
