@@ -1188,7 +1188,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return make_fn();
         }
         
-        /* deprecated users should use ainaya <operand>
+        /* val.type deprecated users should use ainaya <operand> or val.aina
+        */
         // aina -> type name
         if (prop == "aina") {
             std::string t = "unknown";  // default
@@ -1212,7 +1213,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return Value{
                 t};
         }
-        */
 
         {
             // type-checking booleans
