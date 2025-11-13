@@ -4,9 +4,9 @@
 #include <stdexcept>
 #include <string>
 
+#include "evaluator.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
-#include "evaluator.hpp"
 
 // Helper: parse & evaluate a program string using the same Evaluator instance
 static void evalProgram(Evaluator& ev, const std::string& src) {
@@ -66,11 +66,11 @@ Object.freeze(ob)
     // Verify the above external mutations did NOT change the object:
     Value v_name = evalExpr(ev, "ob.name\n");
     ASSERT_TRUE(std::holds_alternative<std::string>(v_name));
-    EXPECT_EQ(std::get<std::string>(v_name), "John Doe"); // unchanged
+    EXPECT_EQ(std::get<std::string>(v_name), "John Doe");  // unchanged
 
     Value v_age = evalExpr(ev, "ob.age\n");
     ASSERT_TRUE(std::holds_alternative<double>(v_age));
-    EXPECT_EQ(std::get<double>(v_age), 20.0); // unchanged
+    EXPECT_EQ(std::get<double>(v_age), 20.0);  // unchanged
 
     // newprop should not exist (reading it yields undefined / nullish -> std::monostate)
     Value v_new = evalExpr(ev, "ob.newprop\n");
@@ -92,7 +92,7 @@ Object.freeze(ob)
 
     Value v_name2 = evalExpr(ev, "ob.name\n");
     ASSERT_TRUE(std::holds_alternative<std::string>(v_name2));
-    EXPECT_EQ(std::get<std::string>(v_name2), "Inner"); // mutated from inside object
+    EXPECT_EQ(std::get<std::string>(v_name2), "Inner");  // mutated from inside object
 
     // 5) The delete (futa) statement should bypass frozen and clear the object's properties.
     EXPECT_NO_THROW(evalProgram(ev, "futa ob\n"));
@@ -105,7 +105,7 @@ Object.freeze(ob)
     EXPECT_TRUE(std::holds_alternative<std::monostate>(v_age_after));
 
     // The object pointer should still be an object (not null). Use .aina to check type
-    Value t = evalExpr(ev, "ob.aina\n"); // .aina returns a string type name
+    Value t = evalExpr(ev, "ob.aina\n");  // .aina returns a string type name
     ASSERT_TRUE(std::holds_alternative<std::string>(t));
     EXPECT_EQ(std::get<std::string>(t), "object");
 }

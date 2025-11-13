@@ -437,10 +437,10 @@ void Evaluator::set_object_property(ObjectPtr op, const std::string& prop, const
     if (!op) {
         throw SwaziError("TypeError", "Attempted to set property on null object.", token.loc);
     }
-    
+
     // if object is frozen just return silently
-    if(op->is_frozen && !is_private_access_allowed(op, accessorEnv)) {
-      return;
+    if (op->is_frozen && !is_private_access_allowed(op, accessorEnv)) {
+        return;
     }
 
     // Special-case: environment proxy — write into the proxied Environment

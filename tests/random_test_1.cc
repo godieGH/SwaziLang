@@ -3,9 +3,9 @@
 #include <memory>
 #include <string>
 
+#include "evaluator.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
-#include "evaluator.hpp"
 
 // Use a convenient alias for the AST pointer type
 using program = std::unique_ptr<ProgramNode>;
@@ -25,9 +25,9 @@ static bool parseOrEvalThrows(const std::string& src) {
         Evaluator ev;
         ev.set_entry_point("<test>");
         ev.evaluate(ast.get());
-        return false; // no exception
+        return false;  // no exception
     } catch (...) {
-        return true; // something threw
+        return true;  // something threw
     }
 }
 

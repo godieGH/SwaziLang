@@ -2557,62 +2557,62 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
 
                 // --- OBJECT PATH (obj[key]++ / obj[key] += v / obj[key] *= v) ---
-               if (std::holds_alternative<ObjectPtr>(objVal)) {
-    ObjectPtr op = std::get<ObjectPtr>(objVal);
-    if (!op) {
-        throw std::runtime_error(
-            "TypeError at " + b->token.loc.to_string() +
-            "\nCannot operate on null object." +
-            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
-    }
+                if (std::holds_alternative<ObjectPtr>(objVal)) {
+                    ObjectPtr op = std::get<ObjectPtr>(objVal);
+                    if (!op) {
+                        throw std::runtime_error(
+                            "TypeError at " + b->token.loc.to_string() +
+                            "\nCannot operate on null object." +
+                            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
+                    }
 
-    // convert indexVal -> property key string
-    std::string prop = to_string_value(indexVal);
+                    // convert indexVal -> property key string
+                    std::string prop = to_string_value(indexVal);
 
-    // Read the current value using unified getter (handles getters, privacy checks for reads).
-    // If property doesn't exist get_object_property returns undefined (std::monostate).
-    Value curVal = get_object_property(op, prop, env, idx->token);
+                    // Read the current value using unified getter (handles getters, privacy checks for reads).
+                    // If property doesn't exist get_object_property returns undefined (std::monostate).
+                    Value curVal = get_object_property(op, prop, env, idx->token);
 
-    // Handle INCREMENT / DECREMENT
-    if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
-        double oldv = to_number(curVal, b->token);
-        double newv = (b->token.type == TokenType::INCREMENT) ? oldv + 1.0 : oldv - 1.0;
-        // Write via the centralized setter so freeze/permissions are enforced.
-        set_object_property(op, prop, Value{newv}, env, idx->token);
-        return Value{newv};
-    }
+                    // Handle INCREMENT / DECREMENT
+                    if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
+                        double oldv = to_number(curVal, b->token);
+                        double newv = (b->token.type == TokenType::INCREMENT) ? oldv + 1.0 : oldv - 1.0;
+                        // Write via the centralized setter so freeze/permissions are enforced.
+                        set_object_property(op, prop, Value{newv}, env, idx->token);
+                        return Value{newv};
+                    }
 
-    // Handle += (string concat if either side string)
-    if (b->token.type == TokenType::PLUS_ASSIGN) {
-        Value rightVal = evaluate_expression(b->right.get(), env);
-        if (std::holds_alternative<std::string>(curVal) || std::holds_alternative<std::string>(rightVal)) {
-            std::string out = to_string_value(curVal) + to_string_value(rightVal);
-            set_object_property(op, prop, Value{out}, env, idx->token);
-            return Value{out};
-        }
-        double oldn = to_number(curVal, b->token);
-        double rv = to_number(rightVal, b->token);
-        double newv = oldn + rv;
-        set_object_property(op, prop, Value{newv}, env, idx->token);
-        return Value{newv};
-    }
+                    // Handle += (string concat if either side string)
+                    if (b->token.type == TokenType::PLUS_ASSIGN) {
+                        Value rightVal = evaluate_expression(b->right.get(), env);
+                        if (std::holds_alternative<std::string>(curVal) || std::holds_alternative<std::string>(rightVal)) {
+                            std::string out = to_string_value(curVal) + to_string_value(rightVal);
+                            set_object_property(op, prop, Value{out}, env, idx->token);
+                            return Value{out};
+                        }
+                        double oldn = to_number(curVal, b->token);
+                        double rv = to_number(rightVal, b->token);
+                        double newv = oldn + rv;
+                        set_object_property(op, prop, Value{newv}, env, idx->token);
+                        return Value{newv};
+                    }
 
-    // Other compound numeric ops: -=, *= etc.
-    {
-        Value rightVal = evaluate_expression(b->right.get(), env);
-        double oldn = to_number(curVal, b->token);
-        double rv = to_number(rightVal, b->token);
-        double newv = oldn;
-        if (b->token.type == TokenType::MINUS_ASSIGN)
-            newv = oldn - rv;
-        else if (b->token.type == TokenType::TIMES_ASSIGN)
-            newv = oldn * rv;
-        else
-            newv = oldn + rv;  // fallback numeric
-        set_object_property(op, prop, Value{newv}, env, idx->token);
-        return Value{newv};
-    }
-}
+                    // Other compound numeric ops: -=, *= etc.
+                    {
+                        Value rightVal = evaluate_expression(b->right.get(), env);
+                        double oldn = to_number(curVal, b->token);
+                        double rv = to_number(rightVal, b->token);
+                        double newv = oldn;
+                        if (b->token.type == TokenType::MINUS_ASSIGN)
+                            newv = oldn - rv;
+                        else if (b->token.type == TokenType::TIMES_ASSIGN)
+                            newv = oldn * rv;
+                        else
+                            newv = oldn + rv;  // fallback numeric
+                        set_object_property(op, prop, Value{newv}, env, idx->token);
+                        return Value{newv};
+                    }
+                }
 
                 // Fallback: not array nor object
                 throw std::runtime_error(
