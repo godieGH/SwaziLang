@@ -2557,139 +2557,62 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
 
                 // --- OBJECT PATH (obj[key]++ / obj[key] += v / obj[key] *= v) ---
-                if (std::holds_alternative<ObjectPtr>(objVal)) {
-                    ObjectPtr op = std::get<ObjectPtr>(objVal);
-                    if (!op) {
-                        throw std::runtime_error(
-                            "TypeError at " + b->token.loc.to_string() +
-                            "\nCannot operate on null object." +
-                            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
-                    }
+               if (std::holds_alternative<ObjectPtr>(objVal)) {
+    ObjectPtr op = std::get<ObjectPtr>(objVal);
+    if (!op) {
+        throw std::runtime_error(
+            "TypeError at " + b->token.loc.to_string() +
+            "\nCannot operate on null object." +
+            "\n --> Traced at:\n" + b->token.loc.get_line_trace());
+    }
 
-                    // convert indexVal -> property key string
-                    std::string prop = to_string_value(indexVal);
+    // convert indexVal -> property key string
+    std::string prop = to_string_value(indexVal);
 
-                    auto it = op->properties.find(prop);
+    // Read the current value using unified getter (handles getters, privacy checks for reads).
+    // If property doesn't exist get_object_property returns undefined (std::monostate).
+    Value curVal = get_object_property(op, prop, env, idx->token);
 
-                    // If property exists, enforce privacy/read-only rules
-                    if (it != op->properties.end()) {
-                        if (it->second.is_private) {
-                            bool allowed = false;
-                            if (env) {
-                                if (env->has("$")) {
-                                    Value thisVal = env->get("$").value;
-                                    if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) allowed = true;
-                                }
-                                if (!allowed && env->has("$this")) {
-                                    Value thisVal = env->get("$this").value;
-                                    if (std::holds_alternative<ObjectPtr>(thisVal) && std::get<ObjectPtr>(thisVal) == op) allowed = true;
-                                }
-                            }
-                            if (!allowed) {
-                                throw std::runtime_error(
-                                    "PermissionError at " + idx->token.loc.to_string() +
-                                    "\nCannot assign to private property '" + prop + "' from outside the owning object." +
-                                    "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
-                            }
-                        }
+    // Handle INCREMENT / DECREMENT
+    if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
+        double oldv = to_number(curVal, b->token);
+        double newv = (b->token.type == TokenType::INCREMENT) ? oldv + 1.0 : oldv - 1.0;
+        // Write via the centralized setter so freeze/permissions are enforced.
+        set_object_property(op, prop, Value{newv}, env, idx->token);
+        return Value{newv};
+    }
 
-                        if (it->second.is_readonly) {
-                            throw std::runtime_error(
-                                "TypeError at " + idx->token.loc.to_string() +
-                                "\nCannot assign to read-only property '" + prop + "'." +
-                                "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
-                        }
+    // Handle += (string concat if either side string)
+    if (b->token.type == TokenType::PLUS_ASSIGN) {
+        Value rightVal = evaluate_expression(b->right.get(), env);
+        if (std::holds_alternative<std::string>(curVal) || std::holds_alternative<std::string>(rightVal)) {
+            std::string out = to_string_value(curVal) + to_string_value(rightVal);
+            set_object_property(op, prop, Value{out}, env, idx->token);
+            return Value{out};
+        }
+        double oldn = to_number(curVal, b->token);
+        double rv = to_number(rightVal, b->token);
+        double newv = oldn + rv;
+        set_object_property(op, prop, Value{newv}, env, idx->token);
+        return Value{newv};
+    }
 
-                        // Avoid converting to number until numeric path is chosen.
-                        if (b->token.type == TokenType::INCREMENT || b->token.type == TokenType::DECREMENT) {
-                            double oldv = to_number(it->second.value, b->token);
-                            double newv = oldv;
-                            if (b->token.type == TokenType::INCREMENT)
-                                newv = oldv + 1.0;
-                            else
-                                newv = oldv - 1.0;
-                            it->second.value = Value{newv};
-                            it->second.token = idx->token;
-                            return Value{newv};
-                        }
-
-                        if (b->token.type == TokenType::PLUS_ASSIGN) {
-                            Value rightVal = evaluate_expression(b->right.get(), env);
-                            if (std::holds_alternative<std::string>(it->second.value) ||
-                                std::holds_alternative<std::string>(rightVal)) {
-                                std::string out = to_string_value(it->second.value) + to_string_value(rightVal);
-                                it->second.value = Value{out};
-                                it->second.token = idx->token;
-                                return Value{out};
-                            }
-                            double oldv = to_number(it->second.value, b->token);
-                            double rv = to_number(rightVal, b->token);
-                            double newv = oldv + rv;
-                            it->second.value = Value{newv};
-                            it->second.token = idx->token;
-                            return Value{newv};
-                        }
-
-                        // other compound ops: numeric-only
-                        {
-                            Value rightVal = evaluate_expression(b->right.get(), env);
-                            double oldv = to_number(it->second.value, b->token);
-                            double rv = to_number(rightVal, b->token);
-                            double newv = oldv;
-                            if (b->token.type == TokenType::MINUS_ASSIGN)
-                                newv = oldv - rv;
-                            else if (b->token.type == TokenType::TIMES_ASSIGN)
-                                newv = oldv * rv;
-                            else
-                                newv = oldv + rv;
-                            it->second.value = Value{newv};
-                            it->second.token = idx->token;
-                            return Value{newv};
-                        }
-                    }
-
-                    // Property does not exist -> create public property:
-                    // If += with string RHS create string property; otherwise create numeric property
-                    if (b->token.type == TokenType::PLUS_ASSIGN) {
-                        Value rightVal = evaluate_expression(b->right.get(), env);
-                        PropertyDescriptor desc;
-                        if (std::holds_alternative<std::string>(rightVal)) {
-                            desc.value = Value{to_string_value(rightVal)};
-                        } else {
-                            desc.value = Value{to_number(rightVal, b->token)};
-                        }
-                        desc.is_private = false;
-                        desc.is_readonly = false;
-                        desc.token = idx->token;
-                        op->properties[prop] = std::move(desc);
-                        return op->properties[prop].value;
-                    }
-
-                    // Create numeric property starting from 0 and apply op
-                    double oldv = 0.0;
-                    double newv = oldv;
-                    if (b->token.type == TokenType::INCREMENT)
-                        newv = oldv + 1.0;
-                    else if (b->token.type == TokenType::DECREMENT)
-                        newv = oldv - 1.0;
-                    else if (b->token.type == TokenType::TIMES_ASSIGN) {
-                        Value rightVal = evaluate_expression(b->right.get(), env);
-                        double rv = to_number(rightVal, b->token);
-                        newv = oldv * rv;
-                    } else {
-                        Value rightVal = evaluate_expression(b->right.get(), env);
-                        double rv = to_number(rightVal, b->token);
-                        newv = oldv + ((b->token.type == TokenType::MINUS_ASSIGN) ? -rv : rv);
-                    }
-
-                    PropertyDescriptor desc;
-                    desc.value = Value{newv};
-                    desc.is_private = false;
-                    desc.is_readonly = false;
-                    desc.token = idx->token;
-                    op->properties[prop] = std::move(desc);
-                    return Value{newv};
-                }
+    // Other compound numeric ops: -=, *= etc.
+    {
+        Value rightVal = evaluate_expression(b->right.get(), env);
+        double oldn = to_number(curVal, b->token);
+        double rv = to_number(rightVal, b->token);
+        double newv = oldn;
+        if (b->token.type == TokenType::MINUS_ASSIGN)
+            newv = oldn - rv;
+        else if (b->token.type == TokenType::TIMES_ASSIGN)
+            newv = oldn * rv;
+        else
+            newv = oldn + rv;  // fallback numeric
+        set_object_property(op, prop, Value{newv}, env, idx->token);
+        return Value{newv};
+    }
+}
 
                 // Fallback: not array nor object
                 throw std::runtime_error(
