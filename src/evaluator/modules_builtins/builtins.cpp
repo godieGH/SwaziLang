@@ -1,5 +1,6 @@
 #include "builtins.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -1353,8 +1354,8 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 
     return obj;
 }
-// ----------------- JSON module (parse & stringify) -----------------
 
+// ----------------- JSON module (parse & stringify) -----------------
 namespace {
 // Minimal JSON parser / stringify routines
 struct JsonParser {
@@ -1510,9 +1511,6 @@ struct JsonParser {
     }
 };
 
-// stringify Value back to JSON
-static std::string json_stringify_value(const Value& v);
-
 static std::string json_stringify_string(const std::string& s) {
     std::ostringstream out;
     out << '"';
@@ -1550,63 +1548,168 @@ static std::string json_stringify_string(const std::string& s) {
     return out.str();
 }
 
-static std::string json_stringify_value(const Value& v, std::unordered_set<const ObjectValue*> objvisited = {}, std::unordered_set<const ArrayValue*> arrvisited = {}, Token token = {}) {
+static std::string json_stringify_value_enhanced(
+    const Value& v,
+    Evaluator* evaluator,
+    std::unordered_set<const ObjectValue*>& objvisited,
+    std::unordered_set<const ArrayValue*>& arrvisited,
+    const Token& token,
+    const std::vector<std::string>& whitelist,
+    FunctionPtr replacer_fn,
+    EnvPtr callEnv,
+    const std::string& indent,
+    int depth) {
+    // Handle primitives first
     if (std::holds_alternative<std::monostate>(v)) return "null";
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
+
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
         ss << std::get<double>(v);
         return ss.str();
     }
+
     if (std::holds_alternative<std::string>(v)) {
         return json_stringify_string(std::get<std::string>(v));
     }
-    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
+
+    // Handle arrays
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr a = std::get<ArrayPtr>(v);
+        if (!a) return "[]";
 
         ArrayValue* p = a.get();
         if (arrvisited.count(p)) {
             throw SwaziError("JsonError", "Converting circular structure to JSON", token.loc);
-        };
+        }
         arrvisited.insert(p);
 
         std::ostringstream ss;
         ss << '[';
+
         bool first = true;
-        for (auto& el : a->elements) {
-            if (!first) ss << ',';
-            first = false;
-            ss << json_stringify_value(el, objvisited, arrvisited, token);
+        // REMOVE THE DUPLICATE LOOP - KEEP ONLY THIS ONE:
+        for (size_t i = 0; i < a->elements.size(); ++i) {
+            Value element = a->elements[i];
+
+            // Apply replacer if provided
+            if (replacer_fn && evaluator) {
+                std::vector<Value> replacer_args = {
+                    Value{std::to_string(i)},
+                    element};
+                try {
+                    element = evaluator->invoke_function(
+                        replacer_fn, replacer_args, callEnv, token);
+                } catch (...) {
+                    // Skip this element if replacer throws
+                    continue;
+                }
+            }
+
+            // Add separator
+            if (!first) {
+                ss << ',';
+                if (!indent.empty()) {
+                    ss << "\n"
+                       << std::string((depth + 1) * indent.length(), ' ');
+                }
+            } else {
+                first = false;
+                if (!indent.empty()) {
+                    ss << "\n"
+                       << std::string((depth + 1) * indent.length(), ' ');
+                }
+            }
+
+            ss << json_stringify_value_enhanced(element, evaluator, objvisited,
+                arrvisited, token, whitelist,
+                replacer_fn, callEnv, indent, depth + 1);
+        }
+
+        if (!indent.empty() && !a->elements.empty()) {
+            ss << '\n'
+               << std::string(depth * indent.length(), ' ');
         }
         ss << ']';
+
+        arrvisited.erase(p);
         return ss.str();
     }
+
+    // Handle objects
     if (std::holds_alternative<ObjectPtr>(v)) {
         ObjectPtr o = std::get<ObjectPtr>(v);
+        if (!o) return "{}";
 
         ObjectValue* p = o.get();
         if (objvisited.count(p)) {
             throw SwaziError("JsonError", "Converting circular structure to JSON", token.loc);
-        };
+        }
         objvisited.insert(p);
 
         std::ostringstream ss;
         ss << '{';
+
         bool first = true;
         for (auto& kv : o->properties) {
-            if (!first) ss << ',';
-            first = false;
-            ss << json_stringify_string(kv.first) << ':' << json_stringify_value(kv.second.value, objvisited, arrvisited, token);
+            // Apply whitelist filter if provided
+            if (!whitelist.empty() &&
+                std::find(whitelist.begin(), whitelist.end(), kv.first) == whitelist.end()) {
+                continue;
+            }
+
+            Value prop_value = kv.second.value;
+
+            if (replacer_fn && evaluator) {
+                std::vector<Value> replacer_args = {
+                    Value{kv.first},  // key
+                    prop_value        // value
+                };
+                try {
+                    prop_value = evaluator->invoke_function(
+                        replacer_fn, replacer_args, callEnv, token);
+                } catch (...) {
+                    // If replacer throws, skip this property
+                    continue;
+                }
+            }
+
+            if (!first) {
+                ss << ',';
+                if (!indent.empty()) {
+                    ss << "\n"
+                       << std::string((depth + 1) * indent.length(), ' ');
+                }
+            } else {
+                first = false;
+                if (!indent.empty()) {
+                    ss << "\n"
+                       << std::string((depth + 1) * indent.length(), ' ');
+                }
+            }
+
+            ss << json_stringify_string(kv.first) << ':';
+            if (!indent.empty()) ss << ' ';
+            ss << json_stringify_value_enhanced(prop_value, evaluator, objvisited, arrvisited, token, whitelist, replacer_fn, callEnv, indent, depth + 1);
+        }
+
+        if (!indent.empty() && !o->properties.empty()) {
+            ss << '\n'
+               << std::string(depth * indent.length(), ' ');
         }
         ss << '}';
+
+        objvisited.erase(p);
         return ss.str();
     }
-    // functions / classes -> null
+
+    // Functions/classes -> null
     return "null";
 }
+
 }  // namespace
 
-std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env) {
+std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
 
     // json.parse(str) -> Value
@@ -1624,13 +1727,57 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env) {
         obj->properties["parse"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // json.stringify(val) -> string
+    // json.stringify(val, replacer?, spaces?) -> string
     {
-        auto fn = make_native_fn("json.stringify", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.empty()) return Value();
-            std::unordered_set<const ObjectValue*> objvisited;
-            std::unordered_set<const ArrayValue*> arrvisited;
-            return Value{ json_stringify_value(args[0], objvisited, arrvisited, token) }; }, env);
+        auto fn = make_native_fn("json.stringify", [evaluator](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+        if (args.empty()) return Value();
+        
+        // Parse replacer parameter (can be array or function)
+        std::vector<std::string> whitelist;
+        FunctionPtr replacer_fn = nullptr;
+        
+        if (args.size() >= 2 && !std::holds_alternative<std::monostate>(args[1])) {
+            if (std::holds_alternative<ArrayPtr>(args[1])) {
+                // Whitelist mode: only include keys in the array
+                ArrayPtr arr = std::get<ArrayPtr>(args[1]);
+                for (const auto& el : arr->elements) {
+                    whitelist.push_back(value_to_string_simple(el));
+                }
+            } else if (std::holds_alternative<FunctionPtr>(args[1])) {
+                // Function replacer mode
+                replacer_fn = std::get<FunctionPtr>(args[1]);
+            }
+        }
+        
+        // Parse spaces parameter
+        std::string indent;
+        if (args.size() >= 3 && std::holds_alternative<double>(args[2])) {
+            int spaces = static_cast<int>(std::get<double>(args[2]));
+            spaces = std::max(0, std::min(10, spaces)); // clamp to 0-10
+            if (spaces > 0) {
+                indent = std::string(spaces, ' ');
+            }
+        } else if (args.size() >= 3 && std::holds_alternative<std::string>(args[2])) {
+            // Can also be a string (like "\t")
+            indent = std::get<std::string>(args[2]);
+            if (indent.length() > 10) indent = indent.substr(0, 10);
+        }
+        
+        std::unordered_set<const ObjectValue*> objvisited;
+        std::unordered_set<const ArrayValue*> arrvisited;
+        
+        return Value{ json_stringify_value_enhanced(
+            args[0], 
+            evaluator,
+            objvisited, 
+            arrvisited, 
+            token,
+            whitelist,
+            replacer_fn,
+            callEnv,
+            indent,
+            0  
+        )}; }, env);
         obj->properties["stringify"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
