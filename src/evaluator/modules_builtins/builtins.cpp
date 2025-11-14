@@ -59,14 +59,25 @@ static FunctionPtr make_native_fn(const std::string& name, F impl, EnvPtr env) {
 // When libcurl is available we need a plain function pointer for the C callback.
 // Define the context struct and callback at file scope so they can be referenced
 // from the native lambda without needing captures.
+// Replace the existing CurlWriteCtx and add a header callback right after curl_write_cb:
+
 struct CurlWriteCtx {
-    std::string buf;
+    std::string buf;      // response body
+    std::string headers;  // raw header data (including status line)
 };
 
 static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t total = size * nmemb;
     CurlWriteCtx* ctx = static_cast<CurlWriteCtx*>(userdata);
     if (ctx) ctx->buf.append(ptr, total);
+    return total;
+}
+
+// New: header callback to collect headers (including the status line)
+static size_t curl_header_cb(char* buffer, size_t size, size_t nitems, void* userdata) {
+    size_t total = size * nitems;
+    CurlWriteCtx* ctx = static_cast<CurlWriteCtx*>(userdata);
+    if (ctx) ctx->headers.append(buffer, total);
     return total;
 }
 #endif
@@ -1213,6 +1224,10 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             curl_easy_setopt(c, CURLOPT_URL, url.c_str());
             curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
             curl_easy_setopt(c, CURLOPT_WRITEDATA, &ctx);
+
+            // Capture headers (including status line) so we can extract reason/status text
+            curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_cb);
+            curl_easy_setopt(c, CURLOPT_HEADERDATA, &ctx);
             
             // Set method
             if (method == "POST") {
@@ -1246,15 +1261,38 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             if (curl_headers) curl_easy_setopt(c, CURLOPT_HTTPHEADER, curl_headers);
 
             CURLcode res = curl_easy_perform(c);
-            
+
             if (curl_headers) curl_slist_free_all(curl_headers);
-            
+
             long status_code = 0;
             curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status_code);
-            
-            curl_easy_cleanup(c);
 
-            if (res != CURLE_OK) {
+            // Parse status text from the collected headers (first status line)
+            std::string status_text;
+            if (!ctx.headers.empty()) {
+                // headers may contain multiple header blocks if redirects are followed.
+                // Find last occurrence of "HTTP/" group for the final response or the first line present.
+                // Simpler: find the first line up to CRLF
+                size_t pos_end = ctx.headers.find("\r\n");
+                if (pos_end != std::string::npos) {
+                    std::string status_line = ctx.headers.substr(0, pos_end); // e.g., "HTTP/1.1 404 File not found"
+                    // extract text after the status code:
+                    // find first space
+                    size_t sp1 = status_line.find(' ');
+                    if (sp1 != std::string::npos) {
+                        size_t sp2 = status_line.find(' ', sp1 + 1);
+                        if (sp2 != std::string::npos && sp2 + 1 < status_line.size()) {
+                            status_text = status_line.substr(sp2 + 1);
+                            // trim trailing CR/LF if any (shouldn't be)
+                            while (!status_text.empty() && (status_text.back() == '\r' || status_text.back() == '\n')) status_text.pop_back();
+                        }
+                    }
+                }
+            }
+
+            curl_easy_cleanup(c);
+            
+              if (res != CURLE_OK) {
                 promise->state = PromiseValue::State::REJECTED;
                 promise->result = Value{std::string("fetch failed: ") + curl_easy_strerror(res)};
                 for (auto& cb : promise->catch_callbacks) {
@@ -1263,13 +1301,35 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
                 return;
             }
 
+
             // Create response object
             auto response = std::make_shared<ObjectValue>();
             response->properties["status"] = PropertyDescriptor{Value{static_cast<double>(status_code)}, false, false, true, Token()};
             response->properties["ok"] = PropertyDescriptor{Value{status_code >= 200 && status_code < 300}, false, false, true, Token()};
-            
-            // Store body directly as a property - simple and robust!
+
+            // Store body directly as a property
             response->properties["body"] = PropertyDescriptor{Value{ctx.buf}, false, false, true, Token()};
+
+            // Expose the parsed status text (reason phrase) to the script
+            if (!status_text.empty()) {
+                response->properties["statusText"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+            } else {
+                response->properties["statusText"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+            }
+
+            // Add an errorMessage property for 4xx/5xx responses:
+            // prefer the body if present, otherwise fall back to the statusText (reason phrase)
+            if (status_code >= 400 && status_code < 600) {
+                if (!ctx.buf.empty()) {
+                    response->properties["errorMessage"] = PropertyDescriptor{Value{ctx.buf}, false, false, true, Token()};
+                } else if (!status_text.empty()) {
+                    response->properties["errorMessage"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+                } else {
+                    response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+                }
+            } else {
+                response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+            }
 
             // Fulfill promise
             promise->state = PromiseValue::State::FULFILLED;
@@ -1775,6 +1835,100 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
         },
             env);
         obj->properties["pid"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    return obj;
+}
+
+// ----------------- BASE64 module -----------------
+std::shared_ptr<ObjectValue> make_base64_exports(EnvPtr env) {
+    auto obj = std::make_shared<ObjectValue>();
+
+    // Base64 encoding table
+    static const char* base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    // base64.encode(data) -> string
+    {
+        auto fn = make_native_fn("base64.encode", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "base64.encode requires data argument. Usage: encode(data) -> string", token.loc);
+            }
+            
+            std::string input = value_to_string_simple(args[0]);
+            std::string encoded;
+            encoded.reserve(((input.size() + 2) / 3) * 4);
+            
+            const unsigned char* bytes = reinterpret_cast<const unsigned char*>(input.data());
+            size_t len = input.size();
+            
+            for (size_t i = 0; i < len; i += 3) {
+                uint32_t octet_a = i < len ? bytes[i] : 0;
+                uint32_t octet_b = i + 1 < len ? bytes[i + 1] : 0;
+                uint32_t octet_c = i + 2 < len ? bytes[i + 2] : 0;
+                
+                uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+                
+                encoded += base64_chars[(triple >> 18) & 0x3F];
+                encoded += base64_chars[(triple >> 12) & 0x3F];
+                encoded += (i + 1 < len) ? base64_chars[(triple >> 6) & 0x3F] : '=';
+                encoded += (i + 2 < len) ? base64_chars[triple & 0x3F] : '=';
+            }
+            
+            return Value{encoded}; }, env);
+        obj->properties["encode"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // base64.decode(encoded) -> string
+    {
+        auto fn = make_native_fn("base64.decode", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "base64.decode requires encoded string argument. Usage: decode(encoded) -> string", token.loc);
+            }
+            
+            std::string input = value_to_string_simple(args[0]);
+            
+            // Build reverse lookup table
+            static int decode_table[256];
+            static bool table_initialized = false;
+            if (!table_initialized) {
+                for (int i = 0; i < 256; i++) decode_table[i] = -1;
+                for (int i = 0; i < 64; i++) {
+                    decode_table[static_cast<unsigned char>(base64_chars[i])] = i;
+                }
+                decode_table['='] = 0;
+                table_initialized = true;
+            }
+            
+            std::string decoded;
+            decoded.reserve((input.size() / 4) * 3);
+            
+            uint32_t buffer = 0;
+            int bits_collected = 0;
+            
+            for (char c : input) {
+                if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+                
+                int value = decode_table[static_cast<unsigned char>(c)];
+                if (value == -1) {
+                    throw SwaziError("RuntimeError", "Invalid base64 character encountered", token.loc);
+                }
+                
+                if (c == '=') break;
+                
+                buffer = (buffer << 6) | value;
+                bits_collected += 6;
+                
+                if (bits_collected >= 8) {
+                    bits_collected -= 8;
+                    decoded += static_cast<char>((buffer >> bits_collected) & 0xFF);
+                }
+            }
+            
+            return Value{decoded}; }, env);
+        obj->properties["decode"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;

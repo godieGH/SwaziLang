@@ -158,182 +158,203 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         return rec->exports;
     }
 
-    // --- built-in modules short-circuit ---
-    // Handle built-ins first (so "regex", "fs", "http" refer to native factories).
-    // This must run before resolving filesystem paths.
-    if (module_spec == "regex" || module_spec == "swazi:regex") {
-        const std::string key = "__builtin__:regex";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
+    {
+        // --- built-in modules short-circuit ---
+        // Handle built-ins first (so "regex", "fs", "http" refer to native factories).
+        // This must run before resolving filesystem paths.
+        if (module_spec == "regex" || module_spec == "swazi:regex") {
+            const std::string key = "__builtin__:regex";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
 
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "regex", false);
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "regex", false);
 
-        rec->exports = make_regex_exports(rec->module_env);
+            rec->exports = make_regex_exports(rec->module_env);
 
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "fs" || module_spec == "swazi:fs") {
+            const std::string key = "__builtin__:fs";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "fs", false);
+
+            rec->exports = make_fs_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "http" || module_spec == "swazi:http") {
+            const std::string key = "__builtin__:http";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "http", false);
+
+            rec->exports = make_http_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "json" || module_spec == "swazi:json") {
+            const std::string key = "__builtin__:json";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "json", false);
+
+            rec->exports = make_json_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "path" || module_spec == "swazi:path") {
+            const std::string key = "__builtin__:path";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "path", false);
+
+            rec->exports = make_path_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "os" || module_spec == "swazi:os") {
+            const std::string key = "__builtin__:os";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "os", false);
+
+            rec->exports = make_os_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "process" || module_spec == "swazi:process") {
+            const std::string key = "__builtin__:process";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "process", false);
+
+            rec->exports = make_process_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        // child_process builtin
+        if (module_spec == "child_process" || module_spec == "swazi:child_process") {
+            const std::string key = "__builtin__:child_process";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "child_process", false);
+
+            rec->exports = make_child_process_exports(rec->module_env, this);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "timers" || module_spec == "swazi:timers") {
+            const std::string key = "__builtin__:timers";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "timers", false);
+
+            rec->exports = make_timers_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        if (module_spec == "base64" || module_spec == "swazi:base64") {
+            const std::string key = "__builtin__:base64";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "base64", false);
+
+            rec->exports = make_base64_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
+        // --- end built-in short-circuit ---
     }
-
-    if (module_spec == "fs" || module_spec == "swazi:fs") {
-        const std::string key = "__builtin__:fs";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "fs", false);
-
-        rec->exports = make_fs_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    if (module_spec == "http" || module_spec == "swazi:http") {
-        const std::string key = "__builtin__:http";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "http", false);
-
-        rec->exports = make_http_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    if (module_spec == "json" || module_spec == "swazi:json") {
-        const std::string key = "__builtin__:json";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "json", false);
-
-        rec->exports = make_json_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    if (module_spec == "path" || module_spec == "swazi:path") {
-        const std::string key = "__builtin__:path";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "path", false);
-
-        rec->exports = make_path_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    if (module_spec == "os" || module_spec == "swazi:os") {
-        const std::string key = "__builtin__:os";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "os", false);
-
-        rec->exports = make_os_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    if (module_spec == "process" || module_spec == "swazi:process") {
-        const std::string key = "__builtin__:process";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "process", false);
-
-        rec->exports = make_process_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    // child_process builtin
-    if (module_spec == "child_process" || module_spec == "swazi:child_process") {
-        const std::string key = "__builtin__:child_process";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "child_process", false);
-
-        rec->exports = make_child_process_exports(rec->module_env, this);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    if (module_spec == "timers" || module_spec == "swazi:timers") {
-        const std::string key = "__builtin__:timers";
-        auto it = module_cache.find(key);
-        if (it != module_cache.end()) return it->second->exports;
-
-        auto rec = std::make_shared<ModuleRecord>();
-        rec->state = ModuleRecord::State::Loading;
-        rec->exports = std::make_shared<ObjectValue>();
-        rec->path = key;
-        rec->module_env = std::make_shared<Environment>(global_env);
-        module_cache[key] = rec;
-        populate_module_metadata(rec->module_env, rec->path, "timers", false);
-
-        rec->exports = make_timers_exports(rec->module_env);
-
-        rec->state = ModuleRecord::State::Loaded;
-        return rec->exports;
-    }
-
-    // --- end built-in short-circuit ---
 
     // Resolve filesystem path (throws if not found)
     std::string resolved = resolve_module_path(module_spec, requesterTok.loc.filename, requesterTok);

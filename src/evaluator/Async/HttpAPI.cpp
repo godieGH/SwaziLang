@@ -60,8 +60,10 @@ struct HttpRequest {
     uv_stream_t* client;
 };
 
+// --- Replace existing HttpResponse struct with this updated version ---
 struct HttpResponse {
     int status_code = 200;
+    std::string reason = "OK";  // allow dynamic reason phrase
     std::unordered_map<std::string, std::string> headers;
     std::string body;
     bool headers_sent = false;
@@ -74,30 +76,96 @@ struct HttpResponse {
         headers_sent = true;
     }
 
+    // End must honor status codes that must not have a body (204, 304)
     void end(const std::string& data) {
-        if (!headers_sent) {
-            headers["Content-Length"] = std::to_string(data.size());
-            headers_sent = true;
+        // If status mandates no body, ignore passed data and ensure no Content-Length is added
+        if (status_code == 204 || status_code == 304) {
+            body.clear();
+            // Remove any Content-Length header the user might have set
+            headers.erase("Content-Length");
+            headers.erase("content-length");
+            headers_sent = true;  // treat headers as already finalized
+        } else {
+            if (!headers_sent) {
+                headers["Content-Length"] = std::to_string(data.size());
+                headers_sent = true;
+            }
+            body = data;
         }
-        body = data;
         send();
+    }
+
+    static std::string reason_for_code(int code) {
+        // Minimal mapping. You can extend this as desired.
+        switch (code) {
+            case 100:
+                return "Continue";
+            case 101:
+                return "Switching Protocols";
+            case 200:
+                return "OK";
+            case 201:
+                return "Created";
+            case 202:
+                return "Accepted";
+            case 204:
+                return "No Content";
+            case 301:
+                return "Moved Permanently";
+            case 302:
+                return "Found";
+            case 304:
+                return "Not Modified";
+            case 400:
+                return "Bad Request";
+            case 401:
+                return "Unauthorized";
+            case 403:
+                return "Forbidden";
+            case 404:
+                return "Not Found";
+            case 405:
+                return "Method Not Allowed";
+            case 410:
+                return "Gone";
+            case 500:
+                return "Internal Server Error";
+            case 501:
+                return "Not Implemented";
+            case 502:
+                return "Bad Gateway";
+            case 503:
+                return "Service Unavailable";
+            default:
+                return std::string();  // empty => omit reason or keep previously set reason
+        }
     }
 
     void send() {
         if (!client) return;
 
         std::ostringstream response;
-        response << "HTTP/1.1 " << status_code << " OK\r\n";
+        // Use dynamic reason if set, otherwise fall back to standard mapping (if any)
+        std::string rp = !reason.empty() ? reason : reason_for_code(status_code);
 
-        if (headers.find("Content-Type") == headers.end()) {
+        if (!rp.empty()) {
+            response << "HTTP/1.1 " << status_code << " " << rp << "\r\n";
+        } else {
+            // If no reason mapped or set, still produce a valid status line
+            response << "HTTP/1.1 " << status_code << "\r\n";
+        }
+
+        if (headers.find("Content-Type") == headers.end() && headers.find("content-type") == headers.end()) {
             headers["Content-Type"] = "text/plain";
         }
 
         for (const auto& kv : headers) {
             response << kv.first << ": " << kv.second << "\r\n";
         }
-        response << "\r\n"
-                 << body;
+        response << "\r\n";
+        // Append body only if allowed by status
+        if (!(status_code == 204 || status_code == 304))
+            response << body;
 
         std::string out = response.str();
         // Allocate a copy for libuv write
@@ -117,7 +185,6 @@ struct HttpResponse {
         });
     }
 };
-
 static std::shared_ptr<HttpRequest> parse_http_request_simple(const char* data, ssize_t len) {
     std::string raw(data, len);
     auto req = std::make_shared<HttpRequest>();
@@ -230,6 +297,8 @@ static void on_connection(uv_stream_t* server, int status) {
                                 }
                             }
                             http_res->writeHead(code, hdrs);
+                            // Optionally set a default reason according to code if none set
+                            if (http_res->reason.empty()) http_res->reason = HttpResponse::reason_for_code(code);
                             return std::monostate{};
                         };
                         auto writeHead_fn = std::make_shared<FunctionValue>("res.writeHead", writeHead_impl, nullptr, Token{});
@@ -238,11 +307,40 @@ static void on_connection(uv_stream_t* server, int status) {
                         // res.end(data)
                         auto end_impl = [http_res](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
                             std::string data = args.empty() ? "" : value_to_string_simple_local(args[0]);
-                            http_res->end(data);
+                            // If status forbids body, ignore the provided data
+                            if (http_res->status_code == 204 || http_res->status_code == 304) {
+                                http_res->end("");
+                            } else {
+                                http_res->end(data);
+                            }
                             return std::monostate{};
                         };
+
                         auto end_fn = std::make_shared<FunctionValue>("res.end", end_impl, nullptr, Token{});
                         res_obj->properties["end"] = {Value{end_fn}, false, false, true, Token{}};
+
+                        // res.status(code) -> returns res object for chaining
+                        // NOTE: capture res_obj so we can return it to the caller for chaining.
+                        auto status_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
+                            if (args.empty()) return Value{res_obj};
+                            int code = static_cast<int>(value_to_number_simple_local(args[0]));
+                            http_res->status_code = code;
+                            // set a default reason phrase unless user overrides with message()
+                            http_res->reason = HttpResponse::reason_for_code(code);
+                            return Value{res_obj};  // allow chaining: res.status(404).end(...)
+                        };
+                        auto status_fn = std::make_shared<FunctionValue>("res.status", status_impl, nullptr, Token{});
+                        res_obj->properties["status"] = {Value{status_fn}, false, false, true, Token{}};
+
+                        // res.message(text) -> set custom reason phrase and return res object for chaining
+                        auto message_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*tok*/) -> Value {
+                            if (!args.empty()) {
+                                http_res->reason = value_to_string_simple_local(args[0]);
+                            }
+                            return Value{res_obj};
+                        };
+                        auto message_fn = std::make_shared<FunctionValue>("res.message", message_impl, nullptr, Token{});
+                        res_obj->properties["message"] = {Value{message_fn}, false, false, true, Token{}};
 
                         // enqueue invocation of request handler onto main scheduler loop
                         if (srv->request_handler) {
