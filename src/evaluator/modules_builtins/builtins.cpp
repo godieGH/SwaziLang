@@ -1035,6 +1035,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     return obj;
 }
 
+
 // ----------------- HTTP module (uses libcurl if available; supports GET and POST) -----------------
 std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
@@ -1150,9 +1151,152 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     }
 #endif
 
+    // http.fetch(url, options?) -> Promise
+{
+    auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) throw SwaziError("TypeError", "fetch requires url", token.loc);
+        std::string url = value_to_string_simple(args[0]);
+
+        // Parse options object (second parameter)
+        std::string method = "GET";
+        std::string body;
+        std::vector<std::string> headers;
+        
+        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+            
+            // method
+            auto it_method = opts->properties.find("method");
+            if (it_method != opts->properties.end()) {
+                method = value_to_string_simple(it_method->second.value);
+            }
+            
+            // body
+            auto it_body = opts->properties.find("body");
+            if (it_body != opts->properties.end()) {
+                body = value_to_string_simple(it_body->second.value);
+            }
+            
+            // headers (object or array)
+            auto it_headers = opts->properties.find("headers");
+            if (it_headers != opts->properties.end()) {
+                if (std::holds_alternative<ObjectPtr>(it_headers->second.value)) {
+                    ObjectPtr hobj = std::get<ObjectPtr>(it_headers->second.value);
+                    for (auto& kv : hobj->properties) {
+                        headers.push_back(kv.first + ": " + value_to_string_simple(kv.second.value));
+                    }
+                } else if (std::holds_alternative<ArrayPtr>(it_headers->second.value)) {
+                    ArrayPtr harr = std::get<ArrayPtr>(it_headers->second.value);
+                    for (auto& h : harr->elements) {
+                        headers.push_back(value_to_string_simple(h));
+                    }
+                }
+            }
+        }
+
+        auto promise = std::make_shared<PromiseValue>();
+        promise->state = PromiseValue::State::PENDING;
+
+#if defined(HAVE_LIBCURL)
+        // Schedule async fetch on loop thread
+        scheduler_run_on_loop([promise, url, method, body, headers]() {
+            CURL* c = curl_easy_init();
+            if (!c) {
+                promise->state = PromiseValue::State::REJECTED;
+                promise->result = Value{std::string("curl_easy_init failed")};
+                for (auto& cb : promise->catch_callbacks) {
+                    try { cb(promise->result); } catch(...) {}
+                }
+                return;
+            }
+
+            CurlWriteCtx ctx;
+            curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            curl_easy_setopt(c, CURLOPT_WRITEDATA, &ctx);
+            
+            // Set method
+            if (method == "POST") {
+                curl_easy_setopt(c, CURLOPT_POST, 1L);
+                if (!body.empty()) {
+                    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+                    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+                }
+            } else if (method == "PUT") {
+                curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PUT");
+                if (!body.empty()) {
+                    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+                    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+                }
+            } else if (method == "DELETE") {
+                curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "DELETE");
+            } else if (method == "PATCH") {
+                curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PATCH");
+                if (!body.empty()) {
+                    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+                    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+                }
+            }
+            // GET is default, no special setup needed
+            
+            // Set headers
+            struct curl_slist* curl_headers = nullptr;
+            for (const auto& h : headers) {
+                curl_headers = curl_slist_append(curl_headers, h.c_str());
+            }
+            if (curl_headers) curl_easy_setopt(c, CURLOPT_HTTPHEADER, curl_headers);
+
+            CURLcode res = curl_easy_perform(c);
+            
+            if (curl_headers) curl_slist_free_all(curl_headers);
+            
+            long status_code = 0;
+            curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status_code);
+            
+            curl_easy_cleanup(c);
+
+            if (res != CURLE_OK) {
+                promise->state = PromiseValue::State::REJECTED;
+                promise->result = Value{std::string("fetch failed: ") + curl_easy_strerror(res)};
+                for (auto& cb : promise->catch_callbacks) {
+                    try { cb(promise->result); } catch(...) {}
+                }
+                return;
+            }
+
+            // Create response object
+            auto response = std::make_shared<ObjectValue>();
+            response->properties["status"] = PropertyDescriptor{Value{static_cast<double>(status_code)}, false, false, true, Token()};
+            response->properties["ok"] = PropertyDescriptor{Value{status_code >= 200 && status_code < 300}, false, false, true, Token()};
+            
+            // Store body directly as a property - simple and robust!
+            response->properties["body"] = PropertyDescriptor{Value{ctx.buf}, false, false, true, Token()};
+
+            // Fulfill promise
+            promise->state = PromiseValue::State::FULFILLED;
+            promise->result = Value{response};
+            for (auto& cb : promise->then_callbacks) {
+                try { cb(promise->result); } catch(...) {}
+            }
+        });
+#else
+        // No libcurl - reject immediately
+        promise->state = PromiseValue::State::REJECTED;
+        promise->result = Value{std::string("fetch requires libcurl support")};
+        for (auto& cb : promise->catch_callbacks) {
+            try { cb(promise->result); } catch(...) {}
+        }
+#endif
+
+        return Value{promise};
+    }, env);
+    obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
+}
+
     return obj;
 }
 // ----------------- JSON module (parse & stringify) -----------------
+
 namespace {
 // Minimal JSON parser / stringify routines
 struct JsonParser {
