@@ -1035,7 +1035,6 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     return obj;
 }
 
-
 // ----------------- HTTP module (uses libcurl if available; supports GET and POST) -----------------
 std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
@@ -1152,8 +1151,8 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 #endif
 
     // http.fetch(url, options?) -> Promise
-{
-    auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+    {
+        auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         if (args.empty()) throw SwaziError("TypeError", "fetch requires url", token.loc);
         std::string url = value_to_string_simple(args[0]);
 
@@ -1288,10 +1287,9 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
         }
 #endif
 
-        return Value{promise};
-    }, env);
-    obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
-}
+        return Value{promise}; }, env);
+        obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
 
     return obj;
 }
