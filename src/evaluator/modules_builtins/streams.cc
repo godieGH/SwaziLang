@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "uv.h"
+
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"
 #include "builtins.hpp"
@@ -96,7 +98,7 @@ static StreamOptions parse_stream_options(const Value& opts_val) {
 }
 
 // Base stream entry that holds all stream data and event listeners
-struct StreamEntry {
+struct StreamEntry : public std::enable_shared_from_this<StreamEntry> {
     long long id;
     StreamType type;
     std::atomic<StreamState> state{StreamState::OPEN};
@@ -122,6 +124,22 @@ struct StreamEntry {
     std::string source_path;
     FilePtr file_handle;
     
+    // NEW: Network socket support
+    uv_tcp_t* tcp_handle = nullptr;
+    bool is_network_stream = false;
+    std::atomic<size_t> pending_writes{0};
+    
+    // NEW: Keep-alive mechanism for async operations
+    std::vector<std::shared_ptr<StreamEntry>> self_references;
+    
+    void keep_alive() {
+        self_references.push_back(shared_from_this());
+    }
+    
+    void release_keepalive() {
+        self_references.clear();
+    }
+    
     // Piping
     std::mutex pipe_mutex;
     std::vector<std::weak_ptr<StreamEntry>> piped_to;
@@ -136,7 +154,6 @@ struct StreamEntry {
     size_t chunk_size = 4096;
     std::string encoding = "binary";
 };
-
 using StreamEntryPtr = std::shared_ptr<StreamEntry>;
 
 // Global stream registry
@@ -257,7 +274,93 @@ static bool write_data(StreamEntryPtr entry, BufferPtr data) {
     if (!entry || !data) return false;
     if (entry->state == StreamState::DESTROYED) return false;
     
-    // If this is a file-backed writable stream, write to file
+    // NEW: Network socket write path
+    if (entry->is_network_stream && entry->tcp_handle) {
+        // Allocate write request
+        uv_write_t* req = new uv_write_t;
+        
+        // Allocate buffer copy for libuv
+        char* buf_copy = (char*)malloc(data->data.size());
+        memcpy(buf_copy, data->data.data(), data->data.size());
+        
+        uv_buf_t uvbuf = uv_buf_init(buf_copy, 
+                                     static_cast<unsigned int>(data->data.size()));
+        
+        // Track this write for backpressure
+        entry->pending_writes++;
+        size_t write_size = data->data.size();
+        
+        // Store context for callback (entry + buffer pointer)
+        struct WriteContext {
+            std::shared_ptr<StreamEntry> entry;
+            void* buffer;
+            size_t size;
+        };
+        
+        auto* ctx = new WriteContext{entry, buf_copy, write_size};
+        req->data = ctx;
+        
+        // Keep entry alive during async write
+        entry->keep_alive();
+        
+        int r = uv_write(req, (uv_stream_t*)entry->tcp_handle, &uvbuf, 1,
+            [](uv_write_t* req, int status) {
+                auto* ctx = static_cast<WriteContext*>(req->data);
+                auto entry = ctx->entry;
+                
+                entry->pending_writes--;
+                entry->buffered_size -= ctx->size;
+                
+                if (status < 0) {
+                    // Write failed - emit error
+                    std::vector<FunctionPtr> listeners;
+                    {
+                        std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                        listeners = entry->error_listeners;
+                    }
+                    emit_event(entry, listeners, 
+                        {Value{std::string("Write error: ") + uv_strerror(status)}});
+                }
+                
+                // Check if we should emit drain
+                if (entry->buffered_size < entry->high_water_mark) {
+                    std::vector<FunctionPtr> listeners;
+                    {
+                        std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                        listeners = entry->drain_listeners;
+                    }
+                    emit_event(entry, listeners, {});
+                }
+                
+                entry->release_keepalive();
+                free(ctx->buffer);
+                delete ctx;
+                delete req;
+            });
+        
+        if (r != 0) {
+            // Write failed immediately
+            entry->pending_writes--;
+            entry->release_keepalive();
+            free(buf_copy);
+            delete ctx;
+            delete req;
+            
+            std::vector<FunctionPtr> listeners;
+            {
+                std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                listeners = entry->error_listeners;
+            }
+            emit_event(entry, listeners, 
+                {Value{std::string("Write error: ") + uv_strerror(r)}});
+            return false;
+        }
+        
+        entry->buffered_size += write_size;
+        return entry->buffered_size < entry->high_water_mark;
+    }
+    
+    // EXISTING: File-backed writable stream code (unchanged)
     if (entry->file_handle && entry->file_handle->is_open) {
         // Write synchronously to file (could be made async with uv_fs_write)
 #ifdef _WIN32
@@ -862,4 +965,118 @@ std::shared_ptr<ObjectValue> make_streams_exports(EnvPtr env) {
     };
     
     return obj;
+}
+
+
+
+// NEW: Create a readable stream from a TCP socket (internal helper)
+static StreamEntryPtr create_readable_network_stream(uv_tcp_t* socket) {
+    auto entry = std::make_shared<StreamEntry>();
+    entry->id = g_next_stream_id.fetch_add(1);
+    entry->type = StreamType::READABLE;
+    entry->state = StreamState::FLOWING;
+    entry->tcp_handle = socket;
+    entry->is_network_stream = true;
+    
+    // Register stream
+    {
+        std::lock_guard<std::mutex> lk(g_streams_mutex);
+        g_streams[entry->id] = entry;
+    }
+    
+    // Store back-pointer for libuv callbacks
+    socket->data = entry.get();
+    
+    // Keep stream alive during read operations
+    entry->keep_alive();
+    
+    // Start reading from socket
+    uv_read_start((uv_stream_t*)socket,
+        // Allocation callback
+        [](uv_handle_t*, size_t suggested, uv_buf_t* buf) {
+            buf->base = (char*)malloc(suggested);
+            buf->len = static_cast<unsigned int>(suggested);
+        },
+        // Read callback
+        [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+            StreamEntry* raw_entry = static_cast<StreamEntry*>(stream->data);
+            if (!raw_entry) {
+                if (buf->base) free(buf->base);
+                return;
+            }
+            
+            // Get shared_ptr from raw pointer
+            StreamEntryPtr entry;
+            {
+                std::lock_guard<std::mutex> lk(g_streams_mutex);
+                auto it = g_streams.find(raw_entry->id);
+                if (it != g_streams.end()) {
+                    entry = it->second;
+                }
+            }
+            
+            if (!entry) {
+                if (buf->base) free(buf->base);
+                return;
+            }
+            
+            if (nread > 0) {
+                // Create buffer and push to stream
+                auto chunk = std::make_shared<BufferValue>();
+                chunk->data.assign(buf->base, buf->base + nread);
+                
+                // Push data (handles flowing mode and backpressure)
+                push_data(entry, chunk);
+            } else if (nread < 0) {
+                if (nread == UV_EOF) {
+                    // End of stream
+                    push_data(entry, nullptr);
+                } else {
+                    // Error
+                    std::vector<FunctionPtr> listeners;
+                    {
+                        std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                        listeners = entry->error_listeners;
+                    }
+                    emit_event(entry, listeners, 
+                        {Value{std::string("Read error: ") + uv_strerror(nread)}});
+                }
+                
+                // Stop reading and clean up
+                uv_read_stop(stream);
+                entry->release_keepalive();
+            }
+            
+            if (buf->base) free(buf->base);
+        });
+    
+    return entry;
+}
+
+// NEW: Create a writable stream from a TCP socket (internal helper)
+static StreamEntryPtr create_writable_network_stream(uv_tcp_t* socket) {
+    auto entry = std::make_shared<StreamEntry>();
+    entry->id = g_next_stream_id.fetch_add(1);
+    entry->type = StreamType::WRITABLE;
+    entry->state = StreamState::OPEN;
+    entry->tcp_handle = socket;
+    entry->is_network_stream = true;
+    
+    // Register stream
+    {
+        std::lock_guard<std::mutex> lk(g_streams_mutex);
+        g_streams[entry->id] = entry;
+    }
+    
+    return entry;
+}
+
+ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket) {
+    auto entry = create_readable_network_stream(socket);
+    return create_stream_object(entry);
+}
+
+ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket) {
+    auto entry = create_writable_network_stream(socket);
+    return create_stream_object(entry);
 }

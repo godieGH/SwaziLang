@@ -16,6 +16,7 @@
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+#include "AsyncBridge.hpp"
 #include "uv.h"
 
 #ifdef __has_include
@@ -1283,10 +1284,7 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
 #endif
 
-    // --- excerpt/replace inside make_http_exports(...) where createServer is wired ---
-    // Remove the old placement (it was inside the libcurl branch in your original file).
-    // Replace with the following block (place after registering get/post):
-
+    
 #if defined(HAVE_LIBUV)
     // http.createServer(handler) -> server object (uses libuv)
     {
@@ -1307,32 +1305,99 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 #endif
 
     // http.fetch(url, options?) -> Promise
-    {
-        auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+{
+    auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         if (args.empty()) throw SwaziError("TypeError", "fetch requires url", token.loc);
         std::string url = value_to_string_simple(args[0]);
-
+    
         // Parse options object (second parameter)
         std::string method = "GET";
-        std::string body;
         std::vector<std::string> headers;
+        std::vector<uint8_t> body_data;
+        bool has_body = false;
+        FilePtr streaming_file = nullptr;
+        uint64_t streaming_file_size = 0;
         
+        // Streaming callback support
+        FunctionPtr onData_callback = nullptr;
+        FunctionPtr onProgress_callback = nullptr;
+        FunctionPtr onEnd_callback = nullptr;
+        bool enable_streaming = false;
+    
         if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
             ObjectPtr opts = std::get<ObjectPtr>(args[1]);
-            
+    
             // method
             auto it_method = opts->properties.find("method");
             if (it_method != opts->properties.end()) {
                 method = value_to_string_simple(it_method->second.value);
+                for (auto &c : method) c = static_cast<char>(::toupper((unsigned char)c));
             }
-            
-            // body
+    
+            // Parse body
             auto it_body = opts->properties.find("body");
             if (it_body != opts->properties.end()) {
-                body = value_to_string_simple(it_body->second.value);
+                const Value& body_val = it_body->second.value;
+    
+                if (std::holds_alternative<std::string>(body_val)) {
+                    std::string str = std::get<std::string>(body_val);
+                    body_data.assign(str.begin(), str.end());
+                    has_body = true;
+                }
+                else if (std::holds_alternative<BufferPtr>(body_val)) {
+                    BufferPtr buf = std::get<BufferPtr>(body_val);
+                    body_data = buf->data;
+                    has_body = true;
+                }
+                else if (std::holds_alternative<FilePtr>(body_val)) {
+                    streaming_file = std::get<FilePtr>(body_val);
+                    if (!streaming_file->is_open) {
+                        throw SwaziError("IOError", "File must be open for upload", token.loc);
+                    }
+                    has_body = true;
+                    
+                    #ifdef _WIN32
+                    LARGE_INTEGER filesize_li;
+                    if (GetFileSizeEx((HANDLE)streaming_file->handle, &filesize_li)) {
+                        streaming_file_size = static_cast<uint64_t>(filesize_li.QuadPart);
+                    }
+                    #else
+                    struct stat st;
+                    if (fstat(streaming_file->fd, &st) == 0) {
+                        streaming_file_size = static_cast<uint64_t>(st.st_size);
+                    }
+                    #endif
+                }
+                else if (std::holds_alternative<ObjectPtr>(body_val)) {
+                    // Check if it's a stream object
+                    ObjectPtr stream_obj = std::get<ObjectPtr>(body_val);
+                    auto stream_id_prop = stream_obj->properties.find("__stream_id__");
+                    
+                    if (stream_id_prop != stream_obj->properties.end()) {
+                        // It's a stream - read from it
+                        auto read_prop = stream_obj->properties.find("read");
+                        if (read_prop != stream_obj->properties.end() && 
+                            std::holds_alternative<FunctionPtr>(read_prop->second.value)) {
+                            
+                            FunctionPtr read_fn = std::get<FunctionPtr>(read_prop->second.value);
+                            
+                            // Read all chunks
+                            while (true) {
+                                Value chunk = read_fn->native_impl({}, nullptr, token);
+                                if (std::holds_alternative<std::monostate>(chunk)) break;
+                                
+                                if (std::holds_alternative<BufferPtr>(chunk)) {
+                                    BufferPtr buf = std::get<BufferPtr>(chunk);
+                                    body_data.insert(body_data.end(), buf->data.begin(), buf->data.end());
+                                }
+                            }
+                            has_body = true;
+                        }
+                    }
+                }
             }
-            
-            // headers (object or array)
+    
+            // headers
             auto it_headers = opts->properties.find("headers");
             if (it_headers != opts->properties.end()) {
                 if (std::holds_alternative<ObjectPtr>(it_headers->second.value)) {
@@ -1347,14 +1412,41 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
                     }
                 }
             }
+            
+            // Parse onData callback
+            auto it_onData = opts->properties.find("onData");
+            if (it_onData != opts->properties.end()) {
+                if (std::holds_alternative<FunctionPtr>(it_onData->second.value)) {
+                    onData_callback = std::get<FunctionPtr>(it_onData->second.value);
+                    enable_streaming = true;
+                }
+            }
+            
+            // Parse onProgress callback
+            auto it_onProgress = opts->properties.find("onProgress");
+            if (it_onProgress != opts->properties.end()) {
+                if (std::holds_alternative<FunctionPtr>(it_onProgress->second.value)) {
+                    onProgress_callback = std::get<FunctionPtr>(it_onProgress->second.value);
+                }
+            }
+            
+            // Parse onEnd callback
+            auto it_onEnd = opts->properties.find("onEnd");
+            if (it_onEnd != opts->properties.end()) {
+                if (std::holds_alternative<FunctionPtr>(it_onEnd->second.value)) {
+                    onEnd_callback = std::get<FunctionPtr>(it_onEnd->second.value);
+                }
+            }
         }
-
+    
         auto promise = std::make_shared<PromiseValue>();
         promise->state = PromiseValue::State::PENDING;
-
-#if defined(HAVE_LIBCURL)
+    
+    #if defined(HAVE_LIBCURL)
         // Schedule async fetch on loop thread
-        scheduler_run_on_loop([promise, url, method, body, headers]() {
+        scheduler_run_on_loop([promise, url, method, body_data, has_body, streaming_file, 
+                               streaming_file_size, headers, onData_callback, onProgress_callback, 
+                               onEnd_callback, enable_streaming]() {
             CURL* c = curl_easy_init();
             if (!c) {
                 promise->state = PromiseValue::State::REJECTED;
@@ -1364,139 +1456,346 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
                 }
                 return;
             }
-
-            CurlWriteCtx ctx;
+    
+            // Context for streaming
+            struct StreamingContext {
+                std::string accumulated_buf;
+                FunctionPtr onData_cb;
+                FunctionPtr onProgress_cb;
+                FunctionPtr onEnd_cb;
+                bool streaming_mode;
+                size_t total_received = 0;
+            };
+            
+            StreamingContext ctx;
+            ctx.onData_cb = onData_callback;
+            ctx.onProgress_cb = onProgress_callback;
+            ctx.onEnd_cb = onEnd_callback;
+            ctx.streaming_mode = enable_streaming;
+            
             curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, 
+                (+[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+                    size_t total = size * nmemb;
+                    StreamingContext* ctx = static_cast<StreamingContext*>(userdata);
+                    
+                    if (ctx->streaming_mode && ctx->onData_cb) {
+                        auto chunk = std::make_shared<BufferValue>();
+                        chunk->data.assign(ptr, ptr + total);
+                        chunk->encoding = "binary";
+                        
+                        FunctionPtr cb = ctx->onData_cb;
+                        CallbackPayload* payload = new CallbackPayload(cb, {Value{chunk}});
+                        enqueue_callback_global(static_cast<void*>(payload));
+                    } else {
+                        ctx->accumulated_buf.append(ptr, total);
+                    }
+                    
+                    ctx->total_received += total;
+                    
+                    if (ctx->onProgress_cb) {
+                        auto progress_obj = std::make_shared<ObjectValue>();
+                        progress_obj->properties["received"] = PropertyDescriptor{
+                            Value{static_cast<double>(ctx->total_received)}, 
+                            false, false, true, Token{}
+                        };
+                        
+                        FunctionPtr progress_cb = ctx->onProgress_cb;
+                        CallbackPayload* payload = new CallbackPayload(progress_cb, {Value{progress_obj}});
+                            enqueue_callback_global(static_cast<void*>(payload));
+                    }
+                    
+                    return total;
+                })); 
+            
             curl_easy_setopt(c, CURLOPT_WRITEDATA, &ctx);
-
-            // Capture headers (including status line) so we can extract reason/status text
+    
+            // Capture headers (including status line)
+            CurlWriteCtx header_ctx;
             curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, curl_header_cb);
-            curl_easy_setopt(c, CURLOPT_HEADERDATA, &ctx);
-            
-            // Set method
-            if (method == "POST") {
-                curl_easy_setopt(c, CURLOPT_POST, 1L);
-                if (!body.empty()) {
-                    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
-                    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-                }
-            } else if (method == "PUT") {
-                curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PUT");
-                if (!body.empty()) {
-                    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
-                    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-                }
-            } else if (method == "DELETE") {
-                curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "DELETE");
-            } else if (method == "PATCH") {
-                curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PATCH");
-                if (!body.empty()) {
-                    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
-                    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-                }
-            }
-            // GET is default, no special setup needed
-            
-            // Set headers
+            curl_easy_setopt(c, CURLOPT_HEADERDATA, &header_ctx);
+    
+            // Prepare headers list
             struct curl_slist* curl_headers = nullptr;
             for (const auto& h : headers) {
                 curl_headers = curl_slist_append(curl_headers, h.c_str());
             }
-            if (curl_headers) curl_easy_setopt(c, CURLOPT_HTTPHEADER, curl_headers);
-
-            CURLcode res = curl_easy_perform(c);
-
-            if (curl_headers) curl_slist_free_all(curl_headers);
-
-            long status_code = 0;
-            curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status_code);
-
-            // Parse status text from the collected headers (first status line)
-            std::string status_text;
-            if (!ctx.headers.empty()) {
-                // headers may contain multiple header blocks if redirects are followed.
-                // Find last occurrence of "HTTP/" group for the final response or the first line present.
-                // Simpler: find the first line up to CRLF
-                size_t pos_end = ctx.headers.find("\r\n");
-                if (pos_end != std::string::npos) {
-                    std::string status_line = ctx.headers.substr(0, pos_end); // e.g., "HTTP/1.1 404 File not found"
-                    // extract text after the status code:
-                    // find first space
-                    size_t sp1 = status_line.find(' ');
-                    if (sp1 != std::string::npos) {
-                        size_t sp2 = status_line.find(' ', sp1 + 1);
-                        if (sp2 != std::string::npos && sp2 + 1 < status_line.size()) {
-                            status_text = status_line.substr(sp2 + 1);
-                            // trim trailing CR/LF if any (shouldn't be)
-                            while (!status_text.empty() && (status_text.back() == '\r' || status_text.back() == '\n')) status_text.pop_back();
+    
+            // Handle request body
+            bool used_read_callback = false;
+            if (has_body) {
+                if (streaming_file) {
+                    // File streaming upload
+                    struct ReadContext {
+                        FilePtr file;
+                        uint64_t total_read = 0;
+                    };
+    
+                    auto* read_ctx = new ReadContext{streaming_file};
+    
+                    if (method == "PUT") {
+                        curl_easy_setopt(c, CURLOPT_UPLOAD, 1L);
+                        if (streaming_file_size > 0) {
+                            curl_off_t s = static_cast<curl_off_t>(streaming_file_size);
+                            curl_easy_setopt(c, CURLOPT_INFILESIZE_LARGE, s);
                         }
+                    } else if (method == "POST") {
+                        curl_easy_setopt(c, CURLOPT_POST, 1L);
+                        if (streaming_file_size > 0) {
+                            curl_off_t s = static_cast<curl_off_t>(streaming_file_size);
+                            curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, s);
+                        }
+                    } else {
+                        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method.c_str());
+                        if (streaming_file_size > 0) {
+                            curl_off_t s = static_cast<curl_off_t>(streaming_file_size);
+                            curl_easy_setopt(c, CURLOPT_INFILESIZE_LARGE, s);
+                        }
+                    }
+    
+                    curl_easy_setopt(c, CURLOPT_READDATA, read_ctx);
+                    curl_easy_setopt(c, CURLOPT_READFUNCTION,
+                        +[](char* buffer, size_t size, size_t nitems, void* userdata) -> size_t {
+                            ReadContext* ctx = static_cast<ReadContext*>(userdata);
+                            size_t to_read = size * nitems;
+                            if (to_read == 0) return 0;
+    
+                            #ifdef _WIN32
+                            DWORD bytes_read = 0;
+                            if (!ReadFile((HANDLE)ctx->file->handle, buffer,
+                                          static_cast<DWORD>(to_read), &bytes_read, nullptr)) {
+                                return CURL_READFUNC_ABORT;
+                            }
+                            ctx->total_read += bytes_read;
+                            return static_cast<size_t>(bytes_read);
+                            #else
+                            ssize_t bytes_read = ::read(ctx->file->fd, buffer, to_read);
+                            if (bytes_read < 0) return CURL_READFUNC_ABORT;
+                            ctx->total_read += static_cast<uint64_t>(bytes_read);
+                            return static_cast<size_t>(bytes_read);
+                            #endif
+                        });
+    
+                    used_read_callback = true;
+    
+                    if (curl_headers) curl_easy_setopt(c, CURLOPT_HTTPHEADER, curl_headers);
+    
+                    CURLcode res = curl_easy_perform(c);
+    
+                    delete read_ctx;
+    
+                    if (curl_headers) curl_slist_free_all(curl_headers);
+    
+                    // Fire onEnd callback AFTER request completes
+                    if (ctx.onEnd_cb) {
+                        auto end_info = std::make_shared<ObjectValue>();
+                        end_info->properties["bytesReceived"] = PropertyDescriptor{
+                            Value{static_cast<double>(ctx.total_received)},
+                            false, false, true, Token{}
+                        };
+                        end_info->properties["success"] = PropertyDescriptor{
+                            Value{res == CURLE_OK},
+                            false, false, true, Token{}
+                        };
+                        
+                        FunctionPtr end_cb = ctx.onEnd_cb;
+                        CallbackPayload* payload = new CallbackPayload(end_cb, {Value{end_info}});
+                        enqueue_callback_global(static_cast<void*>(payload));
+                    }
+    
+                    long status_code = 0;
+                    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status_code);
+    
+                    std::string status_text;
+                    if (!header_ctx.headers.empty()) {
+                        size_t pos_end = header_ctx.headers.find("\r\n");
+                        if (pos_end != std::string::npos) {
+                            std::string status_line = header_ctx.headers.substr(0, pos_end);
+                            size_t sp1 = status_line.find(' ');
+                            if (sp1 != std::string::npos) {
+                                size_t sp2 = status_line.find(' ', sp1 + 1);
+                                if (sp2 != std::string::npos && sp2 + 1 < status_line.size()) {
+                                    status_text = status_line.substr(sp2 + 1);
+                                    while (!status_text.empty() && (status_text.back() == '\r' || status_text.back() == '\n')) status_text.pop_back();
+                                }
+                            }
+                        }
+                    }
+    
+                    curl_easy_cleanup(c);
+    
+                    if (res != CURLE_OK) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("fetch failed: ") + curl_easy_strerror(res)};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                        return;
+                    }
+    
+                    auto response = std::make_shared<ObjectValue>();
+                    response->properties["status"] = PropertyDescriptor{Value{static_cast<double>(status_code)}, false, false, true, Token()};
+                    response->properties["ok"] = PropertyDescriptor{Value{status_code >= 200 && status_code < 300}, false, false, true, Token()};
+                    
+                    if (ctx.streaming_mode) {
+                        response->properties["body"] = PropertyDescriptor{Value{std::string("")}, false, false, true, Token()};
+                    } else {
+                        response->properties["body"] = PropertyDescriptor{Value{ctx.accumulated_buf}, false, false, true, Token()};
+                    }
+                    
+                    if (!status_text.empty()) {
+                        response->properties["statusText"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+                    } else {
+                        response->properties["statusText"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+                    }
+                    
+                    if (status_code >= 400 && status_code < 600) {
+                        if (!ctx.accumulated_buf.empty()) {
+                            response->properties["errorMessage"] = PropertyDescriptor{Value{ctx.accumulated_buf}, false, false, true, Token()};
+                        } else if (!status_text.empty()) {
+                            response->properties["errorMessage"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+                        } else {
+                            response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+                        }
+                    } else {
+                        response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+                    }
+    
+                    promise->state = PromiseValue::State::FULFILLED;
+                    promise->result = Value{response};
+                    for (auto& cb : promise->then_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+    
+                    return;
+                } else {
+                    // Memory body upload
+                    if (method == "POST") {
+                        curl_easy_setopt(c, CURLOPT_POST, 1L);
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body_data.empty() ? nullptr : reinterpret_cast<const char*>(body_data.data()));
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_data.size()));
+                    } else if (method == "PUT") {
+                        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PUT");
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body_data.empty() ? nullptr : reinterpret_cast<const char*>(body_data.data()));
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_data.size()));
+                    } else if (method == "PATCH") {
+                        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PATCH");
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body_data.empty() ? nullptr : reinterpret_cast<const char*>(body_data.data()));
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_data.size()));
+                    } else {
+                        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method.c_str());
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body_data.empty() ? nullptr : reinterpret_cast<const char*>(body_data.data()));
+                        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_data.size()));
                     }
                 }
             }
-
-            curl_easy_cleanup(c);
-            
-              if (res != CURLE_OK) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = Value{std::string("fetch failed: ") + curl_easy_strerror(res)};
-                for (auto& cb : promise->catch_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
+    
+            // Non-file-upload path
+            if (!used_read_callback) {
+                if (curl_headers) curl_easy_setopt(c, CURLOPT_HTTPHEADER, curl_headers);
+    
+                CURLcode res = curl_easy_perform(c);
+    
+                if (curl_headers) curl_slist_free_all(curl_headers);
+    
+                // Fire onEnd callback AFTER request completes
+                if (ctx.onEnd_cb) {
+                    auto end_info = std::make_shared<ObjectValue>();
+                    end_info->properties["bytesReceived"] = PropertyDescriptor{
+                        Value{static_cast<double>(ctx.total_received)},
+                        false, false, true, Token{}
+                    };
+                    end_info->properties["success"] = PropertyDescriptor{
+                        Value{res == CURLE_OK},
+                        false, false, true, Token{}
+                    };
+                    
+                    FunctionPtr end_cb = ctx.onEnd_cb;
+                    CallbackPayload* payload = new CallbackPayload(end_cb, {Value{end_info}});
+                    enqueue_callback_global(static_cast<void*>(payload));
                 }
-                return;
-            }
-
-
-            // Create response object
-            auto response = std::make_shared<ObjectValue>();
-            response->properties["status"] = PropertyDescriptor{Value{static_cast<double>(status_code)}, false, false, true, Token()};
-            response->properties["ok"] = PropertyDescriptor{Value{status_code >= 200 && status_code < 300}, false, false, true, Token()};
-
-            // Store body directly as a property
-            response->properties["body"] = PropertyDescriptor{Value{ctx.buf}, false, false, true, Token()};
-
-            // Expose the parsed status text (reason phrase) to the script
-            if (!status_text.empty()) {
-                response->properties["statusText"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
-            } else {
-                response->properties["statusText"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
-            }
-
-            // Add an errorMessage property for 4xx/5xx responses:
-            // prefer the body if present, otherwise fall back to the statusText (reason phrase)
-            if (status_code >= 400 && status_code < 600) {
-                if (!ctx.buf.empty()) {
-                    response->properties["errorMessage"] = PropertyDescriptor{Value{ctx.buf}, false, false, true, Token()};
-                } else if (!status_text.empty()) {
-                    response->properties["errorMessage"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+    
+                long status_code = 0;
+                curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status_code);
+    
+                std::string status_text;
+                if (!header_ctx.headers.empty()) {
+                    size_t pos_end = header_ctx.headers.find("\r\n");
+                    if (pos_end != std::string::npos) {
+                        std::string status_line = header_ctx.headers.substr(0, pos_end);
+                        size_t sp1 = status_line.find(' ');
+                        if (sp1 != std::string::npos) {
+                            size_t sp2 = status_line.find(' ', sp1 + 1);
+                            if (sp2 != std::string::npos && sp2 + 1 < status_line.size()) {
+                                status_text = status_line.substr(sp2 + 1);
+                                while (!status_text.empty() && (status_text.back() == '\r' || status_text.back() == '\n')) status_text.pop_back();
+                            }
+                        }
+                    }
+                }
+    
+                curl_easy_cleanup(c);
+    
+                if (res != CURLE_OK) {
+                    promise->state = PromiseValue::State::REJECTED;
+                    promise->result = Value{std::string("fetch failed: ") + curl_easy_strerror(res)};
+                    for (auto& cb : promise->catch_callbacks) {
+                        try { cb(promise->result); } catch(...) {}
+                    }
+                    return;
+                }
+    
+                auto response = std::make_shared<ObjectValue>();
+                response->properties["status"] = PropertyDescriptor{Value{static_cast<double>(status_code)}, false, false, true, Token()};
+                response->properties["ok"] = PropertyDescriptor{Value{status_code >= 200 && status_code < 300}, false, false, true, Token()};
+                
+                if (ctx.streaming_mode) {
+                    response->properties["body"] = PropertyDescriptor{Value{std::string("")}, false, false, true, Token()};
+                } else {
+                    response->properties["body"] = PropertyDescriptor{Value{ctx.accumulated_buf}, false, false, true, Token()};
+                }
+    
+                if (!status_text.empty()) {
+                    response->properties["statusText"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+                } else {
+                    response->properties["statusText"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+                }
+    
+                if (status_code >= 400 && status_code < 600) {
+                    if (!ctx.accumulated_buf.empty()) {
+                        response->properties["errorMessage"] = PropertyDescriptor{Value{ctx.accumulated_buf}, false, false, true, Token()};
+                    } else if (!status_text.empty()) {
+                        response->properties["errorMessage"] = PropertyDescriptor{Value{status_text}, false, false, true, Token()};
+                    } else {
+                        response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+                    }
                 } else {
                     response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
                 }
-            } else {
-                response->properties["errorMessage"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, Token()};
+    
+                promise->state = PromiseValue::State::FULFILLED;
+                promise->result = Value{response};
+                for (auto& cb : promise->then_callbacks) {
+                    try { cb(promise->result); } catch(...) {}
+                }
             }
-
-            // Fulfill promise
-            promise->state = PromiseValue::State::FULFILLED;
-            promise->result = Value{response};
-            for (auto& cb : promise->then_callbacks) {
-                try { cb(promise->result); } catch(...) {}
-            }
+    
         });
-#else
+    #else
         // No libcurl - reject immediately
         promise->state = PromiseValue::State::REJECTED;
         promise->result = Value{std::string("fetch requires libcurl support")};
         for (auto& cb : promise->catch_callbacks) {
             try { cb(promise->result); } catch(...) {}
         }
-#endif
-
-        return Value{promise}; }, env);
-        obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    return obj;
+    #endif
+    
+        return Value{promise};
+    }, env);
+    obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
+}
+return obj;
 }
 
 // ----------------- JSON module (parse & stringify) -----------------

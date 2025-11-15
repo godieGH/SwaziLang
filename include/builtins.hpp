@@ -1,4 +1,5 @@
 #pragma once
+#include "uv.h"
 
 #include "evaluator.hpp"
 
@@ -22,3 +23,9 @@ std::shared_ptr<ObjectValue> make_streams_exports(EnvPtr env);
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);
+
+
+
+// NEW: Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)
+ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket);
+ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket);
