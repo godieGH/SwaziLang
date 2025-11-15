@@ -22,12 +22,44 @@ class Scheduler;
 struct BufferValue;
 using BufferPtr = std::shared_ptr<BufferValue>;
 
+struct FileValue;
+using FilePtr = std::shared_ptr<FileValue>;
+
 struct BufferValue {
     std::vector<uint8_t> data;  // Raw bytes
 
     // Optionally adding encoding info if we want to support
     // conversions to/from strings with specific encodings
     std::string encoding;  // "utf8", "latin1", "binary", etc.
+};
+struct FileValue {
+    std::string path;
+    std::string mode;  // "r", "w", "a", "r+", "w+", "a+"
+    bool is_open = false;
+    bool is_binary = false;  // track if opened in binary mode
+    
+    // Platform-specific file handle
+    #ifdef _WIN32
+        void* handle = nullptr;  // HANDLE on Windows
+    #else
+        int fd = -1;  // file descriptor on Unix
+    #endif
+    
+    // Buffered I/O state
+    std::vector<uint8_t> buffer;
+    size_t buffer_pos = 0;
+    size_t file_pos = 0;  // logical position in file
+    
+    // Error tracking
+    std::string last_error;
+    
+    ~FileValue() {
+        // RAII: close on destruction if still open
+        if (is_open) {
+            close_internal();
+        }
+    }
+  void close_internal();  // defined in file.cpp
 };
 
 // Forward-declare GeneratorValue used for generator objects at runtime.
@@ -74,7 +106,8 @@ using Value = std::variant<
     ClassPtr,
     PromisePtr,
     GeneratorPtr,
-    BufferPtr>;
+    BufferPtr,
+    FilePtr>;
 
 struct PropertyDescriptor {
     Value value;
@@ -207,6 +240,7 @@ struct FunctionValue {
                             native_impl(std::move(impl)) {
     }
 };
+
 
 // Environment with lexical parent pointer
 class Environment : public std::enable_shared_from_this<Environment> {
