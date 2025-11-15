@@ -388,3 +388,4 @@ class Evaluator {
 };
 
 TokenLocation build_location_from_value(const Value& v, const TokenLocation& defaultLoc);
+std::string _type_name(const Value&);

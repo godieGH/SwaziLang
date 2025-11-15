@@ -105,17 +105,7 @@ static Value builtin_ainaya(const std::vector<Value>& args, EnvPtr env, const To
 
     const Value& v = args[0];
 
-    if (std::holds_alternative<double>(v)) return std::string("namba");
-    if (std::holds_alternative<std::monostate>(v)) return std::string("null");
-    if (std::holds_alternative<HoleValue>(v)) return std::string("<empty>");
-    if (std::holds_alternative<bool>(v)) return std::string("bool");
-    if (std::holds_alternative<std::string>(v)) return std::string("neno");
-    if (std::holds_alternative<ObjectPtr>(v)) return std::string("object");
-    if (std::holds_alternative<ClassPtr>(v)) return std::string("muundo");
-    if (std::holds_alternative<ArrayPtr>(v)) return std::string("orodha");
-    if (std::holds_alternative<FunctionPtr>(v)) return std::string("kazi");
-
-    return std::string("unknown");
+    return _type_name(v);
 }
 static Value builtin_orodha(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     auto arr = std::make_shared<ArrayValue>();

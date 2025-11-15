@@ -56,11 +56,14 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<ClassPtr>(v)) return "muundo";
     if (std::holds_alternative<HoleValue>(v)) return "emptyhole";
     if (std::holds_alternative<PromisePtr>(v)) return "promise";
-    if (std::holds_alternative<BufferPtr>(v)) return "promise";
+    if (std::holds_alternative<BufferPtr>(v)) return "buffer";
     return "unknown";
 }
 
 std::string Evaluator::type_name(const Value& v) {
+    return value_type_name(v);
+}
+std::string _type_name(const Value& v) {
     return value_type_name(v);
 }
 

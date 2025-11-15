@@ -1192,26 +1192,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
          */
         // aina -> type name
         if (prop == "aina") {
-            std::string t = "unknown";  // default
-            if (std::holds_alternative<std::monostate>(objVal)) t = "null";
-            if (std::holds_alternative<double>(objVal))
-                t = "namba";
-            else if (std::holds_alternative<std::string>(objVal))
-                t = "neno";
-            else if (std::holds_alternative<bool>(objVal))
-                t = "bool";
-            else if (std::holds_alternative<ArrayPtr>(objVal))
-                t = "orodha";
-            else if (std::holds_alternative<FunctionPtr>(objVal))
-                t = "kazi";
-            else if (std::holds_alternative<ObjectPtr>(objVal))
-                t = "object";
-            else if (std::holds_alternative<ClassPtr>(objVal))
-                t = "muundo";
-            else if (std::holds_alternative<HoleValue>(objVal))
-                t = "<empty>";
-            return Value{
-                t};
+            return type_name(objVal);
         }
 
         {
@@ -2373,24 +2354,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
         if (u->op == "aina") {
-            std::string t = "unknown";
-            if (std::holds_alternative<std::monostate>(operand))
-                t = "null";
-            else if (std::holds_alternative<double>(operand))
-                t = "namba";
-            else if (std::holds_alternative<std::string>(operand))
-                t = "neno";
-            else if (std::holds_alternative<bool>(operand))
-                t = "bool";
-            else if (std::holds_alternative<ArrayPtr>(operand))
-                t = "orodha";
-            else if (std::holds_alternative<FunctionPtr>(operand))
-                t = "kazi";
-            else if (std::holds_alternative<ObjectPtr>(operand))
-                t = "object";
-            else if (std::holds_alternative<ClassPtr>(operand))
-                t = "muundo";
-            return Value{t};
+            return type_name(operand);
         }
 
         throw std::runtime_error(

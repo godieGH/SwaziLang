@@ -424,36 +424,118 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
 std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
-    // readFile(path) -> string | null
+    // fs.readFile(path, options?) -> string | Buffer
+    // options can be: { encoding: "utf8" | "binary" | null, flag: "r" }
+    // If encoding is null or "binary", returns Buffer. Otherwise returns string.
     {
         auto fn = make_native_fn("fs.readFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.empty()) {
-              throw SwaziError("RuntimeError", "fs.readFile requires a path as an argument. Usage: readFile(path) -> string | null", token.loc);
+                throw SwaziError("RuntimeError", "fs.readFile requires a path as an argument. Usage: readFile(path, options?) -> string | Buffer", token.loc);
             }
             std::string path = value_to_string_simple(args[0]);
+            
+            // Parse options
+            std::string encoding = "utf8";  // default
+            if (args.size() >= 2) {
+                if (std::holds_alternative<std::string>(args[1])) {
+                    // Simple string encoding
+                    encoding = std::get<std::string>(args[1]);
+                } else if (std::holds_alternative<ObjectPtr>(args[1])) {
+                    // Options object
+                    ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+                    auto enc_it = opts->properties.find("encoding");
+                    if (enc_it != opts->properties.end()) {
+                        if (std::holds_alternative<std::monostate>(enc_it->second.value)) {
+                            encoding = "binary";  // null means binary
+                        } else if (std::holds_alternative<std::string>(enc_it->second.value)) {
+                            encoding = std::get<std::string>(enc_it->second.value);
+                        }
+                    }
+                }
+            }
+            
+            // Read file in binary mode always
             std::ifstream in(path, std::ios::binary);
-            if (!in.is_open()) return Value{ std::monostate{} };
-            std::ostringstream ss; ss << in.rdbuf();
-            return Value{ ss.str() }; }, env);
+            if (!in.is_open()) {
+                throw SwaziError("IOError", "Failed to open file: " + path, token.loc);
+            }
+            
+            // Read all bytes
+            std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
+                                     std::istreambuf_iterator<char>());
+            
+            // Return based on encoding
+            if (encoding == "binary" || encoding == "null") {
+                auto buf = std::make_shared<BufferValue>();
+                buf->data = std::move(data);
+                buf->encoding = "binary";
+                return Value{buf};
+            } else {
+                // Convert to string (utf8 or other encoding)
+                return Value{std::string(data.begin(), data.end())};
+            } }, env);
         obj->properties["readFile"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // writeFile(path, content, [binary=false]) -> bool
+    // fs.writeFile(path, content, options?) -> bool
+    // content can be string or Buffer
+    // options can be: { encoding: "utf8", flag: "w", mode: 0o666 }
+    // If content is Buffer, writes in binary mode automatically
     {
         auto fn = make_native_fn("fs.writeFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.size() < 2) {
-              throw SwaziError("RuntimeError", "fs.writeFile requires two arguments: path and content, and an optional bool [binary=false]. Usage: fs.writeFile(path, content, [binary=false]) -> bool", token.loc);
+                throw SwaziError("RuntimeError", "fs.writeFile requires two arguments: path and content, and an optional options object. Usage: fs.writeFile(path, content, options?) -> bool", token.loc);
             }
             std::string path = value_to_string_simple(args[0]);
-            std::string content = value_to_string_simple(args[1]);
-            bool binary = false;
-            if (args.size() >= 3) binary = std::holds_alternative<bool>(args[2]) ? std::get<bool>(args[2]) : false;
-            std::ofstream out;
-            if (binary) out.open(path, std::ios::binary);
-            else out.open(path);
-            if (!out.is_open()) return Value{ false };
-            out << content;
-            return Value{ true }; }, env);
+            
+            // Determine if we're writing buffer or string
+            bool is_buffer = std::holds_alternative<BufferPtr>(args[1]);
+            std::string encoding = "utf8";
+            std::string flag = "w";
+            
+            // Parse options
+            if (args.size() >= 3) {
+                if (std::holds_alternative<std::string>(args[2])) {
+                    // Simple string encoding (legacy support)
+                    encoding = std::get<std::string>(args[2]);
+                } else if (std::holds_alternative<ObjectPtr>(args[2])) {
+                    ObjectPtr opts = std::get<ObjectPtr>(args[2]);
+                    auto enc_it = opts->properties.find("encoding");
+                    if (enc_it != opts->properties.end() && std::holds_alternative<std::string>(enc_it->second.value)) {
+                        encoding = std::get<std::string>(enc_it->second.value);
+                    }
+                    auto flag_it = opts->properties.find("flag");
+                    if (flag_it != opts->properties.end() && std::holds_alternative<std::string>(flag_it->second.value)) {
+                        flag = std::get<std::string>(flag_it->second.value);
+                    }
+                }
+            }
+            
+            // Determine open mode
+            std::ios_base::openmode mode = std::ios::binary;
+            if (flag == "a" || flag == "a+") {
+                mode |= std::ios::app;
+            } else if (flag == "r+") {
+                mode |= std::ios::in | std::ios::out;
+            }
+            // "w" is default (truncate)
+            
+            std::ofstream out(path, mode);
+            if (!out.is_open()) {
+                throw SwaziError("IOError", "Failed to open file for writing: " + path, token.loc);
+            }
+            
+            if (is_buffer) {
+                // Write buffer directly as binary
+                BufferPtr buf = std::get<BufferPtr>(args[1]);
+                out.write(reinterpret_cast<const char*>(buf->data.data()), buf->data.size());
+            } else {
+                // Write string (respect encoding if needed)
+                std::string content = value_to_string_simple(args[1]);
+                out.write(content.data(), content.size());
+            }
+            
+            return Value{true}; }, env);
         obj->properties["writeFile"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
@@ -634,97 +716,159 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         // Create promises sub-object for async versions
         auto promises_obj = std::make_shared<ObjectValue>();
 
-        // promises.readFile(path) -> Promise<string | null>
+        // promises.readFile(path, options?) -> Promise<string | Buffer>
         {
             auto fn = make_native_fn("fs.promises.readFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.empty()) {
-                throw SwaziError("RuntimeError", "fs.promises.readFile requires a path argument", token.loc);
-            }
-            std::string path = value_to_string_simple(args[0]);
+                if (args.empty()) {
+                    throw SwaziError("RuntimeError", "fs.promises.readFile requires a path argument", token.loc);
+                }
+                std::string path = value_to_string_simple(args[0]);
+                
+                // Parse options
+                std::string encoding = "utf8";
+                if (args.size() >= 2) {
+                    if (std::holds_alternative<std::string>(args[1])) {
+                        encoding = std::get<std::string>(args[1]);
+                    } else if (std::holds_alternative<ObjectPtr>(args[1])) {
+                        ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+                        auto enc_it = opts->properties.find("encoding");
+                        if (enc_it != opts->properties.end()) {
+                            if (std::holds_alternative<std::monostate>(enc_it->second.value)) {
+                                encoding = "binary";
+                            } else if (std::holds_alternative<std::string>(enc_it->second.value)) {
+                                encoding = std::get<std::string>(enc_it->second.value);
+                            }
+                        }
+                    }
+                }
 
-            auto promise = std::make_shared<PromiseValue>();
-            promise->state = PromiseValue::State::PENDING;
+                auto promise = std::make_shared<PromiseValue>();
+                promise->state = PromiseValue::State::PENDING;
 
-            // Schedule async read on loop thread
-            scheduler_run_on_loop([promise, path]() {
-                try {
-                    std::ifstream in(path, std::ios::binary);
-                    if (!in.is_open()) {
-                        // Reject with error
+                // Schedule async read on loop thread
+                scheduler_run_on_loop([promise, path, encoding]() {
+                    try {
+                        std::ifstream in(path, std::ios::binary);
+                        if (!in.is_open()) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("Failed to open file: ") + path};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        // Read all bytes
+                        std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
+                                                 std::istreambuf_iterator<char>());
+                        
+                        // Return based on encoding
+                        Value result;
+                        if (encoding == "binary" || encoding == "null") {
+                            auto buf = std::make_shared<BufferValue>();
+                            buf->data = std::move(data);
+                            buf->encoding = "binary";
+                            result = Value{buf};
+                        } else {
+                            result = Value{std::string(data.begin(), data.end())};
+                        }
+                        
+                        // Fulfill promise
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = result;
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
                         promise->state = PromiseValue::State::REJECTED;
-                        promise->result = Value{std::string("Failed to open file: ") + path};
+                        promise->result = Value{std::string("Read error: ") + e.what()};
                         for (auto& cb : promise->catch_callbacks) {
                             try { cb(promise->result); } catch(...) {}
                         }
-                        return;
                     }
-                    
-                    std::ostringstream ss;
-                    ss << in.rdbuf();
-                    
-                    // Fulfill promise
-                    promise->state = PromiseValue::State::FULFILLED;
-                    promise->result = Value{ss.str()};
-                    for (auto& cb : promise->then_callbacks) {
-                        try { cb(promise->result); } catch(...) {}
-                    }
-                } catch (const std::exception& e) {
-                    promise->state = PromiseValue::State::REJECTED;
-                    promise->result = Value{std::string("Read error: ") + e.what()};
-                    for (auto& cb : promise->catch_callbacks) {
-                        try { cb(promise->result); } catch(...) {}
-                    }
-                }
-            });
+                });
 
-            return Value{promise}; }, env);
+                return Value{promise}; }, env);
             promises_obj->properties["readFile"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
 
-        // promises.writeFile(path, content, [binary=false]) -> Promise<bool>
+        // promises.writeFile(path, content, options?) -> Promise<bool>
         {
             auto fn = make_native_fn("fs.promises.writeFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("RuntimeError", "fs.promises.writeFile requires path and content arguments", token.loc);
-            }
-            std::string path = value_to_string_simple(args[0]);
-            std::string content = value_to_string_simple(args[1]);
-            bool binary = args.size() >= 3 && std::holds_alternative<bool>(args[2]) ? std::get<bool>(args[2]) : false;
+                if (args.size() < 2) {
+                    throw SwaziError("RuntimeError", "fs.promises.writeFile requires path and content arguments", token.loc);
+                }
+                std::string path = value_to_string_simple(args[0]);
+                
+                // Capture content (could be string or buffer)
+                Value content = args[1];
+                bool is_buffer = std::holds_alternative<BufferPtr>(content);
+                
+                std::string encoding = "utf8";
+                std::string flag = "w";
+                
+                // Parse options
+                if (args.size() >= 3) {
+                    if (std::holds_alternative<std::string>(args[2])) {
+                        encoding = std::get<std::string>(args[2]);
+                    } else if (std::holds_alternative<ObjectPtr>(args[2])) {
+                        ObjectPtr opts = std::get<ObjectPtr>(args[2]);
+                        auto enc_it = opts->properties.find("encoding");
+                        if (enc_it != opts->properties.end() && std::holds_alternative<std::string>(enc_it->second.value)) {
+                            encoding = std::get<std::string>(enc_it->second.value);
+                        }
+                        auto flag_it = opts->properties.find("flag");
+                        if (flag_it != opts->properties.end() && std::holds_alternative<std::string>(flag_it->second.value)) {
+                            flag = std::get<std::string>(flag_it->second.value);
+                        }
+                    }
+                }
 
-            auto promise = std::make_shared<PromiseValue>();
-            promise->state = PromiseValue::State::PENDING;
+                auto promise = std::make_shared<PromiseValue>();
+                promise->state = PromiseValue::State::PENDING;
 
-            scheduler_run_on_loop([promise, path, content, binary]() {
-                try {
-                    std::ofstream out;
-                    if (binary) out.open(path, std::ios::binary);
-                    else out.open(path);
-                    
-                    if (!out.is_open()) {
+                scheduler_run_on_loop([promise, path, content, is_buffer, flag]() {
+                    try {
+                        std::ios_base::openmode mode = std::ios::binary;
+                        if (flag == "a" || flag == "a+") {
+                            mode |= std::ios::app;
+                        } else if (flag == "r+") {
+                            mode |= std::ios::in | std::ios::out;
+                        }
+                        
+                        std::ofstream out(path, mode);
+                        if (!out.is_open()) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("Failed to open file for writing: ") + path};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        if (is_buffer) {
+                            BufferPtr buf = std::get<BufferPtr>(content);
+                            out.write(reinterpret_cast<const char*>(buf->data.data()), buf->data.size());
+                        } else {
+                            std::string str = value_to_string_simple(content);
+                            out.write(str.data(), str.size());
+                        }
+                        
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{true};
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
                         promise->state = PromiseValue::State::REJECTED;
-                        promise->result = Value{std::string("Failed to open file for writing: ") + path};
+                        promise->result = Value{std::string("Write error: ") + e.what()};
                         for (auto& cb : promise->catch_callbacks) {
                             try { cb(promise->result); } catch(...) {}
                         }
-                        return;
                     }
-                    
-                    out << content;
-                    promise->state = PromiseValue::State::FULFILLED;
-                    promise->result = Value{true};
-                    for (auto& cb : promise->then_callbacks) {
-                        try { cb(promise->result); } catch(...) {}
-                    }
-                } catch (const std::exception& e) {
-                    promise->state = PromiseValue::State::REJECTED;
-                    promise->result = Value{std::string("Write error: ") + e.what()};
-                    for (auto& cb : promise->catch_callbacks) {
-                        try { cb(promise->result); } catch(...) {}
-                    }
-                }
-            });
+                });
 
-            return Value{promise}; }, env);
+                return Value{promise}; }, env);
             promises_obj->properties["writeFile"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
 
