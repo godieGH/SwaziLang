@@ -13,10 +13,10 @@
 #include <sstream>
 #include <thread>
 
+#include "AsyncBridge.hpp"
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
-#include "AsyncBridge.hpp"
 #include "uv.h"
 
 #ifdef __has_include
@@ -1284,7 +1284,6 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     obj->properties["post"] = PropertyDescriptor{fn_post, false, false, false, Token()};
 #endif
 
-    
 #if defined(HAVE_LIBUV)
     // http.createServer(handler) -> server object (uses libuv)
     {
@@ -1305,8 +1304,8 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 #endif
 
     // http.fetch(url, options?) -> Promise
-{
-    auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+    {
+        auto fn = make_native_fn("http.fetch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         if (args.empty()) throw SwaziError("TypeError", "fetch requires url", token.loc);
         std::string url = value_to_string_simple(args[0]);
     
@@ -1355,18 +1354,18 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
                         throw SwaziError("IOError", "File must be open for upload", token.loc);
                     }
                     has_body = true;
-                    
-                    #ifdef _WIN32
+
+#ifdef _WIN32
                     LARGE_INTEGER filesize_li;
                     if (GetFileSizeEx((HANDLE)streaming_file->handle, &filesize_li)) {
                         streaming_file_size = static_cast<uint64_t>(filesize_li.QuadPart);
                     }
-                    #else
+#else
                     struct stat st;
                     if (fstat(streaming_file->fd, &st) == 0) {
                         streaming_file_size = static_cast<uint64_t>(st.st_size);
                     }
-                    #endif
+#endif
                 }
                 else if (std::holds_alternative<ObjectPtr>(body_val)) {
                     // Check if it's a stream object
@@ -1441,8 +1440,8 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     
         auto promise = std::make_shared<PromiseValue>();
         promise->state = PromiseValue::State::PENDING;
-    
-    #if defined(HAVE_LIBCURL)
+
+#if defined(HAVE_LIBCURL)
         // Schedule async fetch on loop thread
         scheduler_run_on_loop([promise, url, method, body_data, has_body, streaming_file, 
                                streaming_file_size, headers, onData_callback, onProgress_callback, 
@@ -1560,8 +1559,8 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
                             ReadContext* ctx = static_cast<ReadContext*>(userdata);
                             size_t to_read = size * nitems;
                             if (to_read == 0) return 0;
-    
-                            #ifdef _WIN32
+
+#ifdef _WIN32
                             DWORD bytes_read = 0;
                             if (!ReadFile((HANDLE)ctx->file->handle, buffer,
                                           static_cast<DWORD>(to_read), &bytes_read, nullptr)) {
@@ -1569,12 +1568,12 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
                             }
                             ctx->total_read += bytes_read;
                             return static_cast<size_t>(bytes_read);
-                            #else
+#else
                             ssize_t bytes_read = ::read(ctx->file->fd, buffer, to_read);
                             if (bytes_read < 0) return CURL_READFUNC_ABORT;
                             ctx->total_read += static_cast<uint64_t>(bytes_read);
                             return static_cast<size_t>(bytes_read);
-                            #endif
+#endif
                         });
     
                     used_read_callback = true;
@@ -1782,20 +1781,19 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
             }
     
         });
-    #else
+#else
         // No libcurl - reject immediately
         promise->state = PromiseValue::State::REJECTED;
         promise->result = Value{std::string("fetch requires libcurl support")};
         for (auto& cb : promise->catch_callbacks) {
             try { cb(promise->result); } catch(...) {}
         }
-    #endif
+#endif
     
-        return Value{promise};
-    }, env);
-    obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
-}
-return obj;
+        return Value{promise}; }, env);
+        obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+    return obj;
 }
 
 // ----------------- JSON module (parse & stringify) -----------------

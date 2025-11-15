@@ -15,9 +15,9 @@
 
 #include <atomic>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -81,14 +81,14 @@ struct HttpResponse {
         if (chunked_mode) {
             // If in chunked mode, send final chunk (0-length) and close
             std::string final_chunk = "0\r\n\r\n";
-            
+
             char* buf = static_cast<char*>(malloc(final_chunk.size()));
             memcpy(buf, final_chunk.data(), final_chunk.size());
             uv_buf_t uvbuf = uv_buf_init(buf, (unsigned int)final_chunk.size());
-            
+
             uv_write_t* req = new uv_write_t;
             req->data = buf;
-            
+
             uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int status) {
                 if (req->data) free(req->data);
                 uv_stream_t* client = req->handle;
@@ -97,7 +97,7 @@ struct HttpResponse {
             });
             return;
         }
-        
+
         // Normal (non-chunked) response
         if (status_code == 204 || status_code == 304) {
             body.clear();
@@ -116,26 +116,46 @@ struct HttpResponse {
 
     static std::string reason_for_code(int code) {
         switch (code) {
-            case 100: return "Continue";
-            case 101: return "Switching Protocols";
-            case 200: return "OK";
-            case 201: return "Created";
-            case 202: return "Accepted";
-            case 204: return "No Content";
-            case 301: return "Moved Permanently";
-            case 302: return "Found";
-            case 304: return "Not Modified";
-            case 400: return "Bad Request";
-            case 401: return "Unauthorized";
-            case 403: return "Forbidden";
-            case 404: return "Not Found";
-            case 405: return "Method Not Allowed";
-            case 410: return "Gone";
-            case 500: return "Internal Server Error";
-            case 501: return "Not Implemented";
-            case 502: return "Bad Gateway";
-            case 503: return "Service Unavailable";
-            default: return std::string();
+            case 100:
+                return "Continue";
+            case 101:
+                return "Switching Protocols";
+            case 200:
+                return "OK";
+            case 201:
+                return "Created";
+            case 202:
+                return "Accepted";
+            case 204:
+                return "No Content";
+            case 301:
+                return "Moved Permanently";
+            case 302:
+                return "Found";
+            case 304:
+                return "Not Modified";
+            case 400:
+                return "Bad Request";
+            case 401:
+                return "Unauthorized";
+            case 403:
+                return "Forbidden";
+            case 404:
+                return "Not Found";
+            case 405:
+                return "Method Not Allowed";
+            case 410:
+                return "Gone";
+            case 500:
+                return "Internal Server Error";
+            case 501:
+                return "Not Implemented";
+            case 502:
+                return "Bad Gateway";
+            case 503:
+                return "Service Unavailable";
+            default:
+                return std::string();
         }
     }
 
@@ -151,7 +171,7 @@ struct HttpResponse {
             response << "HTTP/1.1 " << status_code << "\r\n";
         }
 
-        if (headers.find("Content-Type") == headers.end() && 
+        if (headers.find("Content-Type") == headers.end() &&
             headers.find("content-type") == headers.end()) {
             headers["Content-Type"] = "text/plain";
         }
@@ -160,7 +180,7 @@ struct HttpResponse {
             response << kv.first << ": " << kv.second << "\r\n";
         }
         response << "\r\n";
-        
+
         if (!(status_code == 204 || status_code == 304))
             response << body;
 
@@ -171,7 +191,7 @@ struct HttpResponse {
 
         uv_write_t* req = new uv_write_t;
         req->data = buf;
-        
+
         uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int status) {
             if (req->data) free(req->data);
             uv_stream_t* client = req->handle;
@@ -228,7 +248,7 @@ struct ServerInstance {
     FunctionPtr request_handler;
     std::atomic<bool> closed{false};
     int port = 0;
-    
+
     // ===== ADD THIS =====
     struct InProgressRequest {
         std::string method;
@@ -239,7 +259,7 @@ struct ServerInstance {
         size_t expected_length = 0;
         bool headers_complete = false;
     };
-    
+
     std::unordered_map<uv_stream_t*, InProgressRequest> pending_requests;
     // ===== END ADD =====
 };
@@ -259,7 +279,7 @@ static void on_connection(uv_stream_t* server, int status) {
 
     if (uv_accept(server, (uv_stream_t*)client) == 0) {
         client->data = srv;
-        
+
         uv_read_start((uv_stream_t*)client,
             // Allocation callback
             [](uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* buf) {
@@ -277,23 +297,23 @@ static void on_connection(uv_stream_t* server, int status) {
 
                     // ===== NEW: Get or create in-progress request =====
                     auto& in_progress = srv->pending_requests[stream];
-                    
+
                     if (!in_progress.headers_complete) {
                         // Still reading headers
                         std::string chunk(buf->base, nread);
                         size_t header_end = chunk.find("\r\n\r\n");
-                        
+
                         if (header_end != std::string::npos) {
                             // Headers complete! Parse them
                             std::istringstream iss(chunk.substr(0, header_end));
                             std::string first_line;
                             std::getline(iss, first_line);
-                            
+
                             // Parse first line
                             std::istringstream line_stream(first_line);
                             std::string path_query;
                             line_stream >> in_progress.method >> path_query;
-                            
+
                             size_t qpos = path_query.find('?');
                             if (qpos != std::string::npos) {
                                 in_progress.path = path_query.substr(0, qpos);
@@ -301,7 +321,7 @@ static void on_connection(uv_stream_t* server, int status) {
                             } else {
                                 in_progress.path = path_query;
                             }
-                            
+
                             // Parse headers
                             std::string header_line;
                             while (std::getline(iss, header_line) && !header_line.empty()) {
@@ -314,23 +334,22 @@ static void on_connection(uv_stream_t* server, int status) {
                                     in_progress.headers[key] = val;
                                 }
                             }
-                            
+
                             in_progress.headers_complete = true;
-                            
+
                             // Get Content-Length
                             auto cl_it = in_progress.headers.find("Content-Length");
                             if (cl_it != in_progress.headers.end()) {
                                 in_progress.expected_length = std::stoull(cl_it->second);
                             }
-                            
+
                             // Append any body data from this chunk
                             size_t body_start = header_end + 4;
                             if (body_start < chunk.size()) {
                                 in_progress.body_data.insert(
                                     in_progress.body_data.end(),
                                     chunk.begin() + body_start,
-                                    chunk.end()
-                                );
+                                    chunk.end());
                             }
                         }
                     } else {
@@ -338,14 +357,12 @@ static void on_connection(uv_stream_t* server, int status) {
                         in_progress.body_data.insert(
                             in_progress.body_data.end(),
                             buf->base,
-                            buf->base + nread
-                        );
+                            buf->base + nread);
                     }
-                    
+
                     // ===== Check if we have complete request =====
-                    if (in_progress.headers_complete && 
+                    if (in_progress.headers_complete &&
                         in_progress.body_data.size() >= in_progress.expected_length) {
-                        
                         // NOW we have the complete request!
                         auto http_req = std::make_shared<HttpRequest>();
                         http_req->method = in_progress.method;
@@ -360,24 +377,27 @@ static void on_connection(uv_stream_t* server, int status) {
                         req_obj->properties["method"] = {Value{http_req->method}, false, false, true, Token{}};
                         req_obj->properties["path"] = {Value{http_req->path}, false, false, true, Token{}};
                         req_obj->properties["query"] = {Value{http_req->query}, false, false, true, Token{}};
-                        
+
                         // normalize content-type lookup
                         std::string content_type;
-                        for (auto &kv : http_req->headers) {
+                        for (auto& kv : http_req->headers) {
                             std::string k = kv.first;
                             std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-                            if (k == "content-type") { content_type = kv.second; break; }
+                            if (k == "content-type") {
+                                content_type = kv.second;
+                                break;
+                            }
                         }
-                        
+
                         // parse out mime and params
-                        auto parse_content_type = [](const std::string &ct){
+                        auto parse_content_type = [](const std::string& ct) {
                             auto s = ct;
                             std::string low = s;
                             std::transform(low.begin(), low.end(), low.begin(), ::tolower);
                             size_t semi = low.find(';');
                             std::string mime = semi == std::string::npos ? low : low.substr(0, semi);
-                            std::string params = semi == std::string::npos ? "" : low.substr(semi+1);
-                            return std::pair<std::string,std::string>{mime, params};
+                            std::string params = semi == std::string::npos ? "" : low.substr(semi + 1);
+                            return std::pair<std::string, std::string>{mime, params};
                         };
                         auto [mime, params] = parse_content_type(content_type);
                         bool is_text = false;
@@ -435,7 +455,7 @@ static void on_connection(uv_stream_t* server, int status) {
                         // ========== res.end() - Support Buffer ==========
                         auto end_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                             std::string data;
-                            
+
                             if (args.empty()) {
                                 data = "";
                             } else if (std::holds_alternative<BufferPtr>(args[0])) {
@@ -449,7 +469,7 @@ static void on_connection(uv_stream_t* server, int status) {
                                 // Handle other types (convert to string)
                                 data = value_to_string_simple_local(args[0]);
                             }
-                            
+
                             // Honor status codes that forbid body
                             if (http_res->status_code == 204 || http_res->status_code == 304) {
                                 http_res->end("");
@@ -460,17 +480,16 @@ static void on_connection(uv_stream_t* server, int status) {
                         };
                         auto end_fn = std::make_shared<FunctionValue>("res.end", end_impl, nullptr, Token{});
                         res_obj->properties["end"] = {Value{end_fn}, false, false, true, Token{}};
-                        
-                        
+
                         // ========== NEW res.write() - Support chunked responses ==========
                         auto write_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                             if (args.empty()) {
                                 return Value{true};
                             }
-                            
+
                             http_res->chunked_mode = true;
                             std::string chunk_data;
-                            
+
                             if (std::holds_alternative<BufferPtr>(args[0])) {
                                 // Handle Buffer
                                 BufferPtr buf = std::get<BufferPtr>(args[0]);
@@ -482,77 +501,77 @@ static void on_connection(uv_stream_t* server, int status) {
                                 // Handle other types
                                 chunk_data = value_to_string_simple_local(args[0]);
                             }
-                            
+
                             // Send headers if not sent yet
                             if (!http_res->headers_sent) {
                                 std::ostringstream header_stream;
-                                std::string rp = !http_res->reason.empty() ? http_res->reason 
-                                                                            : HttpResponse::reason_for_code(http_res->status_code);
-                                
+                                std::string rp = !http_res->reason.empty() ? http_res->reason
+                                                                           : HttpResponse::reason_for_code(http_res->status_code);
+
                                 if (!rp.empty()) {
                                     header_stream << "HTTP/1.1 " << http_res->status_code << " " << rp << "\r\n";
                                 } else {
                                     header_stream << "HTTP/1.1 " << http_res->status_code << "\r\n";
                                 }
-                                
+
                                 // Add Transfer-Encoding: chunked for streaming
                                 http_res->headers["Transfer-Encoding"] = "chunked";
-                                
+
                                 // Set default content-type if not set
-                                if (http_res->headers.find("Content-Type") == http_res->headers.end() && 
+                                if (http_res->headers.find("Content-Type") == http_res->headers.end() &&
                                     http_res->headers.find("content-type") == http_res->headers.end()) {
                                     http_res->headers["Content-Type"] = "text/plain";
                                 }
-                                
+
                                 for (const auto& kv : http_res->headers) {
                                     header_stream << kv.first << ": " << kv.second << "\r\n";
                                 }
                                 header_stream << "\r\n";
-                                
+
                                 std::string headers_str = header_stream.str();
-                                
+
                                 // Send headers
                                 char* header_buf = static_cast<char*>(malloc(headers_str.size()));
                                 memcpy(header_buf, headers_str.data(), headers_str.size());
                                 uv_buf_t header_uvbuf = uv_buf_init(header_buf, (unsigned int)headers_str.size());
-                                
+
                                 uv_write_t* header_req = new uv_write_t;
                                 header_req->data = header_buf;
-                                
+
                                 uv_write(header_req, http_res->client, &header_uvbuf, 1, [](uv_write_t* req, int status) {
                                     if (req->data) free(req->data);
                                     delete req;
                                 });
-                                
+
                                 http_res->headers_sent = true;
                             }
-                            
+
                             // Send chunk in HTTP chunked format
                             if (!chunk_data.empty()) {
                                 std::ostringstream chunk_stream;
                                 chunk_stream << std::hex << chunk_data.size() << "\r\n";
                                 chunk_stream << chunk_data << "\r\n";
-                                
+
                                 std::string chunk_str = chunk_stream.str();
-                                
+
                                 char* chunk_buf = static_cast<char*>(malloc(chunk_str.size()));
                                 memcpy(chunk_buf, chunk_str.data(), chunk_str.size());
                                 uv_buf_t chunk_uvbuf = uv_buf_init(chunk_buf, (unsigned int)chunk_str.size());
-                                
+
                                 uv_write_t* chunk_req = new uv_write_t;
                                 chunk_req->data = chunk_buf;
-                                
+
                                 uv_write(chunk_req, http_res->client, &chunk_uvbuf, 1, [](uv_write_t* req, int status) {
                                     if (req->data) free(req->data);
                                     delete req;
                                 });
                             }
-                            
+
                             return Value{true};
                         };
                         auto write_fn = std::make_shared<FunctionValue>("res.write", write_impl, nullptr, Token{});
                         res_obj->properties["write"] = {Value{write_fn}, false, false, true, Token{}};
-                        
+
                         // req.save()
                         auto save_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                             if (args.size() < 2) {
@@ -604,15 +623,15 @@ static void on_connection(uv_stream_t* server, int status) {
                                 } catch (...) {}
                             });
                         }
-                        
+
                         // ===== Clean up in-progress request =====
                         srv->pending_requests.erase(stream);
                     }
                 }
-                
+
                 // free buffer
                 delete[] buf->base;
-                
+
                 if (nread < 0) {
                     // Connection closed - cleanup
                     ServerInstance* srv = static_cast<ServerInstance*>(stream->data);

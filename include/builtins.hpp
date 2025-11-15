@@ -1,7 +1,6 @@
 #pragma once
-#include "uv.h"
-
 #include "evaluator.hpp"
+#include "uv.h"
 
 // Factories producing the ObjectPtr exports for each builtin module.
 // The EnvPtr is supplied so native functions can capture a module environment if needed.
@@ -23,8 +22,6 @@ std::shared_ptr<ObjectValue> make_streams_exports(EnvPtr env);
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);
-
-
 
 // NEW: Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)
 ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket);
