@@ -1225,213 +1225,207 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 "\nUnknown property '" + mem->property + "' on buffer." +
                 "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
         }
-        
-        
-        
-        // File methods  
-      if (std::holds_alternative<FilePtr>(objVal)) { 
-          FilePtr file = std::get<FilePtr>(objVal); 
-          const std::string& prop = mem->property;
-        auto make_fn = [this, file, env, mem](auto impl) -> Value {
-            auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
-                return impl(args, callEnv, token);
-            };
-            return Value{std::make_shared<FunctionValue>("file." + mem->property, native_impl, env, mem->token)};
-        };
-        
-        // file.read(n?) -> string | Buffer
-        if (prop == "read") {
-            return make_fn([file](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                if (!file->is_open) {
-                    throw SwaziError("IOError", "Cannot read from closed file", token.loc);
-                }
-                
-                size_t n = SIZE_MAX;
-                if (!args.empty() && std::holds_alternative<double>(args[0])) {
-                    n = static_cast<size_t>(std::get<double>(args[0]));
-                }
-                
-                std::vector<uint8_t> data;
-                data.reserve(std::min(n, size_t(4096)));
-                
-                #ifdef _WIN32
-                DWORD total_read = 0;
-                while (total_read < n) {
-                    DWORD to_read = static_cast<DWORD>(std::min(size_t(n - total_read), size_t(4096)));
-                    DWORD read_count = 0;
-                    uint8_t chunk[4096];
-                    
-                    if (!ReadFile((HANDLE)file->handle, chunk, to_read, &read_count, nullptr)) {
-                        throw SwaziError("IOError", "Read failed", token.loc);
-                    }
-                    if (read_count == 0) break;
-                    
-                    data.insert(data.end(), chunk, chunk + read_count);
-                    total_read += read_count;
-                    file->file_pos += read_count;
-                }
-                #else
-                size_t total_read = 0;
-                while (total_read < n) {
-                    uint8_t chunk[4096];
-                    ssize_t to_read = std::min(n - total_read, sizeof(chunk));
-                    ssize_t read_count = ::read(file->fd, chunk, to_read);
-                    
-                    if (read_count < 0) {
-                        throw SwaziError("IOError", "Read failed: " + std::string(std::strerror(errno)), token.loc);
-                    }
-                    if (read_count == 0) break;
-                    
-                    data.insert(data.end(), chunk, chunk + read_count);
-                    total_read += read_count;
-                    file->file_pos += read_count;
-                }
-                #endif
-                
-                if (file->is_binary) {
-                    auto buf = std::make_shared<BufferValue>();
-                    buf->data = std::move(data);
-                    buf->encoding = "binary";
-                    return Value{buf};
-                }
-                
-                return Value{std::string(data.begin(), data.end())};
-            });
-        }
-        
-        // file.write(data) -> number (bytes written)
-        if (prop == "write") {
-            return make_fn([file](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                if (!file->is_open) {
-                    throw SwaziError("IOError", "Cannot write to closed file", token.loc);
-                }
-                if (args.empty()) {
-                    throw SwaziError("TypeError", "write requires data argument", token.loc);
-                }
-                
-                std::vector<uint8_t> data;
-                if (std::holds_alternative<BufferPtr>(args[0])) {
-                    data = std::get<BufferPtr>(args[0])->data;
-                } else if (std::holds_alternative<std::string>(args[0])) {
-                    std::string s = std::get<std::string>(args[0]);
-                    data.assign(s.begin(), s.end());
-                } else {
-                    throw SwaziError("TypeError", "write expects string or Buffer", token.loc);
-                }
-                
-                #ifdef _WIN32
-                DWORD written = 0;
-                if (!WriteFile((HANDLE)file->handle, data.data(), static_cast<DWORD>(data.size()), &written, nullptr)) {
-                    throw SwaziError("IOError", "Write failed", token.loc);
-                }
-                file->file_pos += written;
-                return Value{static_cast<double>(written)};
-                #else
-                ssize_t written = ::write(file->fd, data.data(), data.size());
-                if (written < 0) {
-                    throw SwaziError("IOError", "Write failed: " + std::string(std::strerror(errno)), token.loc);
-                }
-                file->file_pos += written;
-                return Value{static_cast<double>(written)};
-                #endif
-            });
-        }
-        
-        // file.close() -> null
-        if (prop == "close") {
-            return make_fn([file](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-                if (file->is_open) {
-                    file->close_internal();
-                }
-                return std::monostate{};
-            });
-        }
-        
-        // file.seek(offset, whence=0) -> number (new position)
-        if (prop == "seek") {
-            return make_fn([file](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                if (!file->is_open) {
-                    throw SwaziError("IOError", "Cannot seek closed file", token.loc);
-                }
-                if (args.empty()) {
-                    throw SwaziError("TypeError", "seek requires offset argument", token.loc);
-                }
-                
-                long long offset = static_cast<long long>(std::get<double>(args[0]));
-                int whence = 0; // 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
-                if (args.size() >= 2) {
-                    whence = static_cast<int>(std::get<double>(args[1]));
-                }
-                
-                #ifdef _WIN32
-                DWORD method = (whence == 2) ? FILE_END : (whence == 1) ? FILE_CURRENT : FILE_BEGIN;
-                LARGE_INTEGER dist;
-                dist.QuadPart = offset;
-                LARGE_INTEGER newPos;
-                if (!SetFilePointerEx((HANDLE)file->handle, dist, &newPos, method)) {
-                    throw SwaziError("IOError", "Seek failed", token.loc);
-                }
-                file->file_pos = static_cast<size_t>(newPos.QuadPart);
-                return Value{static_cast<double>(newPos.QuadPart)};
-                #else
-                off_t result = lseek(file->fd, offset, whence);
-                if (result < 0) {
-                    throw SwaziError("IOError", "Seek failed: " + std::string(std::strerror(errno)), token.loc);
-                }
-                file->file_pos = static_cast<size_t>(result);
-                return Value{static_cast<double>(result)};
-                #endif
-            });
-        }
-        
-        // file.tell() -> number (current position)
-        if (prop == "tell") {
-            return make_fn([file](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-                return Value{static_cast<double>(file->file_pos)};
-            });
-        }
-        
-        // file.readLine() -> string | null
-        if (prop == "readLine") {
-            return make_fn([file](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
-                if (!file->is_open) {
-                    throw SwaziError("IOError", "Cannot read from closed file", token.loc);
-                }
-                
-                std::string line;
-                #ifdef _WIN32
-                char ch;
-                DWORD read_count;
-                while (ReadFile((HANDLE)file->handle, &ch, 1, &read_count, nullptr) && read_count == 1) {
-                    file->file_pos++;
-                    if (ch == '\n') break;
-                    if (ch != '\r') line += ch;
-                }
-                #else
-                char ch;
-                while (::read(file->fd, &ch, 1) == 1) {
-                    file->file_pos++;
-                    if (ch == '\n') break;
-                    if (ch != '\r') line += ch;
-                }
-                #endif
-                
-                return line.empty() ? Value{std::monostate{}} : Value{line};
-            });
-        }
-        
-        // Properties
-        if (prop == "position") return Value{static_cast<double>(file->file_pos)};
-        if (prop == "path") return Value{file->path};
-        if (prop == "is_open") return Value{file->is_open};
-        
-        throw SwaziError("ReferenceError", "Unknown file property: " + prop, mem->token.loc);
-        }
 
-        
-        
-        
-        
+        // File methods
+        if (std::holds_alternative<FilePtr>(objVal)) {
+            FilePtr file = std::get<FilePtr>(objVal);
+            const std::string& prop = mem->property;
+            auto make_fn = [this, file, env, mem](auto impl) -> Value {
+                auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    return impl(args, callEnv, token);
+                };
+                return Value{std::make_shared<FunctionValue>("file." + mem->property, native_impl, env, mem->token)};
+            };
+
+            // file.read(n?) -> string | Buffer
+            if (prop == "read") {
+                return make_fn([file](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (!file->is_open) {
+                        throw SwaziError("IOError", "Cannot read from closed file", token.loc);
+                    }
+
+                    size_t n = SIZE_MAX;
+                    if (!args.empty() && std::holds_alternative<double>(args[0])) {
+                        n = static_cast<size_t>(std::get<double>(args[0]));
+                    }
+
+                    std::vector<uint8_t> data;
+                    data.reserve(std::min(n, size_t(4096)));
+
+#ifdef _WIN32
+                    DWORD total_read = 0;
+                    while (total_read < n) {
+                        DWORD to_read = static_cast<DWORD>(std::min(size_t(n - total_read), size_t(4096)));
+                        DWORD read_count = 0;
+                        uint8_t chunk[4096];
+
+                        if (!ReadFile((HANDLE)file->handle, chunk, to_read, &read_count, nullptr)) {
+                            throw SwaziError("IOError", "Read failed", token.loc);
+                        }
+                        if (read_count == 0) break;
+
+                        data.insert(data.end(), chunk, chunk + read_count);
+                        total_read += read_count;
+                        file->file_pos += read_count;
+                    }
+#else
+                    size_t total_read = 0;
+                    while (total_read < n) {
+                        uint8_t chunk[4096];
+                        ssize_t to_read = std::min(n - total_read, sizeof(chunk));
+                        ssize_t read_count = ::read(file->fd, chunk, to_read);
+
+                        if (read_count < 0) {
+                            throw SwaziError("IOError", "Read failed: " + std::string(std::strerror(errno)), token.loc);
+                        }
+                        if (read_count == 0) break;
+
+                        data.insert(data.end(), chunk, chunk + read_count);
+                        total_read += read_count;
+                        file->file_pos += read_count;
+                    }
+#endif
+
+                    if (file->is_binary) {
+                        auto buf = std::make_shared<BufferValue>();
+                        buf->data = std::move(data);
+                        buf->encoding = "binary";
+                        return Value{buf};
+                    }
+
+                    return Value{std::string(data.begin(), data.end())};
+                });
+            }
+
+            // file.write(data) -> number (bytes written)
+            if (prop == "write") {
+                return make_fn([file](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (!file->is_open) {
+                        throw SwaziError("IOError", "Cannot write to closed file", token.loc);
+                    }
+                    if (args.empty()) {
+                        throw SwaziError("TypeError", "write requires data argument", token.loc);
+                    }
+
+                    std::vector<uint8_t> data;
+                    if (std::holds_alternative<BufferPtr>(args[0])) {
+                        data = std::get<BufferPtr>(args[0])->data;
+                    } else if (std::holds_alternative<std::string>(args[0])) {
+                        std::string s = std::get<std::string>(args[0]);
+                        data.assign(s.begin(), s.end());
+                    } else {
+                        throw SwaziError("TypeError", "write expects string or Buffer", token.loc);
+                    }
+
+#ifdef _WIN32
+                    DWORD written = 0;
+                    if (!WriteFile((HANDLE)file->handle, data.data(), static_cast<DWORD>(data.size()), &written, nullptr)) {
+                        throw SwaziError("IOError", "Write failed", token.loc);
+                    }
+                    file->file_pos += written;
+                    return Value{static_cast<double>(written)};
+#else
+                    ssize_t written = ::write(file->fd, data.data(), data.size());
+                    if (written < 0) {
+                        throw SwaziError("IOError", "Write failed: " + std::string(std::strerror(errno)), token.loc);
+                    }
+                    file->file_pos += written;
+                    return Value{static_cast<double>(written)};
+#endif
+                });
+            }
+
+            // file.close() -> null
+            if (prop == "close") {
+                return make_fn([file](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    if (file->is_open) {
+                        file->close_internal();
+                    }
+                    return std::monostate{};
+                });
+            }
+
+            // file.seek(offset, whence=0) -> number (new position)
+            if (prop == "seek") {
+                return make_fn([file](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (!file->is_open) {
+                        throw SwaziError("IOError", "Cannot seek closed file", token.loc);
+                    }
+                    if (args.empty()) {
+                        throw SwaziError("TypeError", "seek requires offset argument", token.loc);
+                    }
+
+                    long long offset = static_cast<long long>(std::get<double>(args[0]));
+                    int whence = 0;  // 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+                    if (args.size() >= 2) {
+                        whence = static_cast<int>(std::get<double>(args[1]));
+                    }
+
+#ifdef _WIN32
+                    DWORD method = (whence == 2) ? FILE_END : (whence == 1) ? FILE_CURRENT
+                                                                            : FILE_BEGIN;
+                    LARGE_INTEGER dist;
+                    dist.QuadPart = offset;
+                    LARGE_INTEGER newPos;
+                    if (!SetFilePointerEx((HANDLE)file->handle, dist, &newPos, method)) {
+                        throw SwaziError("IOError", "Seek failed", token.loc);
+                    }
+                    file->file_pos = static_cast<size_t>(newPos.QuadPart);
+                    return Value{static_cast<double>(newPos.QuadPart)};
+#else
+                    off_t result = lseek(file->fd, offset, whence);
+                    if (result < 0) {
+                        throw SwaziError("IOError", "Seek failed: " + std::string(std::strerror(errno)), token.loc);
+                    }
+                    file->file_pos = static_cast<size_t>(result);
+                    return Value{static_cast<double>(result)};
+#endif
+                });
+            }
+
+            // file.tell() -> number (current position)
+            if (prop == "tell") {
+                return make_fn([file](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{static_cast<double>(file->file_pos)};
+                });
+            }
+
+            // file.readLine() -> string | null
+            if (prop == "readLine") {
+                return make_fn([file](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+                    if (!file->is_open) {
+                        throw SwaziError("IOError", "Cannot read from closed file", token.loc);
+                    }
+
+                    std::string line;
+#ifdef _WIN32
+                    char ch;
+                    DWORD read_count;
+                    while (ReadFile((HANDLE)file->handle, &ch, 1, &read_count, nullptr) && read_count == 1) {
+                        file->file_pos++;
+                        if (ch == '\n') break;
+                        if (ch != '\r') line += ch;
+                    }
+#else
+                    char ch;
+                    while (::read(file->fd, &ch, 1) == 1) {
+                        file->file_pos++;
+                        if (ch == '\n') break;
+                        if (ch != '\r') line += ch;
+                    }
+#endif
+
+                    return line.empty() ? Value{std::monostate{}} : Value{line};
+                });
+            }
+
+            // Properties
+            if (prop == "position") return Value{static_cast<double>(file->file_pos)};
+            if (prop == "path") return Value{file->path};
+            if (prop == "is_open") return Value{file->is_open};
+
+            throw SwaziError("ReferenceError", "Unknown file property: " + prop, mem->token.loc);
+        }
 
         // String property 'herufi' (length)
         if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {

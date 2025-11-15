@@ -371,12 +371,12 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             rec->state = ModuleRecord::State::Loaded;
             return rec->exports;
         }
-        
+
         if (module_spec == "file" || module_spec == "swazi:file") {
             const std::string key = "__builtin__:file";
             auto it = module_cache.find(key);
             if (it != module_cache.end()) return it->second->exports;
-        
+
             auto rec = std::make_shared<ModuleRecord>();
             rec->state = ModuleRecord::State::Loading;
             rec->exports = std::make_shared<ObjectValue>();
@@ -384,9 +384,9 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             rec->module_env = std::make_shared<Environment>(global_env);
             module_cache[key] = rec;
             populate_module_metadata(rec->module_env, rec->path, "file", false);
-        
+
             rec->exports = make_file_exports(rec->module_env);
-        
+
             rec->state = ModuleRecord::State::Loaded;
             return rec->exports;
         }

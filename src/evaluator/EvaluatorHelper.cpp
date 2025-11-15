@@ -57,6 +57,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<HoleValue>(v)) return "emptyhole";
     if (std::holds_alternative<PromisePtr>(v)) return "promise";
     if (std::holds_alternative<BufferPtr>(v)) return "buffer";
+    if (std::holds_alternative<FilePtr>(v)) return "file";
     return "unknown";
 }
 
@@ -232,6 +233,18 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             ss << " ... +" << (buf->data.size() - show_max) << " more";
         }
         ss << std::dec << "]>";
+
+        return ss.str();
+    }
+
+    if (std::holds_alternative<FilePtr>(v)) {
+        FilePtr file = std::get<FilePtr>(v);
+        if (!file) return "[emptyFile]";
+
+        std::ostringstream ss;
+        ss << "[";
+        ss << (use_color ? (Color::bright_black + "file object" + Color::reset) : "File Object");
+        ss << "]";
 
         return ss.str();
     }
@@ -948,6 +961,18 @@ std::string Evaluator::print_value(
 
         std::ostringstream ss;
         ss << "<" << (use_color ? (Color::bright_cyan + "Buffer " + Color::reset) : "Buffer ") << buf->data.size() << " bytes>";
+        return ss.str();
+    }
+
+    if (std::holds_alternative<FilePtr>(v)) {
+        FilePtr file = std::get<FilePtr>(v);
+        if (!file) return "[emptyFile]";
+
+        std::ostringstream ss;
+        ss << "[";
+        ss << (use_color ? (Color::bright_black + "file object" + Color::reset) : "File Object");
+        ss << "]";
+
         return ss.str();
     }
 
