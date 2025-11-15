@@ -13,6 +13,7 @@
 #include "ClassRuntime.hpp"
 #include "SwaziError.hpp"
 #include "token.hpp"
+#include "globals.hpp"
 
 // ============================================
 // ========== URL PARSING UTILITIES ===========
@@ -217,72 +218,111 @@ static URLComponents parse_url(const std::string& url_str) {
     return comp;
 }
 
+// Helper to safely get ObjectPtr from Value
+static ObjectPtr safe_get_object(const Value& v, const std::string& context, const Token& tok) {
+    if (!std::holds_alternative<ObjectPtr>(v)) {
+        throw SwaziError("TypeError", context + " requires an object", tok.loc);
+    }
+    ObjectPtr obj = std::get<ObjectPtr>(v);
+    if (!obj) {
+        throw SwaziError("TypeError", context + " received null object", tok.loc);
+    }
+    return obj;
+}
+
+// Helper to safely get string property from object
+static std::string safe_get_string_property(ObjectPtr obj, const std::string& prop, const std::string& context, const Token& tok) {
+    auto it = obj->properties.find(prop);
+    if (it == obj->properties.end()) {
+        throw SwaziError("TypeError", context + " missing property '" + prop + "'", tok.loc);
+    }
+    return value_to_string(it->second.value);
+}
+
+// Helper to update URL href after changes
+static void update_url_href(ObjectPtr url, const Token& tok) {
+    try {
+        std::string protocol = safe_get_string_property(url, "protocol", "URL.updateHref", tok);
+        std::string hostname = safe_get_string_property(url, "hostname", "URL.updateHref", tok);
+        std::string port = safe_get_string_property(url, "port", "URL.updateHref", tok);
+        std::string pathname = safe_get_string_property(url, "pathname", "URL.updateHref", tok);
+        std::string search = safe_get_string_property(url, "search", "URL.updateHref", tok);
+        std::string hash = safe_get_string_property(url, "hash", "URL.updateHref", tok);
+        
+        URLComponents comp;
+        comp.protocol = protocol;
+        comp.hostname = hostname;
+        comp.port = port;
+        comp.pathname = pathname;
+        comp.search = search;
+        comp.hash = hash;
+        
+        url->properties["href"].value = Value{comp.href()};
+    } catch (const std::exception& e) {
+        // Silently fail to avoid cascading errors during updates
+    }
+}
+
 // ============================================
 // ========== NATIVE STATIC METHODS ===========
 // ============================================
 
 static Value native_URL_encode(const std::vector<Value>& args, EnvPtr, const Token& tok) {
     if (args.empty()) return Value{std::string("")};
-    if (!std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "URL.encode expects a string argument", tok.loc);
-    }
-    return Value{percent_encode(std::get<std::string>(args[0]), false)};
+    std::string str = value_to_string(args[0]);
+    return Value{percent_encode(str, false)};
 }
 
 static Value native_URL_decode(const std::vector<Value>& args, EnvPtr, const Token& tok) {
     if (args.empty()) return Value{std::string("")};
-    if (!std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "URL.decode expects a string argument", tok.loc);
-    }
-    return Value{percent_decode(std::get<std::string>(args[0]))};
+    std::string str = value_to_string(args[0]);
+    return Value{percent_decode(str)};
 }
 
 static Value native_URL_encodeURIComponent(const std::vector<Value>& args, EnvPtr, const Token& tok) {
     if (args.empty()) return Value{std::string("")};
-    if (!std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "URL.encodeURIComponent expects a string argument", tok.loc);
-    }
-    return Value{percent_encode(std::get<std::string>(args[0]), false)};
+    std::string str = value_to_string(args[0]);
+    return Value{percent_encode(str, false)};
 }
 
 static Value native_URL_decodeURIComponent(const std::vector<Value>& args, EnvPtr, const Token& tok) {
     if (args.empty()) return Value{std::string("")};
-    if (!std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "URL.decodeURIComponent expects a string argument", tok.loc);
-    }
-    return Value{percent_decode(std::get<std::string>(args[0]))};
+    std::string str = value_to_string(args[0]);
+    return Value{percent_decode(str)};
 }
 
 static Value native_URL_encodeURI(const std::vector<Value>& args, EnvPtr, const Token& tok) {
     if (args.empty()) return Value{std::string("")};
-    if (!std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "URL.encodeURI expects a string argument", tok.loc);
-    }
-    return Value{percent_encode(std::get<std::string>(args[0]), true)};
+    std::string str = value_to_string(args[0]);
+    return Value{percent_encode(str, true)};
 }
 
 static Value native_URL_decodeURI(const std::vector<Value>& args, EnvPtr, const Token& tok) {
     if (args.empty()) return Value{std::string("")};
-    if (!std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "URL.decodeURI expects a string argument", tok.loc);
-    }
-    return Value{percent_decode(std::get<std::string>(args[0]))};
+    std::string str = value_to_string(args[0]);
+    return Value{percent_decode(str)};
 }
 
 // ============================================
 // ========== URLSearchParams METHODS =========
 // ============================================
 
-// These operate on the searchParams object which has __parent_url__ link
-
 static Value native_searchParams_get(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw SwaziError("TypeError", "get requires key", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string search = std::get<std::string>(url->properties["search"].value);
-    std::string key = std::get<std::string>(args[1]);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.searchParams.get() requires a key argument", tok.loc);
+    }
     
-    // Simple query parsing
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.get()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.get() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.get()", tok);
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.get()", tok);
+    std::string key = value_to_string(args[1]);
+    
     if (search.empty() || search == "?") return std::monostate{};
     std::string q = search[0] == '?' ? search.substr(1) : search;
     
@@ -304,11 +344,20 @@ static Value native_searchParams_get(const std::vector<Value>& args, EnvPtr, con
 }
 
 static Value native_searchParams_getAll(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw SwaziError("TypeError", "getAll requires key", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string search = std::get<std::string>(url->properties["search"].value);
-    std::string key = std::get<std::string>(args[1]);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.searchParams.getAll() requires a key argument", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.getAll()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.getAll() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.getAll()", tok);
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.getAll()", tok);
+    std::string key = value_to_string(args[1]);
     
     auto arr = std::make_shared<ArrayValue>();
     if (search.empty() || search == "?") return Value{arr};
@@ -332,13 +381,22 @@ static Value native_searchParams_getAll(const std::vector<Value>& args, EnvPtr, 
 }
 
 static Value native_searchParams_set(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 3) throw SwaziError("TypeError", "set requires key and value", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string key = std::get<std::string>(args[1]);
-    std::string value = std::get<std::string>(args[2]);
+    if (args.size() < 3) {
+        throw SwaziError("TypeError", "URL.searchParams.set() requires key and value arguments", tok.loc);
+    }
     
-    std::string search = std::get<std::string>(url->properties["search"].value);
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.set()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.set() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.set()", tok);
+    std::string key = value_to_string(args[1]);
+    std::string value = value_to_string(args[2]);
+    
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.set()", tok);
     std::string q = search.empty() || search == "?" ? "" : (search[0] == '?' ? search.substr(1) : search);
     
     std::ostringstream result;
@@ -361,6 +419,7 @@ static Value native_searchParams_set(const std::vector<Value>& args, EnvPtr, con
                     found = true;
                     first = false;
                 }
+                // Skip duplicate keys
             } else {
                 if (!first) result << "&";
                 result << pair;
@@ -377,21 +436,28 @@ static Value native_searchParams_set(const std::vector<Value>& args, EnvPtr, con
     
     std::string new_search = result.str();
     url->properties["search"].value = Value{new_search.empty() ? "" : "?" + new_search};
-    url->properties["href"].value = Value{parse_url(std::get<std::string>(url->properties["protocol"].value) + "//" + 
-        std::get<std::string>(url->properties["hostname"].value) + std::get<std::string>(url->properties["pathname"].value) + 
-        std::get<std::string>(url->properties["search"].value) + std::get<std::string>(url->properties["hash"].value)).href()};
+    update_url_href(url, tok);
     
     return std::monostate{};
 }
 
 static Value native_searchParams_append(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 3) throw SwaziError("TypeError", "append requires key and value", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string key = std::get<std::string>(args[1]);
-    std::string value = std::get<std::string>(args[2]);
+    if (args.size() < 3) {
+        throw SwaziError("TypeError", "URL.searchParams.append() requires key and value arguments", tok.loc);
+    }
     
-    std::string search = std::get<std::string>(url->properties["search"].value);
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.append()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.append() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.append()", tok);
+    std::string key = value_to_string(args[1]);
+    std::string value = value_to_string(args[2]);
+    
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.append()", tok);
     std::string q = search.empty() || search == "?" ? "" : (search[0] == '?' ? search.substr(1) : search);
     
     std::ostringstream result;
@@ -401,17 +467,27 @@ static Value native_searchParams_append(const std::vector<Value>& args, EnvPtr, 
     
     std::string new_search = result.str();
     url->properties["search"].value = Value{"?" + new_search};
+    update_url_href(url, tok);
     
     return std::monostate{};
 }
 
 static Value native_searchParams_delete(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw SwaziError("TypeError", "delete requires key", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string key = std::get<std::string>(args[1]);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.searchParams.delete() requires a key argument", tok.loc);
+    }
     
-    std::string search = std::get<std::string>(url->properties["search"].value);
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.delete()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.delete() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.delete()", tok);
+    std::string key = value_to_string(args[1]);
+    
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.delete()", tok);
     std::string q = search.empty() || search == "?" ? "" : (search[0] == '?' ? search.substr(1) : search);
     
     std::ostringstream result;
@@ -437,16 +513,26 @@ static Value native_searchParams_delete(const std::vector<Value>& args, EnvPtr, 
     
     std::string new_search = result.str();
     url->properties["search"].value = Value{new_search.empty() ? "" : "?" + new_search};
+    update_url_href(url, tok);
     
     return std::monostate{};
 }
 
 static Value native_searchParams_has(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.size() < 2) throw SwaziError("TypeError", "has requires key", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string search = std::get<std::string>(url->properties["search"].value);
-    std::string key = std::get<std::string>(args[1]);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.searchParams.has() requires a key argument", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.has()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.has() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.has()", tok);
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.has()", tok);
+    std::string key = value_to_string(args[1]);
     
     if (search.empty() || search == "?") return Value{false};
     std::string q = search[0] == '?' ? search.substr(1) : search;
@@ -467,10 +553,19 @@ static Value native_searchParams_has(const std::vector<Value>& args, EnvPtr, con
 }
 
 static Value native_searchParams_toString(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    if (args.empty()) throw SwaziError("TypeError", "Invalid searchParams", tok.loc);
-    ObjectPtr sp = std::get<ObjectPtr>(args[0]);
-    ObjectPtr url = std::get<ObjectPtr>(sp->properties["__parent_url__"].value);
-    std::string search = std::get<std::string>(url->properties["search"].value);
+    if (args.empty()) {
+        throw SwaziError("TypeError", "URL.searchParams.toString() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(args[0], "URL.searchParams.toString()", tok);
+    
+    auto it = sp->properties.find("__parent_url__");
+    if (it == sp->properties.end()) {
+        throw SwaziError("TypeError", "URL.searchParams.toString() invalid searchParams object", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(it->second.value, "URL.searchParams.toString()", tok);
+    std::string search = safe_get_string_property(url, "search", "URL.searchParams.toString()", tok);
     
     if (!search.empty() && search[0] == '?') {
         return Value{search.substr(1)};
@@ -483,12 +578,24 @@ static Value native_searchParams_toString(const std::vector<Value>& args, EnvPtr
 // ============================================
 
 static Value native_URL_ctor(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    if (args.size() < 2) throw SwaziError("TypeError", "URL constructor requires (this, url_str)", tok.loc);
-    ObjectPtr instance = std::get<ObjectPtr>(args[0]);
-    std::string url_str = std::get<std::string>(args[1]);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL constructor requires a URL string argument", tok.loc);
+    }
+    
+    ObjectPtr instance = safe_get_object(args[0], "URL constructor", tok);
+    std::string url_str = value_to_string(args[1]);
+    
+    if (url_str.empty()) {
+        throw SwaziError("TypeError", "URL constructor requires a non-empty URL string", tok.loc);
+    }
     
     // Parse URL
-    URLComponents comp = parse_url(url_str);
+    URLComponents comp;
+    try {
+        comp = parse_url(url_str);
+    } catch (const std::exception& e) {
+        throw SwaziError("TypeError", "URL constructor failed to parse URL: " + std::string(e.what()), tok.loc);
+    }
     
     // Set properties
     instance->properties["protocol"].value = Value{comp.protocol};
@@ -506,15 +613,33 @@ static Value native_URL_ctor(const std::vector<Value>& args, EnvPtr env, const T
     auto sp = std::make_shared<ObjectValue>();
     sp->properties["__parent_url__"] = {Value{instance}, true, false, false, tok};
     
-    // Add searchParams methods
+    // Add searchParams methods with proper 'this' binding
+    // We create wrapper functions that capture 'sp' and prepend it to args
     Token spTok;
-    sp->properties["get"] = {std::make_shared<FunctionValue>("get", native_searchParams_get, env, spTok), false, false, false, spTok};
-    sp->properties["getAll"] = {std::make_shared<FunctionValue>("getAll", native_searchParams_getAll, env, spTok), false, false, false, spTok};
-    sp->properties["set"] = {std::make_shared<FunctionValue>("set", native_searchParams_set, env, spTok), false, false, false, spTok};
-    sp->properties["append"] = {std::make_shared<FunctionValue>("append", native_searchParams_append, env, spTok), false, false, false, spTok};
-    sp->properties["delete"] = {std::make_shared<FunctionValue>("delete", native_searchParams_delete, env, spTok), false, false, false, spTok};
-    sp->properties["has"] = {std::make_shared<FunctionValue>("has", native_searchParams_has, env, spTok), false, false, false, spTok};
-    sp->properties["toString"] = {std::make_shared<FunctionValue>("toString", native_searchParams_toString, env, spTok), false, false, false, spTok};
+    
+    auto make_sp_method = [sp, env, &spTok](
+        const std::string& name,
+        std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl
+    ) -> FunctionPtr {
+        auto wrapper = [sp, impl](const std::vector<Value>& args, EnvPtr env, const Token& tok) -> Value {
+            // Prepend 'this' (sp) to the arguments
+            std::vector<Value> new_args;
+            new_args.push_back(Value{sp});
+            for (const auto& arg : args) {
+                new_args.push_back(arg);
+            }
+            return impl(new_args, env, tok);
+        };
+        return std::make_shared<FunctionValue>(name, wrapper, env, spTok);
+    };
+    
+    sp->properties["get"] = {make_sp_method("get", native_searchParams_get), false, false, false, spTok};
+    sp->properties["getAll"] = {make_sp_method("getAll", native_searchParams_getAll), false, false, false, spTok};
+    sp->properties["set"] = {make_sp_method("set", native_searchParams_set), false, false, false, spTok};
+    sp->properties["append"] = {make_sp_method("append", native_searchParams_append), false, false, false, spTok};
+    sp->properties["delete"] = {make_sp_method("delete", native_searchParams_delete), false, false, false, spTok};
+    sp->properties["has"] = {make_sp_method("has", native_searchParams_has), false, false, false, spTok};
+    sp->properties["toString"] = {make_sp_method("toString", native_searchParams_toString), false, false, false, spTok};
     
     instance->properties["searchParams"].value = Value{sp};
     
@@ -526,49 +651,231 @@ static Value native_URL_ctor(const std::vector<Value>& args, EnvPtr env, const T
 // ============================================
 
 static Value native_url_toString(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    return obj->properties["href"].value;
+    if (args.empty()) {
+        throw SwaziError("TypeError", "URL.toString() missing 'this' context", tok.loc);
+    }
+    
+    ObjectPtr obj = safe_get_object(args[0], "URL.toString()", tok);
+    
+    auto it = obj->properties.find("href");
+    if (it == obj->properties.end()) {
+        throw SwaziError("TypeError", "URL.toString() invalid URL object (missing href)", tok.loc);
+    }
+    
+    return it->second.value;
 }
 
 static Value native_url_normalize(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    std::string path = std::get<std::string>(obj->properties["pathname"].value);
+    if (args.empty()) {
+        throw SwaziError("TypeError", "URL.normalize() missing 'this' context", tok.loc);
+    }
+    
+    ObjectPtr obj = safe_get_object(args[0], "URL.normalize()", tok);
+    std::string path = safe_get_string_property(obj, "pathname", "URL.normalize()", tok);
+    
     obj->properties["pathname"].value = Value{normalize_path(path)};
+    update_url_href(obj, tok);
+    
     return Value{obj};
 }
 
 static Value native_url_clone(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    ObjectPtr original = std::get<ObjectPtr>(args[0]);
-    std::string href = std::get<std::string>(original->properties["href"].value);
+    if (args.empty()) {
+        throw SwaziError("TypeError", "URL.clone() missing 'this' context", tok.loc);
+    }
+    
+    ObjectPtr original = safe_get_object(args[0], "URL.clone()", tok);
+    std::string href = safe_get_string_property(original, "href", "URL.clone()", tok);
     
     // Create new URL from href
-    return native_URL_ctor({std::make_shared<ObjectValue>(), Value{href}}, env, tok);
+    auto newInstance = std::make_shared<ObjectValue>();
+    return native_URL_ctor({newInstance, Value{href}}, env, tok);
 }
 
 // Shortcut methods
 static Value native_url_setQuery(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    ObjectPtr url = std::get<ObjectPtr>(args[0]);
-    ObjectPtr sp = std::get<ObjectPtr>(url->properties["searchParams"].value);
+    if (args.size() < 3) {
+        throw SwaziError("TypeError", "URL.setQuery() requires key and value arguments", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(args[0], "URL.setQuery()", tok);
+    
+    auto it = url->properties.find("searchParams");
+    if (it == url->properties.end()) {
+        throw SwaziError("TypeError", "URL.setQuery() invalid URL object (missing searchParams)", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(it->second.value, "URL.setQuery()", tok);
     return native_searchParams_set({sp, args[1], args[2]}, nullptr, tok);
 }
 
 static Value native_url_getQuery(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    ObjectPtr url = std::get<ObjectPtr>(args[0]);
-    ObjectPtr sp = std::get<ObjectPtr>(url->properties["searchParams"].value);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.getQuery() requires a key argument", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(args[0], "URL.getQuery()", tok);
+    
+    auto it = url->properties.find("searchParams");
+    if (it == url->properties.end()) {
+        throw SwaziError("TypeError", "URL.getQuery() invalid URL object (missing searchParams)", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(it->second.value, "URL.getQuery()", tok);
     return native_searchParams_get({sp, args[1]}, nullptr, tok);
 }
 
 static Value native_url_deleteQuery(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    ObjectPtr url = std::get<ObjectPtr>(args[0]);
-    ObjectPtr sp = std::get<ObjectPtr>(url->properties["searchParams"].value);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.deleteQuery() requires a key argument", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(args[0], "URL.deleteQuery()", tok);
+    
+    auto it = url->properties.find("searchParams");
+    if (it == url->properties.end()) {
+        throw SwaziError("TypeError", "URL.deleteQuery() invalid URL object (missing searchParams)", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(it->second.value, "URL.deleteQuery()", tok);
     return native_searchParams_delete({sp, args[1]}, nullptr, tok);
 }
 
 static Value native_url_hasQuery(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    ObjectPtr url = std::get<ObjectPtr>(args[0]);
-    ObjectPtr sp = std::get<ObjectPtr>(url->properties["searchParams"].value);
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.hasQuery() requires a key argument", tok.loc);
+    }
+    
+    ObjectPtr url = safe_get_object(args[0], "URL.hasQuery()", tok);
+    
+    auto it = url->properties.find("searchParams");
+    if (it == url->properties.end()) {
+        throw SwaziError("TypeError", "URL.hasQuery() invalid URL object (missing searchParams)", tok.loc);
+    }
+    
+    ObjectPtr sp = safe_get_object(it->second.value, "URL.hasQuery()", tok);
     return native_searchParams_has({sp, args[1]}, nullptr, tok);
 }
+
+
+// ============================================
+// ========== PATH PARAMETER METHODS ==========
+// ============================================
+
+// Helper to split path into segments
+static std::vector<std::string> split_path_segments(const std::string& path) {
+    std::vector<std::string> segments;
+    std::string segment;
+    
+    for (char c : path) {
+        if (c == '/') {
+            if (!segment.empty()) {
+                segments.push_back(segment);
+                segment.clear();
+            }
+        } else {
+            segment += c;
+        }
+    }
+    if (!segment.empty()) {
+        segments.push_back(segment);
+    }
+    
+    return segments;
+}
+
+static Value native_url_getPathSegments(const std::vector<Value>& args, EnvPtr, const Token& tok) {
+    if (args.empty()) {
+        throw SwaziError("TypeError", "URL.getPathSegments() missing 'this' context", tok.loc);
+    }
+    
+    ObjectPtr obj = safe_get_object(args[0], "URL.getPathSegments()", tok);
+    std::string pathname = safe_get_string_property(obj, "pathname", "URL.getPathSegments()", tok);
+    
+    auto arr = std::make_shared<ArrayValue>();
+    std::vector<std::string> segments = split_path_segments(pathname);
+    
+    for (const auto& seg : segments) {
+        arr->elements.push_back(Value{seg});
+    }
+    
+    return Value{arr};
+}
+
+static Value native_url_getPathSegment(const std::vector<Value>& args, EnvPtr, const Token& tok) {
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.getPathSegment() requires an index argument", tok.loc);
+    }
+    
+    ObjectPtr obj = safe_get_object(args[0], "URL.getPathSegment()", tok);
+    std::string pathname = safe_get_string_property(obj, "pathname", "URL.getPathSegment()", tok);
+    
+    int index = static_cast<int>(value_to_number(args[1]));
+    std::vector<std::string> segments = split_path_segments(pathname);
+    
+    // Handle negative indices (from end)
+    if (index < 0) {
+        index = static_cast<int>(segments.size()) + index;
+    }
+    
+    if (index >= 0 && index < static_cast<int>(segments.size())) {
+        return Value{segments[index]};
+    }
+    
+    return std::monostate{};  // Return null if out of bounds
+}
+
+static Value native_url_matchPath(const std::vector<Value>& args, EnvPtr, const Token& tok) {
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "URL.matchPath() requires a pattern argument", tok.loc);
+    }
+    
+    ObjectPtr obj = safe_get_object(args[0], "URL.matchPath()", tok);
+    std::string pathname = safe_get_string_property(obj, "pathname", "URL.matchPath()", tok);
+    std::string pattern = value_to_string(args[1]);
+    
+    std::vector<std::string> pathSegs = split_path_segments(pathname);
+    std::vector<std::string> patternSegs = split_path_segments(pattern);
+    
+    // Must have same number of segments to match
+    if (pathSegs.size() != patternSegs.size()) {
+        return std::monostate{};  // No match
+    }
+    
+    // Match and extract params
+    auto result = std::make_shared<ObjectValue>();
+    
+    for (size_t i = 0; i < patternSegs.size(); ++i) {
+        const std::string& patSeg = patternSegs[i];
+        const std::string& pathSeg = pathSegs[i];
+        
+        if (!patSeg.empty() && patSeg[0] == ':') {
+            // This is a param placeholder - extract the name and value
+            std::string paramName = patSeg.substr(1);  // Remove ':'
+            if (paramName.empty()) {
+                throw SwaziError("TypeError", "URL.matchPath() invalid pattern: empty parameter name", tok.loc);
+            }
+            result->properties[paramName] = {Value{pathSeg}, false, false, false, tok};
+        } else if (!patSeg.empty() && patSeg[0] == '*') {
+            // Wildcard segment - matches anything, optionally named
+            if (patSeg.length() > 1) {
+                std::string paramName = patSeg.substr(1);  // Get name after '*'
+                result->properties[paramName] = {Value{pathSeg}, false, false, false, tok};
+            }
+            // If just '*', it matches but doesn't capture
+        } else {
+            // Literal segment - must match exactly (case-sensitive)
+            if (patSeg != pathSeg) {
+                return std::monostate{};  // No match
+            }
+        }
+    }
+    
+    return Value{result};
+}
+
+
+
 
 // ============================================
 // ========== INITIALIZATION ==================
@@ -592,6 +899,9 @@ void init_url_class(EnvPtr env) {
     add_native("URL_native_getQuery", native_url_getQuery);
     add_native("URL_native_deleteQuery", native_url_deleteQuery);
     add_native("URL_native_hasQuery", native_url_hasQuery);
+    add_native("URL_native_getPathSegments", native_url_getPathSegments);
+    add_native("URL_native_getPathSegment", native_url_getPathSegment);
+    add_native("URL_native_matchPath", native_url_matchPath);
     
     auto classDesc = std::make_shared<ClassValue>();
     classDesc->name = "URL";
@@ -675,6 +985,9 @@ void init_url_class(EnvPtr env) {
     add_method("getQuery", {"key"});
     add_method("deleteQuery", {"key"});
     add_method("hasQuery", {"key"});
+    add_method("getPathSegments");
+    add_method("getPathSegment", {"index"});
+    add_method("matchPath", {"pattern"});
     
     // Static methods
     classDesc->static_table = std::make_shared<ObjectValue>();
