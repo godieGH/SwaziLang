@@ -1229,6 +1229,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (prop == "niobject") return Value{
                 std::holds_alternative<ObjectPtr>(objVal)};
         }
+
+        if (std::holds_alternative<BufferPtr>(objVal)) {
+            BufferPtr buf = std::get<BufferPtr>(objVal);
+
+            // buf.size -> number of bytes
+            if (mem->property == "size") {
+                return Value{static_cast<double>(buf ? buf->data.size() : 0)};
+            }
+
+            // No other properties recognized on buffers yet
+            throw std::runtime_error(
+                "ReferenceError at " + mem->token.loc.to_string() +
+                "\nUnknown property '" + mem->property + "' on buffer." +
+                "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
+        }
+
         // String property 'herufi' (length)
         if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {
             const std::string& s = std::get<std::string>(objVal);
@@ -2093,6 +2109,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
         }
 
+        // Object properties & methods
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
             const std::string& prop = mem->property;

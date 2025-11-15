@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -55,6 +56,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<ClassPtr>(v)) return "muundo";
     if (std::holds_alternative<HoleValue>(v)) return "emptyhole";
     if (std::holds_alternative<PromisePtr>(v)) return "promise";
+    if (std::holds_alternative<BufferPtr>(v)) return "promise";
     return "unknown";
 }
 
@@ -210,6 +212,25 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             }
             return std::string("Promise {<REJECTED>}");
         }
+    }
+
+    if (std::holds_alternative<BufferPtr>(v)) {
+        BufferPtr buf = std::get<BufferPtr>(v);
+        if (!buf) return use_color ? (Color::bright_cyan + "<Buffer null>" + Color::reset) : "<Buffer null>";
+
+        std::ostringstream ss;
+        ss << "<" << (use_color ? (Color::bright_cyan + "Buffer " + Color::reset) : "Buffer ") << "[";
+        size_t show_max = std::min(buf->data.size(), size_t(16));
+        for (size_t i = 0; i < show_max; ++i) {
+            if (i > 0) ss << " ";
+            ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(buf->data[i]);
+        }
+        if (buf->data.size() > show_max) {
+            ss << " ... +" << (buf->data.size() - show_max) << " more";
+        }
+        ss << std::dec << "]>";
+
+        return ss.str();
     }
 
     if (std::holds_alternative<GeneratorPtr>(v)) {
@@ -915,6 +936,15 @@ std::string Evaluator::print_value(
         std::ostringstream ss;
         std::string reject_str = use_color ? (Color::bright_black + "<REJECTED>" + Color::reset) : "<REJECTED>";
         ss << Color::bright_blue << "Promise {" << Color::reset << (reject_str) << Color::bright_blue << "}" << Color::reset;
+        return ss.str();
+    }
+
+    if (std::holds_alternative<BufferPtr>(v)) {
+        BufferPtr buf = std::get<BufferPtr>(v);
+        if (!buf) return use_color ? (Color::bright_black + "<Buffer null>" + Color::reset) : "<Buffer null>";
+
+        std::ostringstream ss;
+        ss << "<" << (use_color ? (Color::bright_cyan + "Buffer " + Color::reset) : "Buffer ") << buf->data.size() << " bytes>";
         return ss.str();
     }
 

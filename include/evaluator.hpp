@@ -18,6 +18,18 @@ class Environment;
 // Forward-declare Scheduler so Evaluator can keep a pointer.
 class Scheduler;
 
+// BufferValue Forward-declarations
+struct BufferValue;
+using BufferPtr = std::shared_ptr<BufferValue>;
+
+struct BufferValue {
+    std::vector<uint8_t> data;  // Raw bytes
+
+    // Optionally adding encoding info if we want to support
+    // conversions to/from strings with specific encodings
+    std::string encoding;  // "utf8", "latin1", "binary", etc.
+};
+
 // Forward-declare GeneratorValue used for generator objects at runtime.
 struct GeneratorValue;
 using GeneratorPtr = std::shared_ptr<GeneratorValue>;
@@ -25,6 +37,8 @@ using GeneratorPtr = std::shared_ptr<GeneratorValue>;
 // Our language's value types
 struct FunctionValue;
 using FunctionPtr = std::shared_ptr<FunctionValue>;
+
+// Environment
 using EnvPtr = std::shared_ptr<Environment>;
 
 // Forward-declare ArrayValue so Value can hold a pointer to it (avoids recursive-instantiation issues)
@@ -59,7 +73,8 @@ using Value = std::variant<
     ObjectPtr,
     ClassPtr,
     PromisePtr,
-    GeneratorPtr>;
+    GeneratorPtr,
+    BufferPtr>;
 
 struct PropertyDescriptor {
     Value value;

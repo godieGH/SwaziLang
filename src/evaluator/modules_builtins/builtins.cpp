@@ -2080,3 +2080,423 @@ std::shared_ptr<ObjectValue> make_base64_exports(EnvPtr env) {
 
     return obj;
 }
+
+// ----------------- BUFFER module -----------------
+std::shared_ptr<ObjectValue> make_buffer_exports(EnvPtr env) {
+    auto obj = std::make_shared<ObjectValue>();
+
+    // buffer.alloc(size) -> Buffer
+    {
+        auto fn = make_native_fn("buffer.alloc", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<double>(args[0])) {
+                throw SwaziError("TypeError", "buffer.alloc requires a numeric size argument", token.loc);
+            }
+            
+            double size_d = std::get<double>(args[0]);
+            if (size_d < 0 || size_d > 1e9) {
+                throw SwaziError("RangeError", "Buffer size must be between 0 and 1e9", token.loc);
+            }
+            
+            size_t size = static_cast<size_t>(size_d);
+            auto buf = std::make_shared<BufferValue>();
+            buf->data.resize(size, 0);  // zero-filled
+            buf->encoding = "binary";
+            
+            return Value{buf}; }, env);
+        obj->properties["alloc"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.from(source, encoding?) -> Buffer
+    {
+        auto fn = make_native_fn("buffer.from", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "buffer.from requires at least one argument", token.loc);
+            }
+            
+            auto buf = std::make_shared<BufferValue>();
+            
+            // from array of numbers
+            if (std::holds_alternative<ArrayPtr>(args[0])) {
+                ArrayPtr arr = std::get<ArrayPtr>(args[0]);
+                buf->data.reserve(arr->elements.size());
+                
+                for (const auto& elem : arr->elements) {
+                    if (!std::holds_alternative<double>(elem)) {
+                        throw SwaziError("TypeError", "Array elements must be numbers (0-255)", token.loc);
+                    }
+                    double val = std::get<double>(elem);
+                    if (val < 0 || val > 255) {
+                        throw SwaziError("RangeError", "Byte values must be 0-255", token.loc);
+                    }
+                    buf->data.push_back(static_cast<uint8_t>(val));
+                }
+                buf->encoding = "binary";
+                return Value{buf};
+            }
+            
+            // from string
+            if (std::holds_alternative<std::string>(args[0])) {
+                std::string str = std::get<std::string>(args[0]);
+                std::string encoding = "utf8";
+                
+                if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) {
+                    encoding = std::get<std::string>(args[1]);
+                }
+                
+                // For now, only support utf8 (raw bytes)
+                if (encoding != "utf8" && encoding != "binary") {
+                    throw SwaziError("NotImplementedError", 
+                        "Only 'utf8' and 'binary' encodings are currently supported", token.loc);
+                }
+                
+                buf->data.assign(str.begin(), str.end());
+                buf->encoding = encoding;
+                return Value{buf};
+            }
+            
+            throw SwaziError("TypeError", "buffer.from requires array or string", token.loc); }, env);
+        obj->properties["from"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.isBuffer(val) -> bool
+    {
+        auto fn = make_native_fn("buffer.isBuffer", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+            if (args.empty()) return Value{false};
+            return Value{std::holds_alternative<BufferPtr>(args[0])}; }, env);
+        obj->properties["isBuffer"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.readUInt8(buf, offset) -> number
+    {
+        auto fn = make_native_fn("buffer.readUInt8", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.readUInt8 requires (buffer, offset)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            double offset_d = std::get<double>(args[1]);
+            size_t offset = static_cast<size_t>(offset_d);
+            
+            if (offset >= buf->data.size()) {
+                throw SwaziError("RangeError", "Offset out of bounds", token.loc);
+            }
+            
+            return Value{static_cast<double>(buf->data[offset])}; }, env);
+        obj->properties["readUInt8"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.writeUInt8(buf, offset, value) -> buffer
+    {
+        auto fn = make_native_fn("buffer.writeUInt8", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 3 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.writeUInt8 requires (buffer, offset, value)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            double value = std::get<double>(args[2]);
+            
+            if (offset >= buf->data.size()) {
+                throw SwaziError("RangeError", "Offset out of bounds", token.loc);
+            }
+            if (value < 0 || value > 255) {
+                throw SwaziError("RangeError", "Value must be 0-255", token.loc);
+            }
+            
+            buf->data[offset] = static_cast<uint8_t>(value);
+            return Value{buf}; }, env);
+        obj->properties["writeUInt8"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.readUInt16LE(buf, offset) -> number
+    {
+        auto fn = make_native_fn("buffer.readUInt16LE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.readUInt16LE requires (buffer, offset)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            
+            if (offset + 2 > buf->data.size()) {
+                throw SwaziError("RangeError", "Not enough bytes for UInt16", token.loc);
+            }
+            
+            uint16_t value = buf->data[offset] | (buf->data[offset + 1] << 8);
+            return Value{static_cast<double>(value)}; }, env);
+        obj->properties["readUInt16LE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.writeUInt16LE(buf, offset, value) -> buffer
+    {
+        auto fn = make_native_fn("buffer.writeUInt16LE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 3 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.writeUInt16LE requires (buffer, offset, value)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            uint16_t value = static_cast<uint16_t>(std::get<double>(args[2]));
+            
+            if (offset + 2 > buf->data.size()) {
+                throw SwaziError("RangeError", "Not enough space for UInt16", token.loc);
+            }
+            
+            buf->data[offset] = value & 0xFF;
+            buf->data[offset + 1] = (value >> 8) & 0xFF;
+            return Value{buf}; }, env);
+        obj->properties["writeUInt16LE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.readUInt32BE(buf, offset) -> number
+    {
+        auto fn = make_native_fn("buffer.readUInt32BE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.readUInt32BE requires (buffer, offset)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            
+            if (offset + 4 > buf->data.size()) {
+                throw SwaziError("RangeError", "Not enough bytes for UInt32", token.loc);
+            }
+            
+            uint32_t value = (buf->data[offset] << 24) | 
+                           (buf->data[offset + 1] << 16) |
+                           (buf->data[offset + 2] << 8) | 
+                           buf->data[offset + 3];
+            return Value{static_cast<double>(value)}; }, env);
+        obj->properties["readUInt32BE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.writeUInt32BE(buf, offset, value) -> buffer
+    {
+        auto fn = make_native_fn("buffer.writeUInt32BE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 3 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.writeUInt32BE requires (buffer, offset, value)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            uint32_t value = static_cast<uint32_t>(std::get<double>(args[2]));
+            
+            if (offset + 4 > buf->data.size()) {
+                throw SwaziError("RangeError", "Not enough space for UInt32", token.loc);
+            }
+            
+            buf->data[offset] = (value >> 24) & 0xFF;
+            buf->data[offset + 1] = (value >> 16) & 0xFF;
+            buf->data[offset + 2] = (value >> 8) & 0xFF;
+            buf->data[offset + 3] = value & 0xFF;
+            return Value{buf}; }, env);
+        obj->properties["writeUInt32BE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.readFloat32(buf, offset) -> number
+    {
+        auto fn = make_native_fn("buffer.readFloat32", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.readFloat32 requires (buffer, offset)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            
+            if (offset + 4 > buf->data.size()) {
+                throw SwaziError("RangeError", "Not enough bytes for Float32", token.loc);
+            }
+            
+            float value;
+            std::memcpy(&value, &buf->data[offset], sizeof(float));
+            return Value{static_cast<double>(value)}; }, env);
+        obj->properties["readFloat32"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.writeFloat32(buf, offset, value) -> buffer
+    {
+        auto fn = make_native_fn("buffer.writeFloat32", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 3 || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.writeFloat32 requires (buffer, offset, value)", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+            float value = static_cast<float>(std::get<double>(args[2]));
+            
+            if (offset + 4 > buf->data.size()) {
+                throw SwaziError("RangeError", "Not enough space for Float32", token.loc);
+            }
+            
+            std::memcpy(&buf->data[offset], &value, sizeof(float));
+            return Value{buf}; }, env);
+        obj->properties["writeFloat32"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.slice(buf, start, end?) -> Buffer
+    {
+        auto fn = make_native_fn("buffer.slice", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.slice requires a buffer", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            size_t start = 0;
+            size_t end = buf->data.size();
+            
+            if (args.size() >= 2) {
+                double start_d = std::get<double>(args[1]);
+                start = static_cast<size_t>(std::max(0.0, start_d));
+            }
+            if (args.size() >= 3) {
+                double end_d = std::get<double>(args[2]);
+                end = static_cast<size_t>(std::max(0.0, end_d));
+            }
+            
+            start = std::min(start, buf->data.size());
+            end = std::min(end, buf->data.size());
+            if (start > end) start = end;
+            
+            auto newBuf = std::make_shared<BufferValue>();
+            newBuf->data.assign(buf->data.begin() + start, buf->data.begin() + end);
+            newBuf->encoding = buf->encoding;
+            
+            return Value{newBuf}; }, env);
+        obj->properties["slice"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.concat(array_of_buffers) -> Buffer
+    {
+        auto fn = make_native_fn("buffer.concat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<ArrayPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.concat requires an array of buffers", token.loc);
+            }
+            
+            ArrayPtr arr = std::get<ArrayPtr>(args[0]);
+            auto result = std::make_shared<BufferValue>();
+            result->encoding = "binary";
+            
+            for (const auto& elem : arr->elements) {
+                if (!std::holds_alternative<BufferPtr>(elem)) {
+                    throw SwaziError("TypeError", "All array elements must be buffers", token.loc);
+                }
+                BufferPtr buf = std::get<BufferPtr>(elem);
+                result->data.insert(result->data.end(), buf->data.begin(), buf->data.end());
+            }
+            
+            return Value{result}; }, env);
+        obj->properties["concat"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.toString(buf, encoding="utf8") -> string
+    {
+        auto fn = make_native_fn("buffer.toString", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.toString requires a buffer", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            std::string encoding = "utf8";
+            
+            if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) {
+                encoding = std::get<std::string>(args[1]);
+            }
+            
+            if (encoding != "utf8" && encoding != "binary") {
+                throw SwaziError("NotImplementedError", 
+                    "Only 'utf8' and 'binary' encodings supported", token.loc);
+            }
+            
+            return Value{std::string(buf->data.begin(), buf->data.end())}; }, env);
+        obj->properties["toString"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.toBase64(buf) -> string
+    {
+        auto fn = make_native_fn("buffer.toBase64", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.toBase64 requires a buffer", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            
+            // Base64 encoding table
+            static const char* base64_chars =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                "abcdefghijklmnopqrstuvwxyz"
+                "0123456789+/";
+            
+            std::string encoded;
+            encoded.reserve(((buf->data.size() + 2) / 3) * 4);
+            
+            for (size_t i = 0; i < buf->data.size(); i += 3) {
+                uint32_t octet_a = i < buf->data.size() ? buf->data[i] : 0;
+                uint32_t octet_b = i + 1 < buf->data.size() ? buf->data[i + 1] : 0;
+                uint32_t octet_c = i + 2 < buf->data.size() ? buf->data[i + 2] : 0;
+                
+                uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+                
+                encoded += base64_chars[(triple >> 18) & 0x3F];
+                encoded += base64_chars[(triple >> 12) & 0x3F];
+                encoded += (i + 1 < buf->data.size()) ? base64_chars[(triple >> 6) & 0x3F] : '=';
+                encoded += (i + 2 < buf->data.size()) ? base64_chars[triple & 0x3F] : '=';
+            }
+            
+            return Value{encoded}; }, env);
+        obj->properties["toBase64"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.fromBase64(str) -> Buffer
+    {
+        auto fn = make_native_fn("buffer.fromBase64", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0])) {
+                throw SwaziError("TypeError", "buffer.fromBase64 requires a string", token.loc);
+            }
+            
+            std::string input = std::get<std::string>(args[0]);
+            
+            // Build reverse lookup table
+            static int decode_table[256];
+            static bool table_initialized = false;
+            if (!table_initialized) {
+                for (int i = 0; i < 256; i++) decode_table[i] = -1;
+                const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                for (int i = 0; i < 64; i++) {
+                    decode_table[static_cast<unsigned char>(base64_chars[i])] = i;
+                }
+                decode_table['='] = 0;
+                table_initialized = true;
+            }
+            
+            auto buf = std::make_shared<BufferValue>();
+            buf->data.reserve((input.size() / 4) * 3);
+            buf->encoding = "binary";
+            
+            uint32_t buffer = 0;
+            int bits_collected = 0;
+            
+            for (char c : input) {
+                if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+                
+                int value = decode_table[static_cast<unsigned char>(c)];
+                if (value == -1) {
+                    throw SwaziError("RuntimeError", "Invalid base64 character", token.loc);
+                }
+                
+                if (c == '=') break;
+                
+                buffer = (buffer << 6) | value;
+                bits_collected += 6;
+                
+                if (bits_collected >= 8) {
+                    bits_collected -= 8;
+                    buf->data.push_back(static_cast<uint8_t>((buffer >> bits_collected) & 0xFF));
+                }
+            }
+            
+            return Value{buf}; }, env);
+        obj->properties["fromBase64"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    return obj;
+}
