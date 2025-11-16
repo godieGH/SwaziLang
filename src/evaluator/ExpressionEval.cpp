@@ -1163,22 +1163,27 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         BufferPtr buf = std::get<BufferPtr>(objVal);
                         if (!buf) return Value{std::string()};
 
-                        // default encoding: try buffer->encoding if present, otherwise utf8
-                        std::string enc = buf->encoding.empty() ? "utf8" : buf->encoding;
+                        // Default to utf8 for string conversion (even if buffer stores "binary" internally)
+                        std::string enc = "utf8";
                         if (!args.empty() && std::holds_alternative<std::string>(args[0])) {
                             enc = std::get<std::string>(args[0]);
                         }
                         std::transform(enc.begin(), enc.end(), enc.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-                        if (enc == "utf8" || enc == "utf-8") {
+                        // utf8 / binary: interpret raw bytes as string (binary is treated same as utf8)
+                        if (enc == "utf8" || enc == "utf-8" || enc == "binary") {
                             return Value{std::string(buf->data.begin(), buf->data.end())};
                         }
+
+                        // latin1 / iso-8859-1: map bytes 1:1 into a std::string
                         if (enc == "latin1" || enc == "iso-8859-1" || enc == "latin-1") {
                             std::string out;
                             out.reserve(buf->data.size());
                             for (uint8_t b : buf->data) out.push_back(static_cast<char>(b));
                             return Value{out};
                         }
+
+                        // hex: produce lowercase hex string
                         if (enc == "hex") {
                             static const char* hex_digits = "0123456789abcdef";
                             std::string out;
@@ -1189,6 +1194,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             }
                             return Value{out};
                         }
+
+                        // base64: simple encoder
                         if (enc == "base64") {
                             static const char* b64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
                             const uint8_t* data = buf->data.data();
@@ -1225,7 +1232,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
-                            "\nUnsupported buffer encoding '" + enc + "'. Supported encodings: utf8, latin1, hex, base64." +
+                            "\nUnsupported buffer encoding '" + enc + "'. Supported encodings: utf8, binary, hex, base64." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
 
@@ -1260,8 +1267,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return make_fn();
         }
 
-        /* val.type deprecated users should use ainaya <operand> or val.aina
-         */
         // aina -> type name
         if (prop == "aina") {
             return type_name(objVal);
@@ -1283,9 +1288,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 std::holds_alternative<ObjectPtr>(objVal)};
         }
 
-        // with the following code to add a buffer.toStr(...) method supporting different encodings
-        // (utf8, latin1, hex, base64). Insert in place of the old block that begins with:
-
         if (std::holds_alternative<BufferPtr>(objVal)) {
             BufferPtr buf = std::get<BufferPtr>(objVal);
 
@@ -1299,8 +1301,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (!buf) return Value{std::string()};
 
-                    // default encoding: try to respect the buffer's encoding if available, otherwise utf8
-                    std::string enc = buf->encoding.empty() ? "utf8" : buf->encoding;
+                    // Default to utf8 for string conversion (even if buffer stores "binary" internally)
+                    std::string enc = "utf8";
                     if (!args.empty() && std::holds_alternative<std::string>(args[0])) {
                         enc = std::get<std::string>(args[0]);
                     }
@@ -1308,8 +1310,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     // lowercase the encoding for simple comparison
                     std::transform(enc.begin(), enc.end(), enc.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-                    // utf8 / default: interpret raw bytes as UTF-8 string (no validation here)
-                    if (enc == "utf8" || enc == "utf-8") {
+                    // utf8 / binary: interpret raw bytes as string (binary is treated same as utf8)
+                    if (enc == "utf8" || enc == "utf-8" || enc == "binary") {
                         return Value{std::string(buf->data.begin(), buf->data.end())};
                     }
 
@@ -1371,7 +1373,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     // unknown encoding
                     throw std::runtime_error(
                         "TypeError at " + token.loc.to_string() +
-                        "\nUnsupported buffer encoding '" + enc + "'. Supported encodings: utf8, latin1, hex, base64." +
+                        "\nUnsupported buffer encoding '" + enc + "'. Supported encodings: utf8, binary, hex, base64." +
                         "\n --> Traced at:\n" + token.loc.get_line_trace());
                 };
 
