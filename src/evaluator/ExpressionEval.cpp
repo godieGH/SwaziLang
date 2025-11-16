@@ -1097,96 +1097,168 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // --- Universal properties ---
         const std::string& prop = mem->property;
 
-        if (prop == "toStr") {
-            auto make_fn = [this, objVal, env, mem]() -> Value {
-                // Create a native function that converts the value to string
-                auto native_impl = [this, objVal](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                    // Handle numbers with optional radix parameter
-                    if (std::holds_alternative<double>(objVal)) {
-                        double num = std::get<double>(objVal);
+if (prop == "toStr") {
+    auto make_fn = [this, objVal, env, mem]() -> Value {
+        // Create a native function that converts the value to string
+        auto native_impl = [this, objVal](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            // Handle numbers with optional radix parameter
+            if (std::holds_alternative<double>(objVal)) {
+                double num = std::get<double>(objVal);
 
-                        // Check if radix argument is provided
-                        if (!args.empty()) {
-                            int radix = static_cast<int>(to_number(args[0], token));
+                // Check if radix argument is provided
+                if (!args.empty()) {
+                    int radix = static_cast<int>(to_number(args[0], token));
 
-                            // Validate radix range (2-36, like JavaScript)
-                            if (radix < 2 || radix > 36) {
-                                throw std::runtime_error(
-                                    "RangeError at " + token.loc.to_string() +
-                                    "\nRadix must be between 2 and 36. Got: " + std::to_string(radix) +
-                                    "\n --> Traced at:\n" + token.loc.get_line_trace());
-                            }
-
-                            // Only support radix conversion for integers
-                            if (std::floor(num) != num) {
-                                throw std::runtime_error(
-                                    "TypeError at " + token.loc.to_string() +
-                                    "\nRadix conversion only works with integers. Got: " + std::to_string(num) +
-                                    "\n --> Traced at:\n" + token.loc.get_line_trace());
-                            }
-
-                            // Convert to integer and then to string with radix
-                            long long intNum = static_cast<long long>(num);
-                            bool negative = intNum < 0;
-                            if (negative) intNum = -intNum;
-
-                            std::string result;
-                            const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-                            if (intNum == 0) {
-                                result = "0";
-                            } else {
-                                while (intNum > 0) {
-                                    result = digits[intNum % radix] + result;
-                                    intNum /= radix;
-                                }
-                            }
-
-                            if (negative) result = "-" + result;
-                            return Value{result};
-                        }
-
-                        // No radix provided, use default string conversion
-                        return Value{to_string_value(objVal, true)};
+                    // Validate radix range (2-36, like JavaScript)
+                    if (radix < 2 || radix > 36) {
+                        throw std::runtime_error(
+                            "RangeError at " + token.loc.to_string() +
+                            "\nRadix must be between 2 and 36. Got: " + std::to_string(radix) +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
 
-                    // Handle other simple types (no radix support)
-                    if (std::holds_alternative<std::monostate>(objVal) ||
-                        std::holds_alternative<std::string>(objVal) ||
-                        std::holds_alternative<bool>(objVal)) {
-                        return Value{to_string_value(objVal, true)};
+                    // Only support radix conversion for integers
+                    if (std::floor(num) != num) {
+                        throw std::runtime_error(
+                            "TypeError at " + token.loc.to_string() +
+                            "\nRadix conversion only works with integers. Got: " + std::to_string(num) +
+                            "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
 
-                    // Handle complex types - return type representation
-                    std::string type_repr;
-                    if (std::holds_alternative<ArrayPtr>(objVal)) {
-                        type_repr = "[orodha]";
-                    } else if (std::holds_alternative<ObjectPtr>(objVal)) {
-                        type_repr = "[object]";
-                    } else if (std::holds_alternative<FunctionPtr>(objVal)) {
-                        FunctionPtr fn = std::get<FunctionPtr>(objVal);
-                        std::string name = fn->name.empty() ? "<lambda>" : fn->name;
-                        type_repr = "[kazi " + name + "]";
-                    } else if (std::holds_alternative<ClassPtr>(objVal)) {
-                        ClassPtr cp = std::get<ClassPtr>(objVal);
-                        std::string name = cp ? cp->name : "<null>";
-                        type_repr = "[muundo " + name + "]";
+                    // Convert to integer and then to string with radix
+                    long long intNum = static_cast<long long>(num);
+                    bool negative = intNum < 0;
+                    if (negative) intNum = -intNum;
+
+                    std::string result;
+                    const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+                    if (intNum == 0) {
+                        result = "0";
                     } else {
-                        type_repr = "[unknown]";
+                        while (intNum > 0) {
+                            result = digits[intNum % radix] + result;
+                            intNum /= radix;
+                        }
                     }
 
-                    return Value{type_repr};
-                };
+                    if (negative) result = "-" + result;
+                    return Value{result};
+                }
 
-                auto fn = std::make_shared<FunctionValue>(
-                    std::string("native:universal.toStr"),
-                    native_impl,
-                    env,
-                    mem->token);
-                return Value{fn};
-            };
-            return make_fn();
-        }
+                // No radix provided, use default string conversion
+                return Value{to_string_value(objVal, true)};
+            }
+
+            // Handle other simple types (no radix support)
+            if (std::holds_alternative<std::monostate>(objVal) ||
+                std::holds_alternative<std::string>(objVal) ||
+                std::holds_alternative<bool>(objVal)) {
+                return Value{to_string_value(objVal, true)};
+            }
+
+            // If this is a Buffer, delegate to buffer-string conversion so both
+            // universal.toStr and buffer.toStr behave the same.
+            if (std::holds_alternative<BufferPtr>(objVal)) {
+                BufferPtr buf = std::get<BufferPtr>(objVal);
+                if (!buf) return Value{std::string()};
+
+                // default encoding: try buffer->encoding if present, otherwise utf8
+                std::string enc = buf->encoding.empty() ? "utf8" : buf->encoding;
+                if (!args.empty() && std::holds_alternative<std::string>(args[0])) {
+                    enc = std::get<std::string>(args[0]);
+                }
+                std::transform(enc.begin(), enc.end(), enc.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                if (enc == "utf8" || enc == "utf-8") {
+                    return Value{std::string(buf->data.begin(), buf->data.end())};
+                }
+                if (enc == "latin1" || enc == "iso-8859-1" || enc == "latin-1") {
+                    std::string out;
+                    out.reserve(buf->data.size());
+                    for (uint8_t b : buf->data) out.push_back(static_cast<char>(b));
+                    return Value{out};
+                }
+                if (enc == "hex") {
+                    static const char* hex_digits = "0123456789abcdef";
+                    std::string out;
+                    out.reserve(buf->data.size() * 2);
+                    for (uint8_t b : buf->data) {
+                        out.push_back(hex_digits[(b >> 4) & 0xF]);
+                        out.push_back(hex_digits[b & 0xF]);
+                    }
+                    return Value{out};
+                }
+                if (enc == "base64") {
+                    static const char* b64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                    const uint8_t* data = buf->data.data();
+                    size_t len = buf->data.size();
+                    std::string out;
+                    out.reserve(((len + 2) / 3) * 4);
+
+                    size_t i = 0;
+                    while (i + 2 < len) {
+                        uint32_t triple = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8) | uint32_t(data[i + 2]);
+                        out.push_back(b64_table[(triple >> 18) & 0x3F]);
+                        out.push_back(b64_table[(triple >> 12) & 0x3F]);
+                        out.push_back(b64_table[(triple >> 6) & 0x3F]);
+                        out.push_back(b64_table[triple & 0x3F]);
+                        i += 3;
+                    }
+
+                    if (i < len) {
+                        uint32_t triple = uint32_t(data[i]) << 16;
+                        out.push_back(b64_table[(triple >> 18) & 0x3F]);
+                        if (i + 1 < len) {
+                            triple |= uint32_t(data[i + 1]) << 8;
+                            out.push_back(b64_table[(triple >> 12) & 0x3F]);
+                            out.push_back(b64_table[(triple >> 6) & 0x3F]);
+                            out.push_back('=');
+                        } else {
+                            out.push_back(b64_table[(triple >> 12) & 0x3F]);
+                            out.push_back('=');
+                            out.push_back('=');
+                        }
+                    }
+                    return Value{out};
+                }
+
+                throw std::runtime_error(
+                    "TypeError at " + token.loc.to_string() +
+                    "\nUnsupported buffer encoding '" + enc + "'. Supported encodings: utf8, latin1, hex, base64." +
+                    "\n --> Traced at:\n" + token.loc.get_line_trace());
+            }
+
+            // Handle complex types - return type representation
+            std::string type_repr;
+            if (std::holds_alternative<ArrayPtr>(objVal)) {
+                type_repr = "[orodha]";
+            } else if (std::holds_alternative<ObjectPtr>(objVal)) {
+                type_repr = "[object]";
+            } else if (std::holds_alternative<FunctionPtr>(objVal)) {
+                FunctionPtr fn = std::get<FunctionPtr>(objVal);
+                std::string name = fn->name.empty() ? "<lambda>" : fn->name;
+                type_repr = "[kazi " + name + "]";
+            } else if (std::holds_alternative<ClassPtr>(objVal)) {
+                ClassPtr cp = std::get<ClassPtr>(objVal);
+                std::string name = cp ? cp->name : "<null>";
+                type_repr = "[muundo " + name + "]";
+            } else {
+                type_repr = "[unknown]";
+            }
+
+            return Value{type_repr};
+        };
+
+        auto fn = std::make_shared<FunctionValue>(
+            std::string("native:universal.toStr"),
+            native_impl,
+            env,
+            mem->token);
+        return Value{fn};
+    };
+    return make_fn();
+}
 
         /* val.type deprecated users should use ainaya <operand> or val.aina
          */
@@ -1211,20 +1283,107 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 std::holds_alternative<ObjectPtr>(objVal)};
         }
 
-        if (std::holds_alternative<BufferPtr>(objVal)) {
-            BufferPtr buf = std::get<BufferPtr>(objVal);
+// with the following code to add a buffer.toStr(...) method supporting different encodings
+// (utf8, latin1, hex, base64). Insert in place of the old block that begins with:
 
-            // buf.size -> number of bytes
-            if (mem->property == "size") {
-                return Value{static_cast<double>(buf ? buf->data.size() : 0)};
+if (std::holds_alternative<BufferPtr>(objVal)) {
+    BufferPtr buf = std::get<BufferPtr>(objVal);
+
+    // buf.size -> number of bytes
+    if (mem->property == "size") {
+        return Value{static_cast<double>(buf ? buf->data.size() : 0)};
+    }
+
+    // buffer.toStr([encoding]) -> string
+    if (mem->property == "toStr" || mem->property == "toString") {
+        auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (!buf) return Value{std::string()};
+
+            // default encoding: try to respect the buffer's encoding if available, otherwise utf8
+            std::string enc = buf->encoding.empty() ? "utf8" : buf->encoding;
+            if (!args.empty() && std::holds_alternative<std::string>(args[0])) {
+                enc = std::get<std::string>(args[0]);
             }
 
-            // No other properties recognized on buffers yet
+            // lowercase the encoding for simple comparison
+            std::transform(enc.begin(), enc.end(), enc.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            // utf8 / default: interpret raw bytes as UTF-8 string (no validation here)
+            if (enc == "utf8" || enc == "utf-8") {
+                return Value{std::string(buf->data.begin(), buf->data.end())};
+            }
+
+            // latin1 / iso-8859-1: map bytes 1:1 into a std::string
+            if (enc == "latin1" || enc == "iso-8859-1" || enc == "latin-1") {
+                std::string out;
+                out.reserve(buf->data.size());
+                for (uint8_t b : buf->data) out.push_back(static_cast<char>(b));
+                return Value{out};
+            }
+
+            // hex: produce lowercase hex string
+            if (enc == "hex") {
+                static const char* hex_digits = "0123456789abcdef";
+                std::string out;
+                out.reserve(buf->data.size() * 2);
+                for (uint8_t b : buf->data) {
+                    out.push_back(hex_digits[(b >> 4) & 0xF]);
+                    out.push_back(hex_digits[b & 0xF]);
+                }
+                return Value{out};
+            }
+
+            // base64: simple encoder
+            if (enc == "base64") {
+                static const char* b64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                const uint8_t* data = buf->data.data();
+                size_t len = buf->data.size();
+                std::string out;
+                out.reserve(((len + 2) / 3) * 4);
+
+                size_t i = 0;
+                while (i + 2 < len) {
+                    uint32_t triple = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8) | uint32_t(data[i + 2]);
+                    out.push_back(b64_table[(triple >> 18) & 0x3F]);
+                    out.push_back(b64_table[(triple >> 12) & 0x3F]);
+                    out.push_back(b64_table[(triple >> 6) & 0x3F]);
+                    out.push_back(b64_table[triple & 0x3F]);
+                    i += 3;
+                }
+
+                if (i < len) {
+                    uint32_t triple = uint32_t(data[i]) << 16;
+                    out.push_back(b64_table[(triple >> 18) & 0x3F]);
+                    if (i + 1 < len) {
+                        triple |= uint32_t(data[i + 1]) << 8;
+                        out.push_back(b64_table[(triple >> 12) & 0x3F]);
+                        out.push_back(b64_table[(triple >> 6) & 0x3F]);
+                        out.push_back('=');
+                    } else {
+                        out.push_back(b64_table[(triple >> 12) & 0x3F]);
+                        out.push_back('=');
+                        out.push_back('=');
+                    }
+                }
+                return Value{out};
+            }
+
+            // unknown encoding
             throw std::runtime_error(
-                "ReferenceError at " + mem->token.loc.to_string() +
-                "\nUnknown property '" + mem->property + "' on buffer." +
-                "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
-        }
+                "TypeError at " + token.loc.to_string() +
+                "\nUnsupported buffer encoding '" + enc + "'. Supported encodings: utf8, latin1, hex, base64." +
+                "\n --> Traced at:\n" + token.loc.get_line_trace());
+        };
+
+        return Value{std::make_shared<FunctionValue>(std::string("native:buffer.toStr"), native_impl, env, mem->token)};
+    }
+
+    // No other properties recognized on buffers yet
+    throw std::runtime_error(
+        "ReferenceError at " + mem->token.loc.to_string() +
+        "\nUnknown property '" + mem->property + "' on buffer." +
+        "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
+}
 
         // File methods
         if (std::holds_alternative<FilePtr>(objVal)) {
