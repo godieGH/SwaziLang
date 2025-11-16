@@ -37,6 +37,7 @@ class Lexer {
     void add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length = -1);
 
     void scan_token(std::vector<Token>& out);
+    bool handle_non_decimal_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
     void scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
     void scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
 

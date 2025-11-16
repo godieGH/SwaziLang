@@ -216,6 +216,152 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
     throw std::runtime_error(ss.str());
 }
 
+
+// Returns true when it recognized & emitted a prefixed non-decimal literal; false otherwise.
+// On malformed literals it throws std::runtime_error with a helpful message.
+bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
+    // must start with '0' followed by base indicator
+    if (peek() != '0') return false;
+    char p = peek_next();
+    int base = 0;
+    if (p == 'b' || p == 'B') base = 2;
+    else if (p == 'o' || p == 'O') base = 8;
+    else if (p == 'x' || p == 'X') base = 16;
+    else return false;
+
+    // consume '0' and the prefix letter
+    advance(); // '0'
+    advance(); // prefix
+
+    // collect raw digits (may include underscores)
+    std::string raw_digits;
+    while (!eof()) {
+        char c = peek();
+        // digits and underscores allowed; stop on first char that isn't digit/underscore/alpha(for hex)
+        if (c == '_') {
+            raw_digits.push_back(advance());
+            continue;
+        }
+        if (base == 2) {
+            if (c == '0' || c == '1') {
+                raw_digits.push_back(advance());
+                continue;
+            }
+            break;
+        } else if (base == 8) {
+            if (c >= '0' && c <= '7') {
+                raw_digits.push_back(advance());
+                continue;
+            }
+            break;
+        } else { // base == 16
+            if (std::isxdigit((unsigned char)c)) {
+                raw_digits.push_back(advance());
+                continue;
+            }
+            break;
+        }
+    }
+
+    int tok_length = static_cast<int>(i - start_index); // raw source length (prefix + digits + underscores)
+
+    // helper to throw diagnostic similar to template error style (with trace line + caret/tilde)
+    auto throw_diag = [&](const std::string& headline) -> void {
+        std::ostringstream ss;
+        ss << headline << " in file '" << (filename.empty() ? "<repl>" : filename)
+           << "' starting at line " << tok_line << ", col " << tok_col;
+        std::stringstream sd;
+        sd << " * " << tok_line << " | ";
+        ss << "\n --> Traced at: \n"
+           << sd.str() << linestr[tok_line] << "\n"
+           // mark the full raw token span with tildes and a caret at the end for visibility
+           << std::string(sd.str().size() + std::max(0, tok_col - 1), ' ')
+           << std::string(std::max(1, tok_length), '~') << "^";
+        throw std::runtime_error(ss.str());
+    };
+
+    // validation: must have at least one digit (ignore underscores)
+    std::string digits_no_unders;
+    for (char ch : raw_digits)
+        if (ch != '_') digits_no_unders.push_back(ch);
+    if (digits_no_unders.empty()) {
+        std::ostringstream head;
+        head << "Invalid numeric literal (missing digits after '0" << (char)std::toupper((unsigned char)p) << "')";
+        throw_diag(head.str());
+    }
+
+    // validate underscore usage: not leading, not trailing, no consecutive underscores
+    if (!raw_digits.empty() && (raw_digits.front() == '_' || raw_digits.back() == '_')) {
+        std::ostringstream head;
+        head << "Invalid numeric separator placement in literal (leading/trailing underscore not allowed)";
+        throw_diag(head.str());
+    }
+    for (size_t k = 1; k < raw_digits.size(); ++k) {
+        if (raw_digits[k] == '_' && raw_digits[k - 1] == '_') {
+            std::ostringstream head;
+            head << "Invalid numeric separator (consecutive underscores) in literal";
+            throw_diag(head.str());
+        }
+    }
+
+    // validate characters against base (defensive check)
+    for (char ch : digits_no_unders) {
+        bool ok = false;
+        if (base == 2) ok = (ch == '0' || ch == '1');
+        else if (base == 8) ok = (ch >= '0' && ch <= '7');
+        else ok = std::isxdigit((unsigned char)ch);
+        if (!ok) {
+            std::ostringstream head;
+            head << "Invalid digit '" << ch << "' for base-" << base << " literal";
+            throw_diag(head.str());
+        }
+    }
+
+    // Convert base-N digit string to decimal string using string-based big-integer multiply-add:
+    auto mul_decimal_by_small = [](std::string &dec, int m) {
+        // dec is decimal ASCII digits, most-significant-first.
+        int carry = 0;
+        for (int i = (int)dec.size() - 1; i >= 0; --i) {
+            int d = dec[i] - '0';
+            long long prod = 1LL * d * m + carry;
+            dec[i] = char('0' + (prod % 10));
+            carry = (int)(prod / 10);
+        }
+        while (carry > 0) {
+            char digit = char('0' + (carry % 10));
+            dec.insert(dec.begin(), digit);
+            carry /= 10;
+        }
+    };
+    auto add_small_to_decimal = [](std::string &dec, int add) {
+        int carry = add;
+        for (int i = (int)dec.size() - 1; i >= 0 && carry > 0; --i) {
+            int d = dec[i] - '0';
+            int sum = d + carry;
+            dec[i] = char('0' + (sum % 10));
+            carry = sum / 10;
+        }
+        while (carry > 0) {
+            char digit = char('0' + (carry % 10));
+            dec.insert(dec.begin(), digit);
+            carry /= 10;
+        }
+    };
+
+    std::string decimal = "0";
+    for (char ch : digits_no_unders) {
+        int digit_val = 0;
+        if (ch >= '0' && ch <= '9') digit_val = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') digit_val = 10 + (ch - 'a');
+        else if (ch >= 'A' && ch <= 'F') digit_val = 10 + (ch - 'A');
+        // multiply decimal by base then add digit_val
+        mul_decimal_by_small(decimal, base);
+        add_small_to_decimal(decimal, digit_val);
+    }
+
+    add_token(out, TokenType::NUMBER, decimal, tok_line, tok_col, tok_length);
+    return true;
+}
 void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string val;
     bool seen_dot = false;
@@ -823,10 +969,15 @@ void Lexer::scan_token(std::vector<Token>& out) {
         default:
             break;
     }
-
-    // number
+    
+    // number (decimal or prefixed non-decimal)
     if (std::isdigit((unsigned char)c)) {
         size_t start_index = i;
+        // Attempt 0b/0o/0x prefix handling (lexer-level). If handled, it already emitted a NUMBER.
+        if (c == '0' && handle_non_decimal_number(out, line, col, start_index)) {
+            return;
+        }
+        // otherwise fall back to existing decimal/floating scanner
         scan_number(out, line, col, start_index);
         return;
     }
