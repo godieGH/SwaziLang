@@ -216,7 +216,6 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
     throw std::runtime_error(ss.str());
 }
 
-
 // Returns true when it recognized & emitted a prefixed non-decimal literal; false otherwise.
 // On malformed literals it throws std::runtime_error with a helpful message.
 bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
@@ -224,14 +223,18 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
     if (peek() != '0') return false;
     char p = peek_next();
     int base = 0;
-    if (p == 'b' || p == 'B') base = 2;
-    else if (p == 'o' || p == 'O') base = 8;
-    else if (p == 'x' || p == 'X') base = 16;
-    else return false;
+    if (p == 'b' || p == 'B')
+        base = 2;
+    else if (p == 'o' || p == 'O')
+        base = 8;
+    else if (p == 'x' || p == 'X')
+        base = 16;
+    else
+        return false;
 
     // consume '0' and the prefix letter
-    advance(); // '0'
-    advance(); // prefix
+    advance();  // '0'
+    advance();  // prefix
 
     // collect raw digits (may include underscores)
     std::string raw_digits;
@@ -254,7 +257,7 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
                 continue;
             }
             break;
-        } else { // base == 16
+        } else {  // base == 16
             if (std::isxdigit((unsigned char)c)) {
                 raw_digits.push_back(advance());
                 continue;
@@ -263,7 +266,7 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
         }
     }
 
-    int tok_length = static_cast<int>(i - start_index); // raw source length (prefix + digits + underscores)
+    int tok_length = static_cast<int>(i - start_index);  // raw source length (prefix + digits + underscores)
 
     // helper to throw diagnostic similar to template error style (with trace line + caret/tilde)
     auto throw_diag = [&](const std::string& headline) -> void {
@@ -307,9 +310,12 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
     // validate characters against base (defensive check)
     for (char ch : digits_no_unders) {
         bool ok = false;
-        if (base == 2) ok = (ch == '0' || ch == '1');
-        else if (base == 8) ok = (ch >= '0' && ch <= '7');
-        else ok = std::isxdigit((unsigned char)ch);
+        if (base == 2)
+            ok = (ch == '0' || ch == '1');
+        else if (base == 8)
+            ok = (ch >= '0' && ch <= '7');
+        else
+            ok = std::isxdigit((unsigned char)ch);
         if (!ok) {
             std::ostringstream head;
             head << "Invalid digit '" << ch << "' for base-" << base << " literal";
@@ -318,7 +324,7 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
     }
 
     // Convert base-N digit string to decimal string using string-based big-integer multiply-add:
-    auto mul_decimal_by_small = [](std::string &dec, int m) {
+    auto mul_decimal_by_small = [](std::string& dec, int m) {
         // dec is decimal ASCII digits, most-significant-first.
         int carry = 0;
         for (int i = (int)dec.size() - 1; i >= 0; --i) {
@@ -333,7 +339,7 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
             carry /= 10;
         }
     };
-    auto add_small_to_decimal = [](std::string &dec, int add) {
+    auto add_small_to_decimal = [](std::string& dec, int add) {
         int carry = add;
         for (int i = (int)dec.size() - 1; i >= 0 && carry > 0; --i) {
             int d = dec[i] - '0';
@@ -351,9 +357,12 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
     std::string decimal = "0";
     for (char ch : digits_no_unders) {
         int digit_val = 0;
-        if (ch >= '0' && ch <= '9') digit_val = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') digit_val = 10 + (ch - 'a');
-        else if (ch >= 'A' && ch <= 'F') digit_val = 10 + (ch - 'A');
+        if (ch >= '0' && ch <= '9')
+            digit_val = ch - '0';
+        else if (ch >= 'a' && ch <= 'f')
+            digit_val = 10 + (ch - 'a');
+        else if (ch >= 'A' && ch <= 'F')
+            digit_val = 10 + (ch - 'A');
         // multiply decimal by base then add digit_val
         mul_decimal_by_small(decimal, base);
         add_small_to_decimal(decimal, digit_val);
@@ -969,7 +978,7 @@ void Lexer::scan_token(std::vector<Token>& out) {
         default:
             break;
     }
-    
+
     // number (decimal or prefixed non-decimal)
     if (std::isdigit((unsigned char)c)) {
         size_t start_index = i;
