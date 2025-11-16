@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,6 +20,144 @@
 
 // Forward declarations
 static std::string value_to_string_simple_local(const Value& v);
+
+// Helper: Convert buffer to hex string
+static std::string buffer_to_hex(const BufferPtr& buf) {
+    if (!buf) return "";
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (uint8_t byte : buf->data) {
+        ss << std::setw(2) << static_cast<int>(byte);
+    }
+    return ss.str();
+}
+
+// Helper: Convert hex string to buffer
+static BufferPtr hex_to_buffer(const std::string& hex) {
+    auto buf = std::make_shared<BufferValue>();
+    buf->encoding = "hex";
+
+    for (size_t i = 0; i + 1 < hex.length(); i += 2) {
+        std::string byte_str = hex.substr(i, 2);
+        uint8_t byte = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+        buf->data.push_back(byte);
+    }
+    return buf;
+}
+
+// Helper: Convert buffer to base64
+static std::string buffer_to_base64(const BufferPtr& buf) {
+    if (!buf) return "";
+
+    static const char* base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+
+    std::string encoded;
+    const auto& data = buf->data;
+    encoded.reserve(((data.size() + 2) / 3) * 4);
+
+    for (size_t i = 0; i < data.size(); i += 3) {
+        uint32_t octet_a = i < data.size() ? data[i] : 0;
+        uint32_t octet_b = i + 1 < data.size() ? data[i + 1] : 0;
+        uint32_t octet_c = i + 2 < data.size() ? data[i + 2] : 0;
+
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+        encoded += base64_chars[(triple >> 18) & 0x3F];
+        encoded += base64_chars[(triple >> 12) & 0x3F];
+        encoded += (i + 1 < data.size()) ? base64_chars[(triple >> 6) & 0x3F] : '=';
+        encoded += (i + 2 < data.size()) ? base64_chars[triple & 0x3F] : '=';
+    }
+
+    return encoded;
+}
+
+// Helper: Convert base64 string to buffer
+static BufferPtr base64_to_buffer(const std::string& b64) {
+    auto buf = std::make_shared<BufferValue>();
+    buf->encoding = "base64";
+
+    // Build decode table
+    static int decode_table[256];
+    static bool table_initialized = false;
+    if (!table_initialized) {
+        for (int i = 0; i < 256; i++) decode_table[i] = -1;
+        const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; i++) {
+            decode_table[static_cast<unsigned char>(chars[i])] = i;
+        }
+        decode_table['='] = 0;
+        table_initialized = true;
+    }
+
+    uint32_t buffer = 0;
+    int bits_collected = 0;
+
+    for (char c : b64) {
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+
+        int value = decode_table[static_cast<unsigned char>(c)];
+        if (value == -1) continue;
+        if (c == '=') break;
+
+        buffer = (buffer << 6) | value;
+        bits_collected += 6;
+
+        if (bits_collected >= 8) {
+            bits_collected -= 8;
+            buf->data.push_back(static_cast<uint8_t>((buffer >> bits_collected) & 0xFF));
+        }
+    }
+
+    return buf;
+}
+
+// Helper: Apply encoding conversion to buffer for emission
+static Value encode_buffer_for_emission(const BufferPtr& buf, const std::string& encoding) {
+    if (!buf) return std::monostate{};
+
+    if (encoding == "utf8") {
+        // Convert to UTF-8 string
+        return Value{std::string(buf->data.begin(), buf->data.end())};
+    } else if (encoding == "base64") {
+        // Convert to base64 string
+        return Value{buffer_to_base64(buf)};
+    } else if (encoding == "hex") {
+        // Convert to hex string
+        return Value{buffer_to_hex(buf)};
+    } else {
+        // binary (default) - return raw buffer
+        return Value{buf};
+    }
+}
+
+// Helper: Convert input value to buffer based on encoding
+static BufferPtr decode_value_to_buffer(const Value& val, const std::string& encoding) {
+    if (std::holds_alternative<BufferPtr>(val)) {
+        // Already a buffer
+        return std::get<BufferPtr>(val);
+    }
+
+    if (!std::holds_alternative<std::string>(val)) {
+        return nullptr;
+    }
+
+    std::string str = std::get<std::string>(val);
+
+    if (encoding == "base64") {
+        return base64_to_buffer(str);
+    } else if (encoding == "hex") {
+        return hex_to_buffer(str);
+    } else {
+        // utf8 or binary - just copy bytes
+        auto buf = std::make_shared<BufferValue>();
+        buf->data.assign(str.begin(), str.end());
+        buf->encoding = encoding;
+        return buf;
+    }
+}
 
 // Stream types
 enum class StreamType {
@@ -195,14 +334,17 @@ static bool push_data(StreamEntryPtr entry, BufferPtr data) {
     std::lock_guard<std::mutex> lk(entry->buffer_mutex);
 
     if (data) {
-        // If in flowing mode, emit data immediately without buffering
+        // If in flowing mode, emit data immediately with encoding applied
         if (entry->state == StreamState::FLOWING) {
             std::vector<FunctionPtr> listeners;
             {
                 std::lock_guard<std::mutex> llk(entry->listeners_mutex);
                 listeners = entry->data_listeners;
             }
-            emit_event(entry, listeners, {Value{data}});
+
+            // ✅ APPLY ENCODING HERE
+            Value encoded_data = encode_buffer_for_emission(data, entry->encoding);
+            emit_event(entry, listeners, {encoded_data});
         } else {
             // Only buffer if we're paused or in some other non-flowing state
             entry->buffer_queue.push_back(data);
@@ -275,6 +417,14 @@ static BufferPtr read_data(StreamEntryPtr entry, size_t n = 0) {
 
         return result;
     }
+}
+
+static Value read_data_encoded(StreamEntryPtr entry, size_t n = 0) {
+    BufferPtr buf = read_data(entry, n);
+    if (!buf) return std::monostate{};
+
+    // ✅ APPLY ENCODING HERE
+    return encode_buffer_for_emission(buf, entry->encoding);
 }
 
 // Write data to writable stream
@@ -572,9 +722,8 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             n = static_cast<size_t>(std::get<double>(args[0]));
         }
 
-        BufferPtr data = read_data(entry, n);
-        if (!data) return std::monostate{};
-        return Value{data};
+        // ✅ USE ENCODED READ
+        return read_data_encoded(entry, n);
     };
     obj->properties["read"] = {
         Value{std::make_shared<FunctionValue>("stream.read", read_impl, nullptr, tok)},
@@ -586,15 +735,13 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             throw SwaziError("TypeError", "stream.write requires data argument", token.loc);
         }
 
-        BufferPtr buf;
-        if (std::holds_alternative<BufferPtr>(args[0])) {
-            buf = std::get<BufferPtr>(args[0]);
-        } else if (std::holds_alternative<std::string>(args[0])) {
-            buf = std::make_shared<BufferValue>();
-            std::string s = std::get<std::string>(args[0]);
-            buf->data.assign(s.begin(), s.end());
-        } else {
-            throw SwaziError("TypeError", "write expects Buffer or string", token.loc);
+        // ✅ DECODE INPUT BASED ON ENCODING
+        BufferPtr buf = decode_value_to_buffer(args[0], entry->encoding);
+
+        if (!buf) {
+            throw SwaziError("TypeError",
+                "write expects Buffer or string (encoding: " + entry->encoding + ")",
+                token.loc);
         }
 
         bool ok = write_data(entry, buf);
@@ -617,7 +764,7 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
     auto resume_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
         entry->state = StreamState::FLOWING;
 
-        // Emit any buffered data
+        // Emit any buffered data WITH ENCODING APPLIED
         std::vector<BufferPtr> chunks;
         {
             std::lock_guard<std::mutex> lk(entry->buffer_mutex);
@@ -632,8 +779,10 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             listeners = entry->data_listeners;
         }
 
+        // ✅ APPLY ENCODING TO EACH BUFFERED CHUNK
         for (const auto& chunk : chunks) {
-            emit_event(entry, listeners, {Value{chunk}});
+            Value encoded_data = encode_buffer_for_emission(chunk, entry->encoding);
+            emit_event(entry, listeners, {encoded_data});
         }
 
         return std::monostate{};
