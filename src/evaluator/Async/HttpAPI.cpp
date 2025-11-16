@@ -267,6 +267,178 @@ static std::mutex g_servers_mutex;
 static std::unordered_map<long long, std::shared_ptr<ServerInstance>> g_servers;
 static std::atomic<long long> g_next_server_id{1};
 
+
+// NEW: Create HTTP-aware stream wrapper
+static ObjectPtr wrap_stream_with_http(ObjectPtr raw_stream, std::shared_ptr<HttpResponse> http_res) {
+    auto wrapped = std::make_shared<ObjectValue>();
+    Token tok{};
+    tok.loc = TokenLocation("<http-wrapper>", 0, 0, 0);
+    
+    // Expose the underlying raw stream
+    wrapped->properties["_raw"] = {Value{raw_stream}, false, false, true, tok};
+    
+    // Wrap write() to add HTTP chunking
+    auto write_impl = [raw_stream, http_res](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        if (args.empty()) return Value{true};
+        
+        auto raw_write_prop = raw_stream->properties.find("write");
+        if (raw_write_prop == raw_stream->properties.end()) {
+            throw SwaziError("RuntimeError", "Underlying stream has no write method", token.loc);
+        }
+        
+        FunctionPtr raw_write_fn = std::get<FunctionPtr>(raw_write_prop->second.value);
+        
+        BufferPtr data_buf;
+        if (std::holds_alternative<BufferPtr>(args[0])) {
+            data_buf = std::get<BufferPtr>(args[0]);
+        } else if (std::holds_alternative<std::string>(args[0])) {
+            data_buf = std::make_shared<BufferValue>();
+            std::string s = std::get<std::string>(args[0]);
+            data_buf->data.assign(s.begin(), s.end());
+        } else {
+            throw SwaziError("TypeError", "write expects Buffer or string", token.loc);
+        }
+        
+        http_res->chunked_mode = true;
+        
+        if (!http_res->headers_sent) {
+            std::ostringstream hdr;
+            hdr << "HTTP/1.1 " << http_res->status_code << " ";
+            hdr << (http_res->reason.empty() ? HttpResponse::reason_for_code(http_res->status_code) : http_res->reason);
+            hdr << "\r\n";
+            
+            http_res->headers["Transfer-Encoding"] = "chunked";
+            if (http_res->headers.find("Content-Type") == http_res->headers.end()) {
+                http_res->headers["Content-Type"] = "application/octet-stream";
+            }
+            
+            for (const auto& kv : http_res->headers) {
+                hdr << kv.first << ": " << kv.second << "\r\n";
+            }
+            hdr << "\r\n";
+            
+            auto hdr_buf = std::make_shared<BufferValue>();
+            std::string hdr_str = hdr.str();
+            hdr_buf->data.assign(hdr_str.begin(), hdr_str.end());
+            raw_write_fn->native_impl({Value{hdr_buf}}, env, token);
+            
+            http_res->headers_sent = true;
+        }
+        
+        std::ostringstream chunk;
+        chunk << std::hex << data_buf->data.size() << "\r\n";
+        
+        auto chunk_buf = std::make_shared<BufferValue>();
+        std::string chunk_hdr = chunk.str();
+        chunk_buf->data.assign(chunk_hdr.begin(), chunk_hdr.end());
+        chunk_buf->data.insert(chunk_buf->data.end(), data_buf->data.begin(), data_buf->data.end());
+        chunk_buf->data.push_back('\r');
+        chunk_buf->data.push_back('\n');
+        
+        return raw_write_fn->native_impl({Value{chunk_buf}}, env, token);
+    };
+    
+    auto write_fn = std::make_shared<FunctionValue>("http_stream.write", write_impl, nullptr, tok);
+    wrapped->properties["write"] = {Value{write_fn}, false, false, true, tok};
+    
+    // FIX: Capture wrapped AFTER it's been assigned to properties
+    // We'll look it up dynamically instead of capturing the pointer
+    auto end_impl = [raw_stream, http_res](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        // Write final data if provided - call through raw_stream's write after HTTP framing
+        if (!args.empty()) {
+            // We need to do HTTP framing here too
+            BufferPtr data_buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                data_buf = std::get<BufferPtr>(args[0]);
+            } else if (std::holds_alternative<std::string>(args[0])) {
+                data_buf = std::make_shared<BufferValue>();
+                std::string s = std::get<std::string>(args[0]);
+                data_buf->data.assign(s.begin(), s.end());
+            }
+            
+            if (data_buf && !data_buf->data.empty()) {
+                auto raw_write_prop = raw_stream->properties.find("write");
+                if (raw_write_prop != raw_stream->properties.end()) {
+                    FunctionPtr raw_write = std::get<FunctionPtr>(raw_write_prop->second.value);
+                    
+                    // Send headers if needed
+                    if (!http_res->headers_sent) {
+                        http_res->chunked_mode = true;
+                        std::ostringstream hdr;
+                        hdr << "HTTP/1.1 " << http_res->status_code << " ";
+                        hdr << (http_res->reason.empty() ? HttpResponse::reason_for_code(http_res->status_code) : http_res->reason);
+                        hdr << "\r\n";
+                        
+                        http_res->headers["Transfer-Encoding"] = "chunked";
+                        if (http_res->headers.find("Content-Type") == http_res->headers.end()) {
+                            http_res->headers["Content-Type"] = "application/octet-stream";
+                        }
+                        
+                        for (const auto& kv : http_res->headers) {
+                            hdr << kv.first << ": " << kv.second << "\r\n";
+                        }
+                        hdr << "\r\n";
+                        
+                        auto hdr_buf = std::make_shared<BufferValue>();
+                        std::string hdr_str = hdr.str();
+                        hdr_buf->data.assign(hdr_str.begin(), hdr_str.end());
+                        raw_write->native_impl({Value{hdr_buf}}, env, token);
+                        
+                        http_res->headers_sent = true;
+                    }
+                    
+                    // Send final chunk
+                    std::ostringstream chunk;
+                    chunk << std::hex << data_buf->data.size() << "\r\n";
+                    
+                    auto chunk_buf = std::make_shared<BufferValue>();
+                    std::string chunk_hdr = chunk.str();
+                    chunk_buf->data.assign(chunk_hdr.begin(), chunk_hdr.end());
+                    chunk_buf->data.insert(chunk_buf->data.end(), data_buf->data.begin(), data_buf->data.end());
+                    chunk_buf->data.push_back('\r');
+                    chunk_buf->data.push_back('\n');
+                    
+                    raw_write->native_impl({Value{chunk_buf}}, env, token);
+                }
+            }
+        }
+        
+        // Send "0\r\n\r\n" terminator
+        if (http_res->chunked_mode) {
+            auto term_buf = std::make_shared<BufferValue>();
+            std::string term = "0\r\n\r\n";
+            term_buf->data.assign(term.begin(), term.end());
+            
+            auto raw_write_prop = raw_stream->properties.find("write");
+            if (raw_write_prop != raw_stream->properties.end()) {
+                FunctionPtr raw_write = std::get<FunctionPtr>(raw_write_prop->second.value);
+                raw_write->native_impl({Value{term_buf}}, env, token);
+            }
+        }
+        
+        // Call raw stream's end()
+        auto raw_end_prop = raw_stream->properties.find("end");
+        if (raw_end_prop != raw_stream->properties.end()) {
+            FunctionPtr raw_end = std::get<FunctionPtr>(raw_end_prop->second.value);
+            return raw_end->native_impl({}, env, token);
+        }
+        
+        return std::monostate{};
+    };
+    
+    auto end_fn = std::make_shared<FunctionValue>("http_stream.end", end_impl, nullptr, tok);
+    wrapped->properties["end"] = {Value{end_fn}, false, false, true, tok};
+    
+    // Proxy other stream methods directly
+    for (const auto& prop : raw_stream->properties) {
+        if (prop.first != "write" && prop.first != "end") {
+            wrapped->properties[prop.first] = prop.second;
+        }
+    }
+    
+    return wrapped;
+}
+
 // on_connection callback
 static void on_connection(uv_stream_t* server, int status) {
     if (status < 0) return;
@@ -431,7 +603,8 @@ static void on_connection(uv_stream_t* server, int status) {
                         auto res_obj = std::make_shared<ObjectValue>();
                         auto http_res = std::make_shared<HttpResponse>();
                         http_res->client = stream;
-                        auto res_stream = create_network_writable_stream_object((uv_tcp_t*)stream);
+                        auto raw_stream = create_network_writable_stream_object((uv_tcp_t*)stream);
+                        auto res_stream = wrap_stream_with_http(raw_stream, http_res);
                         res_obj->properties["stream"] = {Value{res_stream}, false, false, true, Token{}};
 
                         // res.writeHead(code, headers)
