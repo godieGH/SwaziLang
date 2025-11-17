@@ -1196,6 +1196,19 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
 std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
+    // METHODS : [.....]
+    {
+        auto arr = std::make_shared<ArrayValue>();
+        arr->elements.push_back(Value(std::string("GET")));
+        arr->elements.push_back(Value(std::string("POST")));
+        arr->elements.push_back(Value(std::string("DELETE")));
+        arr->elements.push_back(Value(std::string("PATCH")));
+        arr->elements.push_back(Value(std::string("PUT")));
+        arr->elements.push_back(Value(std::string("HEAD")));
+        arr->elements.push_back(Value(std::string("OPTIONS")));
+        obj->properties["METHODS"] = PropertyDescriptor(arr, false, false, true, Token());
+    }
+
 #if defined(HAVE_LIBCURL)
     // http.get(url, [headers_array]) -> string body
     {
@@ -1236,9 +1249,10 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     // http.post(url, body, [contentType="application/json"], [headers_array]) -> string body
     {
         auto fn = make_native_fn("http.post", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) return Value{ std::monostate{} };
+            if (args.size() < 1) throw SwaziError("HttpError", "You should pass atleast 1 argument, URL string in http.post to make a post request. \nSyntax:\n --> http.post(url, body, contentType?, headers[]?)", token.loc);
             std::string url = value_to_string_simple(args[0]);
-            std::string body = value_to_string_simple(args[1]);
+            std::string body("");
+            if(args.size() >= 2) body = value_to_string_simple(args[1]);
             std::string contentType = "application/json";
             if (args.size() >= 3) contentType = value_to_string_simple(args[2]);
 
@@ -1292,14 +1306,16 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
         tok.loc = TokenLocation("<http>", 0, 0, 0);
 
         // native_createServer is implemented in HttpAPI.cpp and declared in builtins.hpp
-        auto create_server_fn = std::make_shared<FunctionValue>("createServer", native_createServer, env, tok);
+        auto create_server_fn = std::make_shared<FunctionValue>("http.createServer", native_createServer, env, tok);
         obj->properties["createServer"] = PropertyDescriptor{Value{create_server_fn}, false, false, false, tok};
+        obj->properties["server"] = PropertyDescriptor{Value{create_server_fn}, false, false, false, tok};
     }
 #else
     // stub: clear error if libuv is not present
     {
         auto fn_server = make_native_fn("http.createServer", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value { throw SwaziError("NotImplementedError", "http.createServer requires libuv support. Build with libuv or provide an external http module.", token.loc); }, env);
         obj->properties["createServer"] = PropertyDescriptor{fn_server, false, false, false, Token()};
+        obj->properties["server"] = PropertyDescriptor{fn_server, false, false, false, Token()};
     }
 #endif
 
@@ -1792,6 +1808,7 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
     
         return Value{promise}; }, env);
         obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["request"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
     return obj;
 }
