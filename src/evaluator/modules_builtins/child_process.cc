@@ -26,6 +26,19 @@
 #include "evaluator.hpp"
 #include "uv.h"
 
+#include <map>
+
+// Add this for environ access
+#ifndef _WIN32
+extern char** environ;
+#else
+// Windows equivalent
+#include <stdlib.h>
+// Use _environ on Windows
+#define environ _environ
+extern char** _environ;
+#endif
+
 // Small helper to make Token placeholders for native functions
 static Token make_native_token(const std::string& name) {
     Token t;
@@ -385,14 +398,45 @@ static ObjectPtr do_spawn(const std::string& file,
     argv.push_back(nullptr);
 
     // prepare env array if provided
-    std::vector<char*> envp;
+     std::vector<char*> envp;
     std::vector<char*> env_allocated;
+    
     if (!opts.env_vec.empty()) {
+        // Build map of user-defined env vars for easy lookup
+        std::map<std::string, std::string> user_env;
         for (const auto& e : opts.env_vec) {
-            char* pe = strdup(e.c_str());
+            size_t eq = e.find('=');
+            if (eq != std::string::npos) {
+                std::string key = e.substr(0, eq);
+                std::string val = e.substr(eq + 1);
+                user_env[key] = val;
+            }
+        }
+        
+        // First, add all parent environment variables
+        extern char** environ;  // POSIX standard
+        for (char** env = environ; env && *env; ++env) {
+            std::string entry(*env);
+            size_t eq = entry.find('=');
+            if (eq != std::string::npos) {
+                std::string key = entry.substr(0, eq);
+                // Only add if NOT overridden by user
+                if (user_env.find(key) == user_env.end()) {
+                    char* pe = strdup(*env);
+                    envp.push_back(pe);
+                    env_allocated.push_back(pe);
+                }
+            }
+        }
+        
+        // Then add user-defined/override env vars
+        for (const auto& kv : user_env) {
+            std::string entry = kv.first + "=" + kv.second;
+            char* pe = strdup(entry.c_str());
             envp.push_back(pe);
             env_allocated.push_back(pe);
         }
+        
         envp.push_back(nullptr);
     }
 
@@ -597,8 +641,6 @@ static Value native_fork(const std::vector<Value>& args, EnvPtr /*env*/, const T
     }
     std::string script = std::get<std::string>(args[0]);
 
-    // Determine interpreter path: assume argv[0] is available via environ? We cannot rely on main's argv here.
-    // Attempt to use /proc/self/exe on linux or fallback to "swazi" in PATH.
     std::string interpreter = "/proc/self/exe";
 #ifdef _WIN32
     interpreter = "swazi.exe";
@@ -606,25 +648,56 @@ static Value native_fork(const std::vector<Value>& args, EnvPtr /*env*/, const T
 
     std::vector<std::string> argv;
     argv.push_back(script);
-    for (size_t i = 1; i < args.size(); ++i) {
-        if (std::holds_alternative<std::string>(args[i]))
-            argv.push_back(std::get<std::string>(args[i]));
-        else if (std::holds_alternative<double>(args[i])) {
-            std::ostringstream ss;
-            ss << std::get<double>(args[i]);
-            argv.push_back(ss.str());
-        } else
-            argv.push_back("");
+    
+    // Parse args array (second param)
+    size_t options_index = 1;
+    if (args.size() >= 2 && std::holds_alternative<ArrayPtr>(args[1])) {
+        ArrayPtr arr = std::get<ArrayPtr>(args[1]);
+        for (auto& el : arr->elements) {
+            argv.push_back(value_to_string_simple_local(el));
+        }
+        options_index = 2;
+    }
+
+    // ADD THIS: Parse options object (third param or second if no args array)
+    SpawnOptions opts;
+    if (args.size() > options_index && std::holds_alternative<ObjectPtr>(args[options_index])) {
+        ObjectPtr o = std::get<ObjectPtr>(args[options_index]);
+        
+        // cwd
+        auto itcwd = o->properties.find("cwd");
+        if (itcwd != o->properties.end()) opts.cwd = value_to_string_simple_local(itcwd->second.value);
+
+        // env object
+        auto itenv = o->properties.find("env");
+        if (itenv != o->properties.end() && std::holds_alternative<ObjectPtr>(itenv->second.value)) {
+            ObjectPtr eobj = std::get<ObjectPtr>(itenv->second.value);
+            for (auto& kv : eobj->properties) {
+                std::string key = kv.first;
+                std::string val = value_to_string_simple_local(kv.second.value);
+                opts.env_vec.push_back(key + "=" + val);
+            }
+        }
+
+        // stdio
+        auto itstd = o->properties.find("stdio");
+        if (itstd != o->properties.end()) {
+            if (std::holds_alternative<std::string>(itstd->second.value)) {
+                std::string s = std::get<std::string>(itstd->second.value);
+                opts.stdio = {s, s, s};
+            } else if (std::holds_alternative<ArrayPtr>(itstd->second.value)) {
+                ArrayPtr sarr = std::get<ArrayPtr>(itstd->second.value);
+                for (size_t i = 0; i < sarr->elements.size() && i < 3; ++i) {
+                    opts.stdio.push_back(value_to_string_simple_local(sarr->elements[i]));
+                }
+            }
+        }
     }
 
     int pid = 0;
-    auto child_obj = do_spawn(interpreter, argv, true, pid, token, SpawnOptions{});
-
-    // mark the entry as fork child (do_spawn already sets is_fork_child if enabled true)
-    // return child object
+    auto child_obj = do_spawn(interpreter, argv, true, pid, token, opts);  // PASS opts instead of SpawnOptions{}
     return Value{child_obj};
 }
-
 // Factory
 std::shared_ptr<ObjectValue> make_child_process_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();

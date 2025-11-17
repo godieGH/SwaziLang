@@ -2311,12 +2311,6 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
         obj->properties["platform"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // os.cwd() -> string
-    {
-        auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
-        obj->properties["cwd"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
     // os.hostname() -> string
     {
         auto fn = make_native_fn("os.hostname", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
@@ -2423,6 +2417,12 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
         },
             env);
         obj->properties["pid"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+    
+    // os.cwd() -> string
+    {
+        auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
+        obj->properties["cwd"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
