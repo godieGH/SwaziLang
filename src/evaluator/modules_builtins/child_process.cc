@@ -26,8 +26,6 @@
 #include "evaluator.hpp"
 #include "uv.h"
 
-#include <map>
-
 // Add this for environ access
 #ifndef _WIN32
 extern char** environ;
@@ -398,9 +396,9 @@ static ObjectPtr do_spawn(const std::string& file,
     argv.push_back(nullptr);
 
     // prepare env array if provided
-     std::vector<char*> envp;
+    std::vector<char*> envp;
     std::vector<char*> env_allocated;
-    
+
     if (!opts.env_vec.empty()) {
         // Build map of user-defined env vars for easy lookup
         std::map<std::string, std::string> user_env;
@@ -412,7 +410,7 @@ static ObjectPtr do_spawn(const std::string& file,
                 user_env[key] = val;
             }
         }
-        
+
         // First, add all parent environment variables
         extern char** environ;  // POSIX standard
         for (char** env = environ; env && *env; ++env) {
@@ -428,7 +426,7 @@ static ObjectPtr do_spawn(const std::string& file,
                 }
             }
         }
-        
+
         // Then add user-defined/override env vars
         for (const auto& kv : user_env) {
             std::string entry = kv.first + "=" + kv.second;
@@ -436,7 +434,7 @@ static ObjectPtr do_spawn(const std::string& file,
             envp.push_back(pe);
             env_allocated.push_back(pe);
         }
-        
+
         envp.push_back(nullptr);
     }
 
@@ -648,7 +646,7 @@ static Value native_fork(const std::vector<Value>& args, EnvPtr /*env*/, const T
 
     std::vector<std::string> argv;
     argv.push_back(script);
-    
+
     // Parse args array (second param)
     size_t options_index = 1;
     if (args.size() >= 2 && std::holds_alternative<ArrayPtr>(args[1])) {
@@ -663,7 +661,7 @@ static Value native_fork(const std::vector<Value>& args, EnvPtr /*env*/, const T
     SpawnOptions opts;
     if (args.size() > options_index && std::holds_alternative<ObjectPtr>(args[options_index])) {
         ObjectPtr o = std::get<ObjectPtr>(args[options_index]);
-        
+
         // cwd
         auto itcwd = o->properties.find("cwd");
         if (itcwd != o->properties.end()) opts.cwd = value_to_string_simple_local(itcwd->second.value);

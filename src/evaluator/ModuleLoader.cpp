@@ -409,7 +409,7 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             rec->state = ModuleRecord::State::Loaded;
             return rec->exports;
         }
-        
+
         if (module_spec == "net" || module_spec == "swazi:net") {
             const std::string key = "__builtin__:net";
             auto it = module_cache.find(key);
