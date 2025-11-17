@@ -11,6 +11,20 @@ file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.cc" "src/*.c")
 add_library(linenoise thirdparty/linenoise/linenoise.c)
 target_include_directories(linenoise PUBLIC thirdparty/linenoise/)
 
+file(
+  GLOB_RECURSE
+  NETSOURCE
+  "src/evaluator/modules_builtins/net_module/*.cc"
+  "src/evaluator/modules_builtins/net_module/*.cpp"
+  "src/evaluator/modules_builtins/net_module/*.c"
+  )
+add_library(swazi_net ${NETSOURCE})
+target_include_directories(swazi_net
+    PUBLIC
+        ${CMAKE_SOURCE_DIR}/include
+    PRIVATE 
+        ${CMAKE_SOURCE_DIR}/src/evaluator/modules_builtins/net_module
+)
 # Create executable target
 add_executable(swazi ${SOURCES})
 # Include headers for this target
@@ -31,6 +45,7 @@ else()
 endif()
 
 target_link_libraries(swazi PRIVATE linenoise)
+target_link_libraries(swazi PRIVATE swazi_net)
 
 # --- Build and include local libuv from the thirdparty directory ---
 add_subdirectory(thirdparty/libuv-1.51.0)
