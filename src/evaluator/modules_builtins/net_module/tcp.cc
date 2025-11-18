@@ -534,7 +534,7 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
             std::shared_ptr<TcpSocketInstance> sock_inst;
             std::shared_ptr<ObjectValue> socket_obj;
         };
-        
+
         uv_connect_t* connect_req = new uv_connect_t;
         connect_req->data = new ConnectData{sock_inst, socket_obj};
 
