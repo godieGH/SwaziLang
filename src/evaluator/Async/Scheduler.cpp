@@ -140,29 +140,25 @@ static void walk_count_cb(uv_handle_t* handle, void* arg) {
     }
 }
 
-void Scheduler::run_until_idle(const std::function<bool()>& /*has_pending*/) {
-    // Note: we intentionally ignore the external has_pending predicate and instead
-    // consult libuv's active handles (excluding the scheduler async handle).
-    // This avoids duplication and keeps the loop authoritative for I/O/timers.
+void Scheduler::run_until_idle(const std::function<bool()>& has_pending) {
+    // CHANGE THIS COMMENT AND USE THE PREDICATE:
     while (!should_stop) {
         bool did_work = run_one();
         if (did_work) continue;
 
-        // If no pending tasks locally, check whether the libuv loop has any active handles
         {
             std::lock_guard<std::mutex> lk1(macrotasks_mutex);
             std::lock_guard<std::mutex> lk2(microtasks_mutex);
             bool local_empty = macrotasks.empty() && microtasks.empty();
             if (local_empty) {
-                // Count active handles on the loop excluding our async wake handle.
                 WalkData wd;
                 wd.exclude_handle = reinterpret_cast<uv_handle_t*>(&async_handle_);
                 wd.active_count = 0;
                 uv_walk(loop_, walk_count_cb, &wd);
 
-                // If no active handles besides our async handle, we are idle.
-                if (wd.active_count == 0) {
-                    // Before returning, allow the owner to perform a last tick check.
+                // CHECK BOTH LIBUV HANDLES AND EXTERNAL PREDICATE
+                bool has_external_work = has_pending && has_pending();
+                if (wd.active_count == 0 && !has_external_work) {
                     if (g_tick_callback) {
                         try {
                             g_tick_callback();
@@ -173,13 +169,9 @@ void Scheduler::run_until_idle(const std::function<bool()>& /*has_pending*/) {
             }
         }
 
-        // Block running the libuv loop once - we'll be woken by uv_async_send or an active timer/io
         uv_run(loop_, UV_RUN_ONCE);
-
-        // loop iteration returns either because of work or wake; re-check queues.
     }
 }
-
 void Scheduler::stop() {
     should_stop = true;
     // Wake the loop so run_until_idle can observe should_stop

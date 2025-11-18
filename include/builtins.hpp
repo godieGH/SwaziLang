@@ -27,3 +27,5 @@ Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Toke
 // NEW: Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)
 ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket);
 ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket);
+
+bool tcp_has_active_work();

@@ -72,14 +72,11 @@ void Evaluator::schedule_callback(FunctionPtr cb, const std::vector<Value>& args
 // running until timers complete.
 void Evaluator::run_event_loop() {
     if (scheduler()) {
-        // Drain scheduler (blocks until idle). Provide a predicate so scheduler can
-        // exit when both macrotasks empty AND there are no active async timers.
         scheduler()->run_until_idle([]() {
-            return async_timers_exist();
+            return async_timers_exist() || tcp_has_active_work();
         });
         return;
     }
-
     return;
 }
 
