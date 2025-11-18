@@ -834,19 +834,25 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 Value res = this->call_function(cb, {v}, cb->closure, memTok);
 
                                 // If callback returned a Promise, chain it to `next`.
+                                PromisePtr p2 = nullptr;
                                 if (std::holds_alternative<PromisePtr>(res)) {
-                                    PromisePtr p2 = std::get<PromisePtr>(res);
-                                    if (!p2) {
-                                        resolve_next(std::monostate{});
-                                        return;
+                                    p2 = std::get<PromisePtr>(res);
+                                } else if (std::holds_alternative<ObjectPtr>(res)) {
+                                    ObjectPtr obj = std::get<ObjectPtr>(res);
+                                    if (obj) {
+                                        auto it = obj->properties.find("__promise__");
+                                        if (it != obj->properties.end() && std::holds_alternative<PromisePtr>(it->second.value)) {
+                                            p2 = std::get<PromisePtr>(it->second.value);
+                                        }
                                     }
+                                }
+
+                                if (p2) {
                                     if (p2->state == PromiseValue::State::FULFILLED) {
                                         resolve_next(p2->result);
                                     } else if (p2->state == PromiseValue::State::PENDING) {
-                                        // Forward resolution/rejection to next when p2 settles.
                                         p2->then_callbacks.push_back([resolve_next](Value rv) { resolve_next(rv); });
                                         p2->catch_callbacks.push_back([reject_next](Value rr) { reject_next(rr); });
-                                        // Link returned promise into chain so later handlers can mark ancestors.
                                         p2->parent = next;
                                     } else {  // rejected
                                         reject_next(p2->result);
@@ -854,6 +860,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 } else {
                                     resolve_next(res);
                                 }
+
                             } catch (const std::exception& e) {
                                 reject_next(std::string(e.what()));
                             } catch (...) {
@@ -952,12 +959,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         auto run_on_reject = [this, cb, resolve_next, reject_next, memTok, next](Value r) {
                             try {
                                 Value res = this->call_function(cb, {r}, cb->closure, memTok);
+
+                                PromisePtr p2 = nullptr;
                                 if (std::holds_alternative<PromisePtr>(res)) {
-                                    PromisePtr p2 = std::get<PromisePtr>(res);
-                                    if (!p2) {
-                                        resolve_next(std::monostate{});
-                                        return;
+                                    p2 = std::get<PromisePtr>(res);
+                                } else if (std::holds_alternative<ObjectPtr>(res)) {
+                                    ObjectPtr obj = std::get<ObjectPtr>(res);
+                                    if (obj) {
+                                        auto it = obj->properties.find("__promise__");
+                                        if (it != obj->properties.end() && std::holds_alternative<PromisePtr>(it->second.value)) {
+                                            p2 = std::get<PromisePtr>(it->second.value);
+                                        }
                                     }
+                                }
+
+                                if (p2) {
                                     if (p2->state == PromiseValue::State::FULFILLED) {
                                         resolve_next(p2->result);
                                     } else if (p2->state == PromiseValue::State::PENDING) {
@@ -970,6 +986,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 } else {
                                     resolve_next(res);
                                 }
+
                             } catch (const std::exception& e) {
                                 reject_next(std::string(e.what()));
                             } catch (...) {
