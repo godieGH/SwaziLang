@@ -30,3 +30,4 @@ ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket);
 
 bool tcp_has_active_work();
 bool net_has_active_work();
+bool udp_has_active_work();

@@ -6,15 +6,31 @@
 
 #include "./net.hpp"
 
+// Work counter for event loop tracking
+static std::atomic<int> g_active_udp_work{0};
+
+// Export function for event loop checking
+bool udp_has_active_work() {
+    return g_active_udp_work.load() > 0;
+}
+
 // UDP Socket instance
 struct UdpSocketInstance {
     uv_udp_t* udp_handle = nullptr;
     std::atomic<bool> closed{false};
+    std::atomic<bool> work_counted{false};  // Track if work counter was incremented
     FunctionPtr on_message_handler;
     FunctionPtr on_error_handler;
     FunctionPtr on_close_handler;
     std::string bound_address;
     int bound_port = 0;
+
+    ~UdpSocketInstance() {
+        // Safety: ensure work counter is decremented on destruction
+        if (work_counted.exchange(false)) {
+            g_active_udp_work.fetch_sub(1);
+        }
+    }
 };
 
 static std::mutex g_udp_sockets_mutex;
@@ -118,6 +134,11 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
 
         auto inst = std::make_shared<UdpSocketInstance>();
         long long sock_id = g_next_udp_socket_id.fetch_add(1);
+
+        // Increment work counter and mark it
+        g_active_udp_work.fetch_add(1);
+        inst->work_counted.store(true);
+
         {
             std::lock_guard<std::mutex> lk(g_udp_sockets_mutex);
             g_udp_sockets[sock_id] = inst;
@@ -125,6 +146,14 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
 
         uv_loop_t* loop = scheduler_get_loop();
         if (!loop) {
+            // Safety: clean up on error
+            if (inst->work_counted.exchange(false)) {
+                g_active_udp_work.fetch_sub(1);
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_udp_sockets_mutex);
+                g_udp_sockets.erase(sock_id);
+            }
             throw SwaziError("RuntimeError", "No event loop available", token.loc);
         }
 
@@ -133,13 +162,29 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
         Token stok;
         stok.loc = TokenLocation("<udp>", 0, 0, 0);
 
-        // Initialize UDP handle
-        scheduler_run_on_loop([inst, type, loop]() {
+        // Initialize UDP handle with error handling
+        scheduler_run_on_loop([inst, type, loop, sock_id]() {
             inst->udp_handle = new uv_udp_t;
             inst->udp_handle->data = inst.get();
 
             unsigned int flags = (type == "udp6") ? AF_INET6 : AF_INET;
-            uv_udp_init_ex(loop, inst->udp_handle, flags);
+            int r = uv_udp_init_ex(loop, inst->udp_handle, flags);
+
+            if (r != 0) {
+                // Init failed - clean up
+                delete inst->udp_handle;
+                inst->udp_handle = nullptr;
+                inst->closed.store(true);
+
+                // Decrement work counter
+                if (inst->work_counted.exchange(false)) {
+                    g_active_udp_work.fetch_sub(1);
+                }
+
+                // Remove from map
+                std::lock_guard<std::mutex> lk(g_udp_sockets_mutex);
+                g_udp_sockets.erase(sock_id);
+            }
         });
 
         // socket.bind(port, address?, callback?)
@@ -166,6 +211,15 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
             inst->bound_address = address;
 
             scheduler_run_on_loop([inst, port, address, cb]() {
+                if (!inst->udp_handle) {
+                    if (cb) {
+                        auto err_msg = std::string("Bind failed: socket not initialized");
+                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
+                        enqueue_callback_global(static_cast<void*>(payload));
+                    }
+                    return;
+                }
+
                 struct sockaddr_in addr;
                 uv_ip4_addr(address.c_str(), port, &addr);
 
@@ -204,6 +258,15 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
             if (data.empty()) return std::monostate{};
 
             scheduler_run_on_loop([inst, data, port, address, cb]() {
+                if (!inst->udp_handle) {
+                    if (cb) {
+                        auto err_msg = std::string("Send failed: socket not initialized");
+                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
+                        enqueue_callback_global(static_cast<void*>(payload));
+                    }
+                    return;
+                }
+
                 struct sockaddr_in addr;
                 uv_ip4_addr(address.c_str(), port, &addr);
 
@@ -217,8 +280,6 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 uv_udp_send(req, inst->udp_handle, &uvbuf, 1, (const struct sockaddr*)&addr,
                     [](uv_udp_send_t* req, int status) {
                         if (req->data) free(req->data);
-
-                        // Extract callback from somewhere if needed
                         delete req;
                     });
 
@@ -251,7 +312,7 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
 
                 // Start receiving
                 scheduler_run_on_loop([inst]() {
-                    if (inst->udp_handle) {
+                    if (inst->udp_handle && !inst->closed.load()) {
                         uv_udp_recv_start(inst->udp_handle, udp_alloc_cb, udp_recv_cb);
                     }
                 });
@@ -272,14 +333,34 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 ? std::get<FunctionPtr>(args[0])
                 : nullptr;
 
+            // Only proceed if not already closed
             if (!inst->closed.exchange(true)) {
-                scheduler_run_on_loop([inst, cb]() {
+                scheduler_run_on_loop([inst, cb, sock_id]() {
                     if (inst->udp_handle) {
                         uv_udp_recv_stop(inst->udp_handle);
+
+                        // Close handle and decrement work counter in close callback
                         uv_close((uv_handle_t*)inst->udp_handle, [](uv_handle_t* h) {
+                            UdpSocketInstance* inst = static_cast<UdpSocketInstance*>(h->data);
+                            if (inst && inst->work_counted.exchange(false)) {
+                                g_active_udp_work.fetch_sub(1);
+                            }
+
+                            // Call close handler if set
+                            if (inst && inst->on_close_handler) {
+                                FunctionPtr handler = inst->on_close_handler;
+                                CallbackPayload* payload = new CallbackPayload(handler, {});
+                                enqueue_callback_global(static_cast<void*>(payload));
+                            }
+
                             delete (uv_udp_t*)h;
                         });
                         inst->udp_handle = nullptr;
+                    } else {
+                        // Handle was never created or already destroyed
+                        if (inst->work_counted.exchange(false)) {
+                            g_active_udp_work.fetch_sub(1);
+                        }
                     }
 
                     if (cb) {
@@ -287,10 +368,13 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                         enqueue_callback_global(static_cast<void*>(payload));
                     }
                 });
-            }
 
-            std::lock_guard<std::mutex> lk(g_udp_sockets_mutex);
-            g_udp_sockets.erase(sock_id);
+                // Remove from map
+                {
+                    std::lock_guard<std::mutex> lk(g_udp_sockets_mutex);
+                    g_udp_sockets.erase(sock_id);
+                }
+            }
 
             return std::monostate{};
         };
@@ -303,27 +387,29 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
             Token tok;
             tok.loc = TokenLocation("<udp>", 0, 0, 0);
 
-            if (inst->udp_handle) {
+            if (inst->udp_handle && !inst->closed.load()) {
                 struct sockaddr_storage addr;
                 int namelen = sizeof(addr);
-                uv_udp_getsockname(inst->udp_handle, (struct sockaddr*)&addr, &namelen);
+                int r = uv_udp_getsockname(inst->udp_handle, (struct sockaddr*)&addr, &namelen);
 
-                if (addr.ss_family == AF_INET) {
-                    struct sockaddr_in* addr_in = (struct sockaddr_in*)&addr;
-                    char ip[INET_ADDRSTRLEN];
-                    uv_ip4_name(addr_in, ip, sizeof(ip));
+                if (r == 0) {
+                    if (addr.ss_family == AF_INET) {
+                        struct sockaddr_in* addr_in = (struct sockaddr_in*)&addr;
+                        char ip[INET_ADDRSTRLEN];
+                        uv_ip4_name(addr_in, ip, sizeof(ip));
 
-                    info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
-                    info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in->sin_port))}, false, false, true, tok};
-                    info->properties["family"] = {Value{std::string("IPv4")}, false, false, true, tok};
-                } else if (addr.ss_family == AF_INET6) {
-                    struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&addr;
-                    char ip[INET6_ADDRSTRLEN];
-                    uv_ip6_name(addr_in6, ip, sizeof(ip));
+                        info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
+                        info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in->sin_port))}, false, false, true, tok};
+                        info->properties["family"] = {Value{std::string("IPv4")}, false, false, true, tok};
+                    } else if (addr.ss_family == AF_INET6) {
+                        struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&addr;
+                        char ip[INET6_ADDRSTRLEN];
+                        uv_ip6_name(addr_in6, ip, sizeof(ip));
 
-                    info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
-                    info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in6->sin6_port))}, false, false, true, tok};
-                    info->properties["family"] = {Value{std::string("IPv6")}, false, false, true, tok};
+                        info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
+                        info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in6->sin6_port))}, false, false, true, tok};
+                        info->properties["family"] = {Value{std::string("IPv6")}, false, false, true, tok};
+                    }
                 }
             }
 
@@ -336,7 +422,7 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
         if (cb) {
             inst->on_message_handler = cb;
             scheduler_run_on_loop([inst]() {
-                if (inst->udp_handle) {
+                if (inst->udp_handle && !inst->closed.load()) {
                     uv_udp_recv_start(inst->udp_handle, udp_alloc_cb, udp_recv_cb);
                 }
             });
