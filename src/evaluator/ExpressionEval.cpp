@@ -2023,7 +2023,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             const std::string& prop = mem->property;
 
             // Recognized array method names
-            if (prop == "join" || prop == "reduce" || prop == "filter" || prop == "map" ||
+            if (prop == "empty" || prop == "join" || prop == "reduce" || prop == "filter" || prop == "map" ||
                 prop == "slice" || prop == "splice" || prop == "includes" || prop == "sort" ||
                 prop == "reverse" || prop == "extend" || prop == "unshift" || prop == "insert" ||
                 prop == "shift" || prop == "removeAll" || prop == "pop" || prop == "push" ||
@@ -2039,6 +2039,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     // urefu() -> returns array length (same as .idadi property)
                     if (prop == "urefu") {
                         return Value{static_cast<double>(arr->elements.size())};
+                    }
+                    
+                    // empty() -> bool, true if empty 
+                    if (prop == "empty") {
+                        return Value{static_cast<bool>(arr->elements.empty())};
                     }
 
                     // push: ongeza(value...)
