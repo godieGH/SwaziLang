@@ -179,18 +179,19 @@ enum class StreamState {
 
 // Helper to parse options object
 struct StreamOptions {
-    size_t high_water_mark = 16384;  // 16KB default
+    size_t high_water_mark = 65536;  // 64KB default (matching SwaziLang)
     std::string encoding = "binary";
     bool auto_close = true;
-    size_t chunk_size = 4096;  // Read chunk size for readable streams
     std::string flags = "w";
+    size_t start = 0;        // Stream start position (for readable)
+    size_t end = 0;          // Stream end position (0 = EOF)
+    double speed = 1.0;      // Stream speed multiplier (for readable)
 };
 
 static StreamOptions parse_stream_options(const Value& opts_val) {
     StreamOptions opts;
-
     if (!std::holds_alternative<ObjectPtr>(opts_val)) {
-        return opts;  // Return defaults if not an object
+        return opts;
     }
 
     ObjectPtr opts_obj = std::get<ObjectPtr>(opts_val);
@@ -200,7 +201,7 @@ static StreamOptions parse_stream_options(const Value& opts_val) {
     if (hwm_it != opts_obj->properties.end()) {
         if (std::holds_alternative<double>(hwm_it->second.value)) {
             double val = std::get<double>(hwm_it->second.value);
-            if (val > 0) {
+            if (val > 0 && val <= 50e6) {  // Max 50MB
                 opts.high_water_mark = static_cast<size_t>(val);
             }
         }
@@ -222,21 +223,44 @@ static StreamOptions parse_stream_options(const Value& opts_val) {
         }
     }
 
-    // Parse chunkSize (for readable streams)
-    auto cs_it = opts_obj->properties.find("chunkSize");
-    if (cs_it != opts_obj->properties.end()) {
-        if (std::holds_alternative<double>(cs_it->second.value)) {
-            double val = std::get<double>(cs_it->second.value);
-            if (val > 0) {
-                opts.chunk_size = static_cast<size_t>(val);
-            }
-        }
-    }
-
+    // Parse flags
     auto flags_it = opts_obj->properties.find("flags");
     if (flags_it != opts_obj->properties.end()) {
         if (std::holds_alternative<std::string>(flags_it->second.value)) {
             opts.flags = std::get<std::string>(flags_it->second.value);
+        }
+    }
+
+    // Parse start
+    auto start_it = opts_obj->properties.find("start");
+    if (start_it != opts_obj->properties.end()) {
+        if (std::holds_alternative<double>(start_it->second.value)) {
+            double val = std::get<double>(start_it->second.value);
+            if (val >= 0) {
+                opts.start = static_cast<size_t>(val);
+            }
+        }
+    }
+
+    // Parse end
+    auto end_it = opts_obj->properties.find("end");
+    if (end_it != opts_obj->properties.end()) {
+        if (std::holds_alternative<double>(end_it->second.value)) {
+            double val = std::get<double>(end_it->second.value);
+            if (val >= 0) {
+                opts.end = static_cast<size_t>(val);
+            }
+        }
+    }
+
+    // Parse speed
+    auto speed_it = opts_obj->properties.find("speed");
+    if (speed_it != opts_obj->properties.end()) {
+        if (std::holds_alternative<double>(speed_it->second.value)) {
+            double val = std::get<double>(speed_it->second.value);
+            if (val > 0) {
+                opts.speed = val;
+            }
         }
     }
 
@@ -248,6 +272,8 @@ struct StreamEntry : public std::enable_shared_from_this<StreamEntry> {
     long long id;
     StreamType type;
     std::atomic<StreamState> state{StreamState::OPEN};
+    std::atomic<bool> is_destroyed{false};
+    std::atomic<bool> has_error{false};
 
     // Event listeners (protected by mutex)
     std::mutex listeners_mutex;
@@ -298,10 +324,26 @@ struct StreamEntry : public std::enable_shared_from_this<StreamEntry> {
 
     // Options
     bool auto_close = true;
-    size_t chunk_size = 4096;
     std::string encoding = "binary";
+    std::atomic<bool> paused{false};
+    size_t stream_start = 0;
+    size_t stream_end = 0;
+    double stream_speed = 1.0;
+    std::atomic<bool> should_stop_reading{false};
 };
 using StreamEntryPtr = std::shared_ptr<StreamEntry>;
+
+
+// Forward declarations
+static std::string value_to_string_simple_local(const Value& v);
+static ObjectPtr create_readable_stream_object(StreamEntryPtr entry);
+static ObjectPtr create_writable_stream_object(StreamEntryPtr entry);
+static ObjectPtr create_duplex_stream_object(StreamEntryPtr entry);
+static ObjectPtr create_transform_stream_object(StreamEntryPtr entry);
+static BufferPtr read_data(StreamEntryPtr entry, size_t n);
+static Value read_data_encoded(StreamEntryPtr entry, size_t n);
+static bool write_data(StreamEntryPtr entry, BufferPtr data);
+
 
 // Global stream registry
 static std::mutex g_streams_mutex;
@@ -324,27 +366,350 @@ static void emit_event(StreamEntryPtr entry,
     }
 }
 
-// Create stream wrapper object with all methods
-static ObjectPtr create_stream_object(StreamEntryPtr entry);
+
+// Helper: Add common introspection methods to stream object
+static void add_stream_introspection(ObjectPtr obj, StreamEntryPtr entry, const Token& tok) {
+    // stream.isPaused()
+    auto is_paused_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return Value{entry->paused.load()};
+    };
+    obj->properties["isPaused"] = {
+        Value{std::make_shared<FunctionValue>("stream.isPaused", is_paused_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.isEnded()
+    auto is_ended_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return Value{entry->ended};
+    };
+    obj->properties["isEnded"] = {
+        Value{std::make_shared<FunctionValue>("stream.isEnded", is_ended_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.getBufferedSize()
+    auto get_buffered_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return Value{static_cast<double>(entry->buffered_size.load())};
+    };
+    obj->properties["getBufferedSize"] = {
+        Value{std::make_shared<FunctionValue>("stream.getBufferedSize", get_buffered_impl, nullptr, tok)},
+        false, false, false, tok};
+}
+
+// Create READABLE stream object (limited methods)
+static ObjectPtr create_readable_stream_object(StreamEntryPtr entry) {
+    auto obj = std::make_shared<ObjectValue>();
+    Token tok{};
+    tok.loc = TokenLocation("<streams>", 0, 0, 0);
+
+    // stream.on(event, callback)
+    auto on_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "stream.on requires (event, callback)", token.loc);
+        }
+        if (!std::holds_alternative<std::string>(args[0])) {
+            throw SwaziError("TypeError", "event must be string", token.loc);
+        }
+        if (!std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "callback must be function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr cb = std::get<FunctionPtr>(args[1]);
+
+        std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+        if (event == "data")
+            entry->data_listeners.push_back(cb);
+        else if (event == "end")
+            entry->end_listeners.push_back(cb);
+        else if (event == "error")
+            entry->error_listeners.push_back(cb);
+        else if (event == "close")
+            entry->close_listeners.push_back(cb);
+
+        return std::monostate{};
+    };
+    obj->properties["on"] = {
+        Value{std::make_shared<FunctionValue>("stream.on", on_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.pause()
+    auto pause_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        entry->paused = true;
+        return std::monostate{};
+    };
+    obj->properties["pause"] = {
+        Value{std::make_shared<FunctionValue>("stream.pause", pause_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.resume()
+    auto resume_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        entry->paused = false;
+        // Signal the reading loop to continue if it exists
+        return std::monostate{};
+    };
+    obj->properties["resume"] = {
+        Value{std::make_shared<FunctionValue>("stream.resume", resume_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.read()
+    auto read_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return read_data_encoded(entry, entry->high_water_mark);
+    };
+    obj->properties["read"] = {
+        Value{std::make_shared<FunctionValue>("stream.read", read_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.pipe(dest)
+    auto pipe_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) {
+            throw SwaziError("TypeError", "pipe requires destination stream", token.loc);
+        }
+
+        ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
+
+        // Data forwarding
+        auto data_forwarder = std::make_shared<FunctionValue>(
+            "pipe_data_forwarder",
+            [entry, dest_obj](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+                if (!args.empty()) {
+                    auto write_prop = dest_obj->properties.find("write");
+                    if (write_prop != dest_obj->properties.end() &&
+                        std::holds_alternative<FunctionPtr>(write_prop->second.value)) {
+                        FunctionPtr write_fn = std::get<FunctionPtr>(write_prop->second.value);
+                        Value result = write_fn->native_impl({args[0]}, env, token);
+                        
+                        // Handle backpressure
+                        if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                            entry->paused = true;
+                        }
+                    }
+                }
+                return std::monostate{};
+            },
+            nullptr, Token{});
+
+        {
+            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+            entry->data_listeners.push_back(data_forwarder);
+        }
+
+        // End forwarding
+        auto end_forwarder = std::make_shared<FunctionValue>(
+            "pipe_end_forwarder",
+            [dest_obj](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                auto end_prop = dest_obj->properties.find("end");
+                if (end_prop != dest_obj->properties.end() &&
+                    std::holds_alternative<FunctionPtr>(end_prop->second.value)) {
+                    FunctionPtr end_fn = std::get<FunctionPtr>(end_prop->second.value);
+                    end_fn->native_impl({}, nullptr, Token{});
+                }
+                return std::monostate{};
+            },
+            nullptr, Token{});
+
+        {
+            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+            entry->end_listeners.push_back(end_forwarder);
+        }
+
+        // Listen for drain to resume reading
+        auto drain_listener = std::make_shared<FunctionValue>(
+            "pipe_drain_listener",
+            [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                entry->paused = false;
+                return std::monostate{};
+            },
+            nullptr, Token{});
+
+        auto drain_on_prop = dest_obj->properties.find("on");
+        if (drain_on_prop != dest_obj->properties.end() &&
+            std::holds_alternative<FunctionPtr>(drain_on_prop->second.value)) {
+            FunctionPtr on_fn = std::get<FunctionPtr>(drain_on_prop->second.value);
+            on_fn->native_impl({Value{std::string("drain")}, Value{drain_listener}}, nullptr, Token{});
+        }
+
+        return args[0];
+    };
+    obj->properties["pipe"] = {
+        Value{std::make_shared<FunctionValue>("stream.pipe", pipe_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.end()
+    auto end_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        entry->should_stop_reading = true;
+        entry->ended = true;
+        
+        std::vector<FunctionPtr> listeners;
+        {
+            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+            listeners = entry->end_listeners;
+        }
+        emit_event(entry, listeners, {});
+        
+        if (entry->auto_close && entry->file_handle && entry->file_handle->is_open) {
+            entry->file_handle->close_internal();
+        }
+        
+        return std::monostate{};
+    };
+    obj->properties["end"] = {
+        Value{std::make_shared<FunctionValue>("stream.end", end_impl, nullptr, tok)},
+        false, false, false, tok};
+    
+    
+    obj->properties["_type"] = {
+        Value{std::string("readable")},  // or "writable", "duplex", "transform"
+        true, false, true, tok};  // hidden, non-writable, non-configurable
+        
+      // Add introspection methods
+    add_stream_introspection(obj, entry, tok);
+
+    
+    return obj;
+}
+
+// Create WRITABLE stream object (limited methods)
+static ObjectPtr create_writable_stream_object(StreamEntryPtr entry) {
+    auto obj = std::make_shared<ObjectValue>();
+    Token tok{};
+    tok.loc = TokenLocation("<streams>", 0, 0, 0);
+
+    // stream.on(event, callback)
+    auto on_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "stream.on requires (event, callback)", token.loc);
+        }
+        if (!std::holds_alternative<std::string>(args[0])) {
+            throw SwaziError("TypeError", "event must be string", token.loc);
+        }
+        if (!std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "callback must be function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr cb = std::get<FunctionPtr>(args[1]);
+
+        std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+        if (event == "drain")
+            entry->drain_listeners.push_back(cb);
+        else if (event == "error")
+            entry->error_listeners.push_back(cb);
+        else if (event == "finish")
+            entry->finish_listeners.push_back(cb);
+        else if (event == "close")
+            entry->close_listeners.push_back(cb);
+
+        return std::monostate{};
+    };
+    obj->properties["on"] = {
+        Value{std::make_shared<FunctionValue>("stream.on", on_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.write(chunk)
+    auto write_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "stream.write requires data argument", token.loc);
+        }
+
+        BufferPtr buf = decode_value_to_buffer(args[0], entry->encoding);
+
+        if (!buf) {
+            throw SwaziError("TypeError",
+                "write expects Buffer or string (encoding: " + entry->encoding + ")",
+                token.loc);
+        }
+
+        bool ok = write_data(entry, buf);
+        return Value{ok};
+    };
+    obj->properties["write"] = {
+        Value{std::make_shared<FunctionValue>("stream.write", write_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.end(chunk?)
+    auto end_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        if (!args.empty()) {
+            BufferPtr buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                buf = std::get<BufferPtr>(args[0]);
+            } else if (std::holds_alternative<std::string>(args[0])) {
+                buf = std::make_shared<BufferValue>();
+                std::string s = std::get<std::string>(args[0]);
+                buf->data.assign(s.begin(), s.end());
+            }
+            if (buf) write_data(entry, buf);
+        }
+
+        entry->ended = true;
+
+        std::vector<FunctionPtr> listeners;
+        {
+            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+            listeners = entry->finish_listeners;
+        }
+        emit_event(entry, listeners, {});
+
+        if (entry->auto_close && entry->file_handle && entry->file_handle->is_open) {
+            entry->file_handle->close_internal();
+        }
+
+        return std::monostate{};
+    };
+    obj->properties["end"] = {
+        Value{std::make_shared<FunctionValue>("stream.end", end_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.close()
+    auto close_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        if (entry->file_handle && entry->file_handle->is_open) {
+            entry->file_handle->close_internal();
+        }
+        return std::monostate{};
+    };
+    obj->properties["close"] = {
+        Value{std::make_shared<FunctionValue>("stream.close", close_impl, nullptr, tok)},
+        false, false, false, tok};
+        
+    obj->properties["_type"] = {
+        Value{std::string("writable")},  // or "writable", "duplex", "transform"
+        true, false, true, tok};  // hidden, non-writable, non-configurable
+    
+    
+      // Add introspection methods
+    add_stream_introspection(obj, entry, tok);
+  
+    
+    return obj;
+}
+
+
 
 // Push data into readable stream (internal API)
 static bool push_data(StreamEntryPtr entry, BufferPtr data) {
-    if (!entry || entry->state == StreamState::DESTROYED) return false;
+    if (!entry || entry->is_destroyed) return false;
 
     std::lock_guard<std::mutex> lk(entry->buffer_mutex);
 
     if (data) {
         // If in flowing mode, emit data immediately with encoding applied
-        if (entry->state == StreamState::FLOWING) {
+        if (entry->state == StreamState::FLOWING &&  !entry->paused) {
             std::vector<FunctionPtr> listeners;
             {
                 std::lock_guard<std::mutex> llk(entry->listeners_mutex);
                 listeners = entry->data_listeners;
             }
 
-            // ✅ APPLY ENCODING HERE
             Value encoded_data = encode_buffer_for_emission(data, entry->encoding);
-            emit_event(entry, listeners, {encoded_data});
+            
+            // Call listeners synchronously (like SwaziLang)
+            for (const auto& cb : listeners) {
+                if (cb) {
+                    try {
+                        cb->native_impl({encoded_data}, nullptr, Token{});
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error in data listener: " << e.what() << std::endl;
+                    }
+                }
+            }
         } else {
             // Only buffer if we're paused or in some other non-flowing state
             entry->buffer_queue.push_back(data);
@@ -430,10 +795,15 @@ static Value read_data_encoded(StreamEntryPtr entry, size_t n = 0) {
 // Write data to writable stream
 static bool write_data(StreamEntryPtr entry, BufferPtr data) {
     if (!entry || !data) return false;
-    if (entry->state == StreamState::DESTROYED) return false;
+    if (entry->is_destroyed) return false;
 
     // NEW: Transform stream execution path
-    if (entry->type == StreamType::TRANSFORM && entry->transform_fn && entry->evaluator_ptr) {
+    if (entry->type == StreamType::TRANSFORM) {
+        // If no transform function, use identity (passthrough)
+        if (!entry->transform_fn || !entry->evaluator_ptr) {
+            push_data(entry, data);
+            return entry->buffered_size < entry->high_water_mark;
+        }
         try {
             Token dummy_token;
             dummy_token.loc = TokenLocation("<transform>", 0, 0, 0);
@@ -616,65 +986,30 @@ static bool write_data(StreamEntryPtr entry, BufferPtr data) {
     return entry->buffered_size < entry->high_water_mark;
 }
 
-// Pipe implementation
-static void pipe_streams(StreamEntryPtr src, StreamEntryPtr dest) {
-    if (!src || !dest) return;
 
-    // Register pipe relationship
-    {
-        std::lock_guard<std::mutex> lk(src->pipe_mutex);
-        src->piped_to.push_back(dest);
-    }
-
-    // Emit pipe event
-    {
-        std::lock_guard<std::mutex> lk(src->listeners_mutex);
-        emit_event(src, src->pipe_listeners, {});
-    }
-
-    // Set up data forwarding
-    auto data_forwarder = std::make_shared<FunctionValue>(
-        "pipe_data_forwarder",
-        [src, dest](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
-            if (!args.empty() && std::holds_alternative<BufferPtr>(args[0])) {
-                BufferPtr chunk = std::get<BufferPtr>(args[0]);
-                write_data(dest, chunk);
-            }
-            return std::monostate{};
-        },
-        nullptr, Token{});
-
-    {
-        std::lock_guard<std::mutex> lk(src->listeners_mutex);
-        src->data_listeners.push_back(data_forwarder);
-    }
-
-    // Set up end forwarding
-    auto end_forwarder = std::make_shared<FunctionValue>(
-        "pipe_end_forwarder",
-        [dest](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-            dest->ended = true;
-            std::vector<FunctionPtr> listeners;
-            {
-                std::lock_guard<std::mutex> lk(dest->listeners_mutex);
-                listeners = dest->end_listeners;
-            }
-            emit_event(dest, listeners, {});
-            return std::monostate{};
-        },
-        nullptr, Token{});
-
-    {
-        std::lock_guard<std::mutex> lk(src->listeners_mutex);
-        src->end_listeners.push_back(end_forwarder);
-    }
+// Helper: Check if object is a writable stream
+static bool is_writable_stream(const ObjectPtr& obj) {
+    if (!obj) return false;
+    
+    auto type_it = obj->properties.find("_type");
+    if (type_it == obj->properties.end()) return false;
+    
+    if (!std::holds_alternative<std::string>(type_it->second.value)) return false;
+    
+    std::string type = std::get<std::string>(type_it->second.value);
+    return type == "writable" || type == "duplex" || type == "transform";
 }
 
-// Create stream object with all methods
-static ObjectPtr create_stream_object(StreamEntryPtr entry) {
-    auto obj = std::make_shared<ObjectValue>();
 
-    // stream.on(event, callback)
+// Create DUPLEX stream object (both readable and writable methods)
+static ObjectPtr create_duplex_stream_object(StreamEntryPtr entry) {
+    auto obj = std::make_shared<ObjectValue>();
+    Token tok{};
+    tok.loc = TokenLocation("<streams>", 0, 0, 0);
+
+    // ===== READABLE SIDE =====
+
+    // stream.on(event, callback) - supports both readable and writable events
     auto on_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (args.size() < 2) {
             throw SwaziError("TypeError", "stream.on requires (event, callback)", token.loc);
@@ -702,32 +1037,40 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             entry->drain_listeners.push_back(cb);
         else if (event == "finish")
             entry->finish_listeners.push_back(cb);
-        else if (event == "pipe")
-            entry->pipe_listeners.push_back(cb);
-        else if (event == "unpipe")
-            entry->unpipe_listeners.push_back(cb);
 
         return std::monostate{};
     };
-    Token tok = Token{};
-    tok.loc = TokenLocation("<streams>", 0, 0, 0);
     obj->properties["on"] = {
         Value{std::make_shared<FunctionValue>("stream.on", on_impl, nullptr, tok)},
         false, false, false, tok};
 
-    // stream.read(n?)
-    auto read_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
-        size_t n = 0;
-        if (!args.empty() && std::holds_alternative<double>(args[0])) {
-            n = static_cast<size_t>(std::get<double>(args[0]));
-        }
+    // stream.pause()
+    auto pause_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        entry->paused = true;
+        return std::monostate{};
+    };
+    obj->properties["pause"] = {
+        Value{std::make_shared<FunctionValue>("stream.pause", pause_impl, nullptr, tok)},
+        false, false, false, tok};
 
-        // ✅ USE ENCODED READ
-        return read_data_encoded(entry, n);
+    // stream.resume()
+    auto resume_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        entry->paused = false;
+        return std::monostate{};
+    };
+    obj->properties["resume"] = {
+        Value{std::make_shared<FunctionValue>("stream.resume", resume_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // stream.read()
+    auto read_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return read_data_encoded(entry, entry->high_water_mark);
     };
     obj->properties["read"] = {
         Value{std::make_shared<FunctionValue>("stream.read", read_impl, nullptr, tok)},
         false, false, false, tok};
+
+    // ===== WRITABLE SIDE =====
 
     // stream.write(chunk)
     auto write_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
@@ -735,7 +1078,6 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             throw SwaziError("TypeError", "stream.write requires data argument", token.loc);
         }
 
-        // ✅ DECODE INPUT BASED ON ENCODING
         BufferPtr buf = decode_value_to_buffer(args[0], entry->encoding);
 
         if (!buf) {
@@ -751,45 +1093,7 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
         Value{std::make_shared<FunctionValue>("stream.write", write_impl, nullptr, tok)},
         false, false, false, tok};
 
-    // stream.pause()
-    auto pause_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-        entry->state = StreamState::PAUSED;
-        return std::monostate{};
-    };
-    obj->properties["pause"] = {
-        Value{std::make_shared<FunctionValue>("stream.pause", pause_impl, nullptr, tok)},
-        false, false, false, tok};
-
-    // stream.resume()
-    auto resume_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-        entry->state = StreamState::FLOWING;
-
-        // Emit any buffered data WITH ENCODING APPLIED
-        std::vector<BufferPtr> chunks;
-        {
-            std::lock_guard<std::mutex> lk(entry->buffer_mutex);
-            chunks = std::vector<BufferPtr>(entry->buffer_queue.begin(),
-                entry->buffer_queue.end());
-            entry->buffer_queue.clear();
-        }
-
-        std::vector<FunctionPtr> listeners;
-        {
-            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
-            listeners = entry->data_listeners;
-        }
-
-        // ✅ APPLY ENCODING TO EACH BUFFERED CHUNK
-        for (const auto& chunk : chunks) {
-            Value encoded_data = encode_buffer_for_emission(chunk, entry->encoding);
-            emit_event(entry, listeners, {encoded_data});
-        }
-
-        return std::monostate{};
-    };
-    obj->properties["resume"] = {
-        Value{std::make_shared<FunctionValue>("stream.resume", resume_impl, nullptr, tok)},
-        false, false, false, tok};
+    // ===== COMMON METHODS =====
 
     // stream.pipe(dest)
     auto pipe_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
@@ -799,16 +1103,20 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
 
         ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
 
-        // Set up data forwarding through object methods (respects wrappers!)
+        // Data forwarding
         auto data_forwarder = std::make_shared<FunctionValue>(
             "pipe_data_forwarder",
-            [dest_obj](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
-                if (!args.empty() && std::holds_alternative<BufferPtr>(args[0])) {
+            [entry, dest_obj](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+                if (!args.empty()) {
                     auto write_prop = dest_obj->properties.find("write");
                     if (write_prop != dest_obj->properties.end() &&
                         std::holds_alternative<FunctionPtr>(write_prop->second.value)) {
                         FunctionPtr write_fn = std::get<FunctionPtr>(write_prop->second.value);
-                        write_fn->native_impl(args, env, token);
+                        Value result = write_fn->native_impl({args[0]}, env, token);
+                        
+                        if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                            entry->paused = true;
+                        }
                     }
                 }
                 return std::monostate{};
@@ -820,15 +1128,15 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             entry->data_listeners.push_back(data_forwarder);
         }
 
-        // Set up end forwarding through object methods
+        // End forwarding
         auto end_forwarder = std::make_shared<FunctionValue>(
             "pipe_end_forwarder",
-            [dest_obj](const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
+            [dest_obj](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
                 auto end_prop = dest_obj->properties.find("end");
                 if (end_prop != dest_obj->properties.end() &&
                     std::holds_alternative<FunctionPtr>(end_prop->second.value)) {
                     FunctionPtr end_fn = std::get<FunctionPtr>(end_prop->second.value);
-                    end_fn->native_impl({}, env, token);
+                    end_fn->native_impl({}, nullptr, Token{});
                 }
                 return std::monostate{};
             },
@@ -839,29 +1147,71 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
             entry->end_listeners.push_back(end_forwarder);
         }
 
-        // Emit pipe event
-        {
-            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
-            emit_event(entry, entry->pipe_listeners, {});
+        // Drain listener
+        auto drain_listener = std::make_shared<FunctionValue>(
+            "pipe_drain_listener",
+            [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                entry->paused = false;
+                return std::monostate{};
+            },
+            nullptr, Token{});
+
+        auto drain_on_prop = dest_obj->properties.find("on");
+        if (drain_on_prop != dest_obj->properties.end() &&
+            std::holds_alternative<FunctionPtr>(drain_on_prop->second.value)) {
+            FunctionPtr on_fn = std::get<FunctionPtr>(drain_on_prop->second.value);
+            on_fn->native_impl({Value{std::string("drain")}, Value{drain_listener}}, nullptr, Token{});
         }
 
-        return args[0];  // Return dest for chaining
+        return args[0];
     };
     obj->properties["pipe"] = {
         Value{std::make_shared<FunctionValue>("stream.pipe", pipe_impl, nullptr, tok)},
         false, false, false, tok};
 
+    // stream.end(chunk?)
+    auto end_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        if (!args.empty()) {
+            BufferPtr buf = decode_value_to_buffer(args[0], entry->encoding);
+            if (buf) write_data(entry, buf);
+        }
+
+        entry->ended = true;
+
+        std::vector<FunctionPtr> finish_listeners;
+        {
+            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+            finish_listeners = entry->finish_listeners;
+        }
+        emit_event(entry, finish_listeners, {});
+
+        // Also emit end on readable side
+        std::vector<FunctionPtr> end_listeners;
+        {
+            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+            end_listeners = entry->end_listeners;
+        }
+        emit_event(entry, end_listeners, {});
+
+        if (entry->auto_close && entry->file_handle && entry->file_handle->is_open) {
+            entry->file_handle->close_internal();
+        }
+
+        return std::monostate{};
+    };
+    obj->properties["end"] = {
+        Value{std::make_shared<FunctionValue>("stream.end", end_impl, nullptr, tok)},
+        false, false, false, tok};
+
     // stream.destroy()
     auto destroy_impl = [entry](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-        entry->state = StreamState::DESTROYED;
+        entry->is_destroyed = true;
         entry->destroyed = true;
 
-        // Close file if exists
         if (entry->file_handle && entry->file_handle->is_open) {
             entry->file_handle->close_internal();
         }
 
-        // Emit close event
         std::vector<FunctionPtr> listeners;
         {
             std::lock_guard<std::mutex> lk(entry->listeners_mutex);
@@ -869,7 +1219,6 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
         }
         emit_event(entry, listeners, {});
 
-        // Remove from registry
         {
             std::lock_guard<std::mutex> lk(g_streams_mutex);
             g_streams.erase(entry->id);
@@ -880,45 +1229,101 @@ static ObjectPtr create_stream_object(StreamEntryPtr entry) {
     obj->properties["destroy"] = {
         Value{std::make_shared<FunctionValue>("stream.destroy", destroy_impl, nullptr, tok)},
         false, false, false, tok};
-
-    // stream.end(chunk?)
-    auto end_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
-        // Write final chunk if provided
-        if (!args.empty()) {
-            BufferPtr buf;
-            if (std::holds_alternative<BufferPtr>(args[0])) {
-                buf = std::get<BufferPtr>(args[0]);
-            } else if (std::holds_alternative<std::string>(args[0])) {
-                buf = std::make_shared<BufferValue>();
-                std::string s = std::get<std::string>(args[0]);
-                buf->data.assign(s.begin(), s.end());
-            }
-            if (buf) write_data(entry, buf);
-        }
-
-        entry->ended = true;
-
-        // Emit finish event
-        std::vector<FunctionPtr> listeners;
-        {
-            std::lock_guard<std::mutex> lk(entry->listeners_mutex);
-            listeners = entry->finish_listeners;
-        }
-        emit_event(entry, listeners, {});
-
-        return std::monostate{};
-    };
-    obj->properties["end"] = {
-        Value{std::make_shared<FunctionValue>("stream.end", end_impl, nullptr, tok)},
-        false, false, false, tok};
-
-    // Store stream ID as hidden property for pipe() to find it
-    obj->properties["__stream_id__"] = {
-        Value{static_cast<double>(entry->id)},
-        true, false, true, tok};
+        
+    obj->properties["_type"] = {
+        Value{std::string("duplex")},  // or "writable", "duplex", "transform"
+        true, false, true, tok};  // hidden, non-writable, non-configurable
+    
+      // Add introspection methods
+    add_stream_introspection(obj, entry, tok);
 
     return obj;
 }
+
+// Create TRANSFORM stream object (duplex with transform function)
+static ObjectPtr create_transform_stream_object(StreamEntryPtr entry) {
+    // Start with duplex base
+    auto obj = create_duplex_stream_object(entry);
+
+    // Override write() to apply transformation
+    Token tok{};
+    tok.loc = TokenLocation("<streams>", 0, 0, 0);
+
+    auto transform_write_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "stream.write requires data argument", token.loc);
+        }
+
+        BufferPtr buf = decode_value_to_buffer(args[0], entry->encoding);
+
+        if (!buf) {
+            throw SwaziError("TypeError",
+                "write expects Buffer or string (encoding: " + entry->encoding + ")",
+                token.loc);
+        }
+
+        // If no transform function, pass through (identity transform)
+        if (!entry->transform_fn || !entry->evaluator_ptr) {
+            push_data(entry, buf);
+            return Value{entry->buffered_size < entry->high_water_mark};
+        }
+
+        // Apply transform function
+        try {
+            Token dummy_token;
+            dummy_token.loc = TokenLocation("<transform>", 0, 0, 0);
+
+            Value result = entry->evaluator_ptr->invoke_function(
+                entry->transform_fn,
+                {Value{buf}},
+                entry->transform_fn->closure,
+                dummy_token);
+
+            // Handle different return types
+            if (std::holds_alternative<BufferPtr>(result)) {
+                BufferPtr transformed = std::get<BufferPtr>(result);
+                push_data(entry, transformed);
+            } else if (std::holds_alternative<std::string>(result)) {
+                auto transformed_buf = std::make_shared<BufferValue>();
+                std::string s = std::get<std::string>(result);
+                transformed_buf->data.assign(s.begin(), s.end());
+                push_data(entry, transformed_buf);
+            } else if (std::holds_alternative<std::monostate>(result)) {
+                // Transform returned nothing (filtering)
+                return Value{true};
+            } else {
+                throw SwaziError("TypeError",
+                    "Transform function must return Buffer, string, or null",
+                    token.loc);
+            }
+
+            return Value{entry->buffered_size < entry->high_water_mark};
+
+        } catch (const std::exception& e) {
+            std::vector<FunctionPtr> listeners;
+            {
+                std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                listeners = entry->error_listeners;
+            }
+            emit_event(entry, listeners,
+                {Value{std::string("Transform error: ") + e.what()}});
+            return Value{false};
+        }
+    };
+
+    obj->properties["write"] = {
+        Value{std::make_shared<FunctionValue>("stream.write", transform_write_impl, nullptr, tok)},
+        false, false, false, tok};
+        
+    obj->properties["_type"] = {
+        Value{std::string("transform")},  // or "writable", "duplex", "transform"
+        true, false, true, tok};  // hidden, non-writable, non-configurable
+      // Add introspection methods
+    add_stream_introspection(obj, entry, tok);
+
+    return obj;
+}
+
 
 // Factory: streams.readable(path, options?)
 static Value native_createReadStream(const std::vector<Value>& args, EnvPtr, const Token& token) {
@@ -928,7 +1333,6 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr, con
 
     std::string path = value_to_string_simple_local(args[0]);
 
-    // Parse options if provided
     StreamOptions opts;
     if (args.size() >= 2) {
         opts = parse_stream_options(args[1]);
@@ -937,16 +1341,16 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr, con
     auto entry = std::make_shared<StreamEntry>();
     entry->id = g_next_stream_id.fetch_add(1);
     entry->type = StreamType::READABLE;
-    entry->source_path = path;
     entry->state = StreamState::FLOWING;
-
-    // Apply options
     entry->high_water_mark = opts.high_water_mark;
     entry->auto_close = opts.auto_close;
-    entry->chunk_size = opts.chunk_size;
     entry->encoding = opts.encoding;
+    entry->stream_start = opts.start;
+    entry->stream_end = opts.end;
+    entry->stream_speed = opts.speed;
+    entry->paused = false;
 
-    // Open file for reading
+    // Open file
     auto file = std::make_shared<FileValue>();
     file->path = path;
     file->mode = "rb";
@@ -958,6 +1362,14 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr, con
     if (file->handle == INVALID_HANDLE_VALUE) {
         throw SwaziError("IOError", "Failed to open file: " + path, token.loc);
     }
+    
+    // Get file size
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx((HANDLE)file->handle, &file_size)) {
+        CloseHandle((HANDLE)file->handle);
+        throw SwaziError("IOError", "Failed to get file size: " + path, token.loc);
+    }
+    size_t total_size = static_cast<size_t>(file_size.QuadPart);
 #else
     file->fd = ::open(path.c_str(), O_RDONLY);
     if (file->fd < 0) {
@@ -965,10 +1377,48 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr, con
             "Failed to open file: " + path + " (" + std::strerror(errno) + ")",
             token.loc);
     }
+    
+    // Get file size
+    struct stat st;
+    if (fstat(file->fd, &st) != 0) {
+        ::close(file->fd);
+        throw SwaziError("IOError", "Failed to get file size: " + path, token.loc);
+    }
+    size_t total_size = static_cast<size_t>(st.st_size);
 #endif
 
     file->is_open = true;
     entry->file_handle = file;
+
+    // Validate and set stream boundaries
+    if (entry->stream_end == 0) {
+        entry->stream_end = total_size;
+    } else if (entry->stream_end > total_size) {
+        file->close_internal();
+        throw SwaziError("RangeError", "Stream end exceeds file size", token.loc);
+    }
+
+    if (entry->stream_start > entry->stream_end) {
+        file->close_internal();
+        throw SwaziError("RangeError", "Stream start cannot exceed stream end", token.loc);
+    }
+
+    // Seek to start position
+    if (entry->stream_start > 0) {
+#ifdef _WIN32
+        LARGE_INTEGER pos;
+        pos.QuadPart = entry->stream_start;
+        if (!SetFilePointerEx((HANDLE)file->handle, pos, nullptr, FILE_BEGIN)) {
+            file->close_internal();
+            throw SwaziError("IOError", "Failed to seek to start position", token.loc);
+        }
+#else
+        if (lseek(file->fd, entry->stream_start, SEEK_SET) < 0) {
+            file->close_internal();
+            throw SwaziError("IOError", "Failed to seek to start position", token.loc);
+        }
+#endif
+    }
 
     // Register stream
     {
@@ -976,56 +1426,91 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr, con
         g_streams[entry->id] = entry;
     }
 
-    // Schedule async reading with configurable chunk size
+    // Schedule async reading loop (SwaziLang-style)
     scheduler_run_on_loop([entry]() {
-        const size_t chunk_size = entry->chunk_size;  // Use configured size
-        std::vector<uint8_t> buffer(chunk_size);
+        size_t current_pos = entry->stream_start;
+        const size_t HWM = entry->high_water_mark;
+        std::vector<uint8_t> buffer(HWM);
 
-        while (entry->state != StreamState::DESTROYED && !entry->ended) {
-            // Pause if requested
-            while (entry->state == StreamState::PAUSED) {
+        while (!entry->should_stop_reading && !entry->ended) {
+            // Pause check (like SwaziLang's handleDataCallback)
+            while (entry->paused && !entry->should_stop_reading) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
 
-            // Respect high water mark - pause reading if buffer is full
-            while (entry->buffered_size >= entry->high_water_mark &&
-                entry->state == StreamState::FLOWING) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (entry->should_stop_reading) break;
+
+            // Check if we've reached the end
+            if (current_pos >= entry->stream_end) {
+                entry->ended = true;
+                push_data(entry, nullptr);  // Signal EOF
+                break;
             }
+
+            // Calculate chunk size
+            size_t to_read = std::min(HWM, entry->stream_end - current_pos);
 
             ssize_t bytes_read = 0;
 #ifdef _WIN32
             DWORD read_count = 0;
             if (!ReadFile((HANDLE)entry->file_handle->handle,
                     buffer.data(),
-                    static_cast<DWORD>(chunk_size),
+                    static_cast<DWORD>(to_read),
                     &read_count,
                     nullptr)) {
+                // Error
+                std::vector<FunctionPtr> listeners;
+                {
+                    std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                    listeners = entry->error_listeners;
+                }
+                emit_event(entry, listeners, {Value{std::string("Read error")}});
                 break;
             }
             bytes_read = read_count;
 #else
-            bytes_read = ::read(entry->file_handle->fd, buffer.data(), chunk_size);
+            bytes_read = ::read(entry->file_handle->fd, buffer.data(), to_read);
+            if (bytes_read < 0) {
+                // Error
+                std::vector<FunctionPtr> listeners;
+                {
+                    std::lock_guard<std::mutex> lk(entry->listeners_mutex);
+                    listeners = entry->error_listeners;
+                }
+                emit_event(entry, listeners,
+                    {Value{std::string("Read error: ") + std::strerror(errno)}});
+                break;
+            }
 #endif
 
-            if (bytes_read <= 0) {
-                // EOF or error
-                push_data(entry, nullptr);  // Signal end
+            if (bytes_read == 0) {
+                // Unexpected EOF
+                entry->ended = true;
+                push_data(entry, nullptr);
                 break;
             }
 
+            current_pos += bytes_read;
+
+            // Create chunk and push
             auto chunk = std::make_shared<BufferValue>();
             chunk->data.assign(buffer.begin(), buffer.begin() + bytes_read);
             push_data(entry, chunk);
+
+            // Apply speed throttling (like SwaziLang)
+            if (entry->stream_speed > 0) {
+                int delay_ms = static_cast<int>(entry->stream_speed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            }
         }
 
-        // Close file if autoClose is enabled
+        // Auto-close if enabled
         if (entry->auto_close && entry->file_handle && entry->file_handle->is_open) {
             entry->file_handle->close_internal();
         }
     });
 
-    return Value{create_stream_object(entry)};
+    return Value{create_readable_stream_object(entry)};
 }
 
 // Factory: streams.writable(path, options?)
@@ -1109,50 +1594,59 @@ static Value native_createWriteStream(const std::vector<Value>& args, EnvPtr, co
         g_streams[entry->id] = entry;
     }
 
-    return Value{create_stream_object(entry)};
+    return Value{create_writable_stream_object(entry)};
 }
 
-// Factory: streams.create(source, mode, options?/function)
+// Helper: Normalize and validate stream mode
+static std::string normalize_stream_mode(const std::string& mode, const Token& token) {
+    if (mode == "r" || mode == "read" || mode == "readable") {
+        return "readable";
+    } else if (mode == "w" || mode == "write" || mode == "writable") {
+        return "writable";
+    } else if (mode == "d" || mode == "duplex") {
+        return "duplex";
+    } else if (mode == "t" || mode == "transform") {
+        return "transform";
+    } else {
+        throw SwaziError("ValueError",
+            "Invalid stream mode '" + mode + "'. Use 'r'/'read'/'readable', "
+            "'w'/'write'/'writable', 'd'/'duplex', or 't'/'transform'",
+            token.loc);
+    }
+}
+// Factory: streams.create(source, mode, options?) OR streams.create(source, mode, transform_fn, options?)
 static Value native_createStream(const std::vector<Value>& args, EnvPtr env, const Token& token, Evaluator* evaluator) {
     if (args.size() < 2) {
         throw SwaziError("TypeError",
-            "streams.create requires (source, mode, ...) arguments",
+            "streams.create requires at least (source, mode) arguments",
             token.loc);
     }
 
-    std::string mode = value_to_string_simple_local(args[1]);
+    std::string raw_mode = value_to_string_simple_local(args[1]);
+    std::string mode = normalize_stream_mode(raw_mode, token);
 
     // ============ READABLE MODE ============
-    if (mode == "r" || mode == "read") {
-        // Signature: create(path, "r", options?)
+    if (mode == "readable") {
         std::vector<Value> read_args;
-        read_args.push_back(args[0]);  // path
-
-        // If 3rd arg exists and is NOT a function, treat as options
-        if (args.size() >= 3 && !std::holds_alternative<FunctionPtr>(args[2])) {
-            read_args.push_back(args[2]);  // options object
+        read_args.push_back(args[0]);
+        if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
+            read_args.push_back(args[2]);
         }
-
         return native_createReadStream(read_args, env, token);
     }
 
     // ============ WRITABLE MODE ============
-    else if (mode == "w" || mode == "write") {
-        // Signature: create(path, "w", options?)
+    else if (mode == "writable") {
         std::vector<Value> write_args;
-        write_args.push_back(args[0]);  // path
-
-        // If 3rd arg exists and is NOT a function, treat as options
-        if (args.size() >= 3 && !std::holds_alternative<FunctionPtr>(args[2])) {
-            write_args.push_back(args[2]);  // options object
+        write_args.push_back(args[0]);
+        if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
+            write_args.push_back(args[2]);
         }
-
         return native_createWriteStream(write_args, env, token);
     }
 
     // ============ DUPLEX MODE ============
-    else if (mode == "d" || mode == "duplex") {
-        // Signature: create(source, "d", options?)
+    else if (mode == "duplex") {
         StreamOptions opts;
         if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
             opts = parse_stream_options(args[2]);
@@ -1161,63 +1655,55 @@ static Value native_createStream(const std::vector<Value>& args, EnvPtr env, con
         auto entry = std::make_shared<StreamEntry>();
         entry->id = g_next_stream_id.fetch_add(1);
         entry->type = StreamType::DUPLEX;
-        entry->state = StreamState::FLOWING;  // ✅ ADD THIS - duplex should also flow
-
-        // Apply options
         entry->high_water_mark = opts.high_water_mark;
         entry->auto_close = opts.auto_close;
         entry->encoding = opts.encoding;
+        entry->paused = false;
 
         {
             std::lock_guard<std::mutex> lk(g_streams_mutex);
             g_streams[entry->id] = entry;
         }
 
-        return Value{create_stream_object(entry)};
+        return Value{create_duplex_stream_object(entry)};
     }
 
     // ============ TRANSFORM MODE ============
-    else if (mode == "t" || mode == "transform") {
+    else if (mode == "transform") {
+        FunctionPtr transform_fn = nullptr;
+        StreamOptions opts;
+        
+        if (args.size() >= 3) {
+            if (std::holds_alternative<FunctionPtr>(args[2])) {
+                transform_fn = std::get<FunctionPtr>(args[2]);
+                if (args.size() >= 4 && std::holds_alternative<ObjectPtr>(args[3])) {
+                    opts = parse_stream_options(args[3]);
+                }
+            } else if (std::holds_alternative<ObjectPtr>(args[2])) {
+                opts = parse_stream_options(args[2]);
+            }
+        }
+
         auto entry = std::make_shared<StreamEntry>();
         entry->id = g_next_stream_id.fetch_add(1);
         entry->type = StreamType::TRANSFORM;
-        entry->state = StreamState::FLOWING;  // ✅ Already correct - start in flowing mode
         entry->evaluator_ptr = evaluator;
-
-        // Extract transform function (3rd arg MUST be a function)
-        if (args.size() < 3 || !std::holds_alternative<FunctionPtr>(args[2])) {
-            throw SwaziError("TypeError",
-                "Transform mode requires a transform function as 3rd argument. "
-                "Usage: create(source, 't', transformFn, options?)",
-                token.loc);
-        }
-
-        entry->transform_fn = std::get<FunctionPtr>(args[2]);
-
-        // Parse options if 4th arg exists and is an object
-        StreamOptions opts;
-        if (args.size() >= 4 && std::holds_alternative<ObjectPtr>(args[3])) {
-            opts = parse_stream_options(args[3]);
-        }
-
-        // Apply options
+        entry->transform_fn = transform_fn;
         entry->high_water_mark = opts.high_water_mark;
         entry->auto_close = opts.auto_close;
         entry->encoding = opts.encoding;
+        entry->paused = false;
 
         {
             std::lock_guard<std::mutex> lk(g_streams_mutex);
             g_streams[entry->id] = entry;
         }
 
-        return Value{create_stream_object(entry)};
+        return Value{create_transform_stream_object(entry)};
     }
 
-    else {
-        throw SwaziError("ValueError",
-            "Invalid stream mode. Use 'r', 'w', 'd', or 't'",
-            token.loc);
-    }
+    // Should never reach here due to normalize_stream_mode validation
+    throw SwaziError("ValueError", "Invalid stream mode", token.loc);
 }
 
 // Helper implementation
@@ -1359,10 +1845,10 @@ static StreamEntryPtr create_writable_network_stream(uv_tcp_t* socket) {
 
 ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket) {
     auto entry = create_readable_network_stream(socket);
-    return create_stream_object(entry);
+    return create_readable_stream_object(entry);  // ✅ CORRECT
 }
 
 ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket) {
     auto entry = create_writable_network_stream(socket);
-    return create_stream_object(entry);
+    return create_writable_stream_object(entry);  // ✅ CORRECT
 }
