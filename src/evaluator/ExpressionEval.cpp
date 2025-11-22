@@ -2040,8 +2040,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     if (prop == "urefu") {
                         return Value{static_cast<double>(arr->elements.size())};
                     }
-                    
-                    // empty() -> bool, true if empty 
+
+                    // empty() -> bool, true if empty
                     if (prop == "empty") {
                         return Value{static_cast<bool>(arr->elements.empty())};
                     }

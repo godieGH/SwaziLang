@@ -73,7 +73,11 @@ void Evaluator::schedule_callback(FunctionPtr cb, const std::vector<Value>& args
 void Evaluator::run_event_loop() {
     if (scheduler()) {
         scheduler()->run_until_idle([]() {
-            return async_timers_exist() || tcp_has_active_work() || net_has_active_work() || udp_has_active_work();
+            return async_timers_exist() ||
+                tcp_has_active_work() ||
+                net_has_active_work() ||
+                udp_has_active_work() ||
+                streams_have_active_work();
         });
         return;
     }
