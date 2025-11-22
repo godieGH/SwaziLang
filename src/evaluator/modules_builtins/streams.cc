@@ -190,7 +190,7 @@ struct ReadableStreamState : public std::enable_shared_from_this<ReadableStreamS
     bool reading = false;
     bool destroyed = false;
     bool flowing = false;
-    
+
     EnvPtr env;
     Evaluator* evaluator = nullptr;  // ADD THIS
 
@@ -235,8 +235,8 @@ static std::unordered_map<long long, ReadableStreamStatePtr> g_readable_streams;
 // ============================================================================
 
 static void emit_readable_event_sync(ReadableStreamStatePtr state,
-                                      const std::vector<FunctionPtr>& listeners,
-                                      const std::vector<Value>& args) {
+    const std::vector<FunctionPtr>& listeners,
+    const std::vector<Value>& args) {
     if (!state || !state->env || !state->evaluator) {
         // Fallback to async if no env/evaluator
         for (const auto& cb : listeners) {
@@ -246,10 +246,10 @@ static void emit_readable_event_sync(ReadableStreamStatePtr state,
         }
         return;
     }
-    
+
     Token tok{};
     tok.loc = TokenLocation("<stream-event>", 0, 0, 0);
-    
+
     // Call each listener SYNCHRONOUSLY using invoke_function
     for (const auto& cb : listeners) {
         if (cb) {
@@ -386,8 +386,7 @@ static void on_read_complete(uv_fs_t* req) {
 
             uv_close((uv_handle_t*)handle, [](uv_handle_t* h) {
                 delete (uv_timer_t*)h;
-            });
-        }, static_cast<uint64_t>(state->speed), 0);
+            }); }, static_cast<uint64_t>(state->speed), 0);
     } else {
         // No speed delay - read next chunk immediately
         schedule_next_read(state);
@@ -633,7 +632,7 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr env,
     state->encoding = opts.encoding;
     state->auto_close = opts.auto_close;
     state->speed = opts.speed;
-    state->env = env; 
+    state->env = env;
     state->evaluator = evaluator;
 
     {
@@ -653,7 +652,6 @@ std::shared_ptr<ObjectValue> make_streams_exports(EnvPtr env, Evaluator* evaluat
     Token tok{};
     tok.loc = TokenLocation("<streams>", 0, 0, 0);
 
-    
     auto createReadable = [evaluator](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
         return native_createReadStream(args, env, evaluator, token);
     };
