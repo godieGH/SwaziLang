@@ -270,26 +270,26 @@ static Value built_object_create(const std::vector<Value>& args, EnvPtr env, con
     return obj;
 }
 
-static Value builtin_kadiria(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_round(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     double x = args.empty() ? 0.0 : value_to_number(args[0]);
     return std::round(x);
 }
-static Value builtin_kadiriajuu(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_ceil(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     double x = args.empty() ? 0.0 : value_to_number(args[0]);
     return std::ceil(x);
 }
-static Value builtin_kadiriachini(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_floor(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     double x = args.empty() ? 0.0 : value_to_number(args[0]);
     return std::floor(x);
 }
 
-static Value builtin_kubwa(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_max(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if (args.empty()) return 0.0;
     double m = value_to_number(args[0]);
     for (size_t i = 1; i < args.size(); ++i) m = std::fmax(m, value_to_number(args[i]));
     return m;
 }
-static Value builtin_ndogo(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_min(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if (args.empty()) return 0.0;
     double m = value_to_number(args[0]);
     for (size_t i = 1; i < args.size(); ++i) m = std::fmin(m, value_to_number(args[i]));
@@ -929,11 +929,11 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
                 Token{}};
         };
 
-        add("kadiria", builtin_kadiria);
-        add("kadiriajuu", builtin_kadiriajuu);
-        add("kadiriachini", builtin_kadiriachini);
-        add("kubwa", builtin_kubwa);
-        add("ndogo", builtin_ndogo);
+        add("round", builtin_round);
+        add("ceil", builtin_ceil);
+        add("floor", builtin_floor);
+        add("max", builtin_max);
+        add("min", builtin_min);
         add("log", builtin_log);
         add("ln", builtin_ln);
         add("sin", builtin_sin);
@@ -941,18 +941,16 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
         add("tan", builtin_tan);
         add("hypot", builtin_hypot);
         add("rand", builtin_rand);
-        add("siNambaSahihi", builtin_isnan);
         add("isNaN", builtin_isnan);
         add("deg2rad", builtin_deg2rad);
         add("rad2deg", builtin_rad2deg);
-        add("alama", builtin_sign);
+        add("sign", builtin_sign);
         add("gcd", builtin_gcd);
         add("lcm", builtin_lcm);
         add("mean", builtin_mean);
         add("median", builtin_median);
         add("stddev", builtin_stddev);
-        add("kadiriaKtkDes", builtin_roundTo);
-        add("fixAt", builtin_roundTo);
+        add("fixA", builtin_roundTo);
 
         Value nanValue = Value(std::numeric_limits<double>::quiet_NaN());
 
@@ -975,7 +973,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
         Environment::Variable hesabuVar;
         hesabuVar.value = hesabuVal;
         hesabuVar.is_constant = true;
-        env->set("Hesabu", hesabuVar);
+        env->set("Math", hesabuVar);
     }
 
     init_time(env);
