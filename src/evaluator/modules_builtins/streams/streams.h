@@ -214,3 +214,9 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
 
 
 Value native_createDuplexStream(const std::vector<Value>& args, EnvPtr env, Evaluator* evaluator, const Token& token);
+
+void emit_writable_event_sync(WritableStreamStatePtr state,
+    const std::vector<FunctionPtr>& listeners,
+    const std::vector<Value>& args);
+    
+extern std::atomic<long long> g_next_stream_id;

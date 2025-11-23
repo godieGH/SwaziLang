@@ -38,6 +38,8 @@ bool streams_have_active_work() {
     return g_active_stream_operations.load() > 0;
 }
 
+std::atomic<long long> g_next_stream_id{1};
+
 // ============================================================================
 // UTILITY HELPERS
 // ============================================================================

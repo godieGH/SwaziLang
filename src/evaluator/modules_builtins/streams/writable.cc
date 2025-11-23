@@ -32,8 +32,10 @@
 // GLOBAL STATE DEFINITIONS
 // ============================================================================
 std::mutex g_writable_streams_mutex;
-static std::atomic<long long> g_next_writable_stream_id{1};
+// static std::atomic<long long> g_next_writable_stream_id{1};
 std::unordered_map<long long, WritableStreamStatePtr> g_writable_streams;
+extern std::mutex g_duplex_streams_mutex;
+extern std::unordered_map<long long, std::shared_ptr<struct DuplexStreamState>> g_duplex_streams;
 
 // ============================================================================
 // WRITABLE STREAM OPTIONS
@@ -120,7 +122,7 @@ static int flags_to_open_mode(const std::string& flags) {
 // EVENT EMISSION - SYNCHRONOUS
 // ============================================================================
 
-static void emit_writable_event_sync(WritableStreamStatePtr state,
+void emit_writable_event_sync(WritableStreamStatePtr state,
     const std::vector<FunctionPtr>& listeners,
     const std::vector<Value>& args) {
     if (!state || !state->env || !state->evaluator) {
@@ -366,30 +368,49 @@ void cleanup_pipe(PipeContextPtr ctx) {
 // PIPE IMPLEMENTATION
 // ============================================================================
 
+// Forward declaration for duplex support
+struct DuplexStreamState;
+using DuplexStreamStatePtr = std::shared_ptr<DuplexStreamState>;
+
+// Helper to emit duplex events (declare before implement_pipe)
+static void emit_duplex_event_sync(DuplexStreamStatePtr state,
+    const std::vector<FunctionPtr>& listeners,
+    const std::vector<Value>& args);
+
+// Helper to push data to duplex (declare before implement_pipe)
+static bool duplex_push(DuplexStreamStatePtr state, const std::vector<char>& data);
+
 Value implement_pipe(ReadableStreamStatePtr readable_state,
     WritableStreamStatePtr writable_state,
     bool end_on_finish,
     const Token& token) {
-    if (!readable_state || !writable_state) {
-        throw SwaziError("TypeError", "Invalid stream objects for pipe", token.loc);
+    if (!readable_state) {
+        throw SwaziError("TypeError", "Invalid readable stream for pipe", token.loc);
     }
 
     if (readable_state->destroyed) {
         throw SwaziError("Error", "Cannot pipe from destroyed readable stream", token.loc);
     }
 
-    if (writable_state->destroyed) {
-        throw SwaziError("Error", "Cannot pipe to destroyed writable stream", token.loc);
-    }
+    // Check if destination is actually a duplex stream
+    DuplexStreamStatePtr duplex_state = nullptr;
+    ObjectPtr return_obj = nullptr;
 
-    if (writable_state->ended) {
-        throw SwaziError("Error", "Cannot pipe to ended writable stream", token.loc);
+    if (writable_state) {
+        // Regular writable stream path
+        if (writable_state->destroyed) {
+            throw SwaziError("Error", "Cannot pipe to destroyed writable stream", token.loc);
+        }
+        if (writable_state->ended) {
+            throw SwaziError("Error", "Cannot pipe to ended writable stream", token.loc);
+        }
+        return_obj = create_writable_stream_object(writable_state);
     }
 
     // Create pipe context
     auto ctx = std::make_shared<PipeContext>();
     ctx->readable = readable_state;
-    ctx->writable = writable_state;
+    ctx->writable = writable_state;  // May be null if duplex
     ctx->end_on_finish = end_on_finish;
     ctx->piping = true;
 
@@ -397,15 +418,15 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
     evt_tok.loc = TokenLocation("<pipe-event>", 0, 0, 0);
 
     // ========================================================================
-    // DATA HANDLER - Write data to writable, handle backpressure
+    // DATA HANDLER - Write data to destination (writable or duplex)
     // ========================================================================
 
-    auto data_impl = [ctx](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-        if (!ctx->piping || !ctx->writable || !ctx->readable) {
+    auto data_impl = [ctx, duplex_state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (!ctx->piping || !ctx->readable) {
             return std::monostate{};
         }
 
-        if (ctx->writable->destroyed || ctx->writable->ended) {
+        if (ctx->writable && (ctx->writable->destroyed || ctx->writable->ended)) {
             cleanup_pipe(ctx);
             if (ctx->readable) {
                 ctx->readable->pause();
@@ -418,42 +439,41 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
         }
 
         const Value& chunk = args[0];
+        bool needs_drain = false;
 
-        // Convert chunk to bytes for writing
-        std::vector<char> bytes;
+        if (ctx->writable) {
+            // Pipe to writable stream
+            std::vector<char> bytes;
 
-        if (std::holds_alternative<BufferPtr>(chunk)) {
-            auto buf = std::get<BufferPtr>(chunk);
-            bytes = std::vector<char>(buf->data.begin(), buf->data.end());
-        } else if (std::holds_alternative<std::string>(chunk)) {
-            std::string str = std::get<std::string>(chunk);
-            bytes = std::vector<char>(str.begin(), str.end());
-        } else {
-            // Skip non-writable data
-            return std::monostate{};
+            if (std::holds_alternative<BufferPtr>(chunk)) {
+                auto buf = std::get<BufferPtr>(chunk);
+                bytes = std::vector<char>(buf->data.begin(), buf->data.end());
+            } else if (std::holds_alternative<std::string>(chunk)) {
+                std::string str = std::get<std::string>(chunk);
+                bytes = std::vector<char>(str.begin(), str.end());
+            } else {
+                return std::monostate{};
+            }
+
+            if (bytes.empty()) {
+                return std::monostate{};
+            }
+
+            WriteChunk write_chunk;
+            write_chunk.data = std::move(bytes);
+            write_chunk.callback = nullptr;
+
+            ctx->writable->buffered_size += write_chunk.data.size();
+            ctx->writable->write_queue.push_back(std::move(write_chunk));
+
+            needs_drain = (ctx->writable->buffered_size >= ctx->writable->high_water_mark);
+
+            if (!ctx->writable->writing && !ctx->writable->corked &&
+                !ctx->writable->write_queue.empty()) {
+                schedule_next_write(ctx->writable);
+            }
         }
 
-        if (bytes.empty()) {
-            return std::monostate{};
-        }
-
-        // Add to writable's queue
-        WriteChunk write_chunk;
-        write_chunk.data = std::move(bytes);
-        write_chunk.callback = nullptr;
-
-        ctx->writable->buffered_size += write_chunk.data.size();
-        ctx->writable->write_queue.push_back(std::move(write_chunk));
-
-        bool needs_drain = (ctx->writable->buffered_size >= ctx->writable->high_water_mark);
-
-        // Start writing if not already writing and not corked
-        if (!ctx->writable->writing && !ctx->writable->corked &&
-            !ctx->writable->write_queue.empty()) {
-            schedule_next_write(ctx->writable);
-        }
-
-        // Handle backpressure - pause readable if writable buffer is full
         if (needs_drain) {
             ctx->writable->draining = true;
             if (ctx->readable && !ctx->readable->paused) {
@@ -468,11 +488,11 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
     readable_state->data_listeners.push_back(ctx->data_handler);
 
     // ========================================================================
-    // DRAIN HANDLER - Resume readable when writable is ready
+    // DRAIN HANDLER - Resume readable when destination is ready
     // ========================================================================
 
     auto drain_impl = [ctx](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-        if (!ctx->piping || !ctx->readable || !ctx->writable) {
+        if (!ctx->piping || !ctx->readable) {
             return std::monostate{};
         }
 
@@ -484,10 +504,13 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
     };
 
     ctx->drain_handler = std::make_shared<FunctionValue>("pipe.drain", drain_impl, nullptr, evt_tok);
-    writable_state->drain_listeners.push_back(ctx->drain_handler);
+
+    if (writable_state) {
+        writable_state->drain_listeners.push_back(ctx->drain_handler);
+    }
 
     // ========================================================================
-    // END HANDLER - End writable when readable ends
+    // END HANDLER - End destination when readable ends
     // ========================================================================
 
     auto end_impl = [ctx](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
@@ -498,7 +521,6 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
         if (ctx->writable && ctx->end_on_finish && !ctx->writable->ended) {
             ctx->writable->ended = true;
 
-            // If queue is empty, finish immediately
             if (ctx->writable->write_queue.empty() && !ctx->writable->writing) {
                 ctx->writable->finished = true;
                 emit_writable_event_sync(ctx->writable, ctx->writable->finish_listeners, {});
@@ -508,7 +530,6 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
                     emit_writable_event_sync(ctx->writable, ctx->writable->close_listeners, {});
                 }
             } else if (!ctx->writable->writing && !ctx->writable->corked) {
-                // Start draining remaining writes
                 schedule_next_write(ctx->writable);
             }
         }
@@ -521,7 +542,7 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
     readable_state->end_listeners.push_back(ctx->end_handler);
 
     // ========================================================================
-    // ERROR HANDLERS - Propagate errors and cleanup
+    // ERROR HANDLERS
     // ========================================================================
 
     auto error_impl = [ctx](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
@@ -529,14 +550,12 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
             return std::monostate{};
         }
 
-        // Propagate error to writable
         if (ctx->writable && !args.empty()) {
             emit_writable_event_sync(ctx->writable, ctx->writable->error_listeners, args);
         }
 
         cleanup_pipe(ctx);
 
-        // Destroy writable on readable error
         if (ctx->writable && !ctx->writable->destroyed) {
             ctx->writable->destroyed = true;
             ctx->writable->close_file();
@@ -549,7 +568,7 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
     readable_state->error_listeners.push_back(ctx->error_handler);
 
     // ========================================================================
-    // CLOSE HANDLER - Cleanup on close
+    // CLOSE HANDLER
     // ========================================================================
 
     auto close_impl = [ctx](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
@@ -561,13 +580,12 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
     readable_state->close_listeners.push_back(ctx->close_handler);
 
     // ========================================================================
-    // START FLOWING if not already
+    // START FLOWING
     // ========================================================================
 
     if (!readable_state->flowing && !readable_state->ended && !readable_state->destroyed) {
         readable_state->flowing = true;
 
-        // Defer the first read to next tick
         uv_timer_t* timer = new uv_timer_t;
         ReadableStreamState* raw_state = readable_state.get();
         timer->data = raw_state;
@@ -593,10 +611,8 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
             }); }, 0, 0);
     }
 
-    // Return the writable stream for chaining
-    return Value{create_writable_stream_object(writable_state)};
+    return Value{return_obj};
 }
-
 // ============================================================================
 // CREATE WRITABLE STREAM OBJECT
 // ============================================================================
@@ -931,7 +947,7 @@ Value native_createWriteStream(const std::vector<Value>& args, EnvPtr env, Evalu
     }
 
     auto state = std::make_shared<WritableStreamState>();
-    state->id = g_next_writable_stream_id.fetch_add(1);
+    state->id = g_next_stream_id.fetch_add(1);
     state->fd = fd;
     state->path = path;
     state->high_water_mark = opts.high_water_mark;

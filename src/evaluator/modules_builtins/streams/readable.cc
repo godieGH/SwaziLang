@@ -33,7 +33,7 @@
 // ============================================================================
 
 std::mutex g_readable_streams_mutex;
-static std::atomic<long long> g_next_readable_stream_id{1};
+// static std::atomic<long long> g_next_readable_stream_id{1};
 std::unordered_map<long long, ReadableStreamStatePtr> g_readable_streams;
 
 // ============================================================================
@@ -495,7 +495,7 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
     stream_events_arr_val->elements.push_back(Value(std::string("error")));
     obj->properties["_events"] = {stream_events_arr_val, false, false, true, tok};
 
-    auto pipe_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& tok) -> Value {
+    auto pipe_impl = [state](const std::vector<Value>& args, EnvPtr env, const Token& tok) -> Value {
         if (args.empty()) {
             throw SwaziError("TypeError", "readable.pipe(writable) requires a writable stream as destination", tok.loc);
         }
@@ -506,32 +506,27 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
 
         ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
 
-        // Extract writable stream ID from destination object
+        // Extract destination stream ID
         auto id_it = dest_obj->properties.find("_id");
         if (id_it == dest_obj->properties.end() ||
             !std::holds_alternative<double>(id_it->second.value)) {
-            throw SwaziError("TypeError", "Invalid writable stream object", tok.loc);
+            throw SwaziError("TypeError", "Invalid stream object", tok.loc);
         }
 
-        long long writable_id = static_cast<long long>(std::get<double>(id_it->second.value));
+        long long dest_id = static_cast<long long>(std::get<double>(id_it->second.value));
 
-        // Find writable stream state
+        // Try to find writable stream first
         WritableStreamStatePtr writable_state;
         {
             std::lock_guard<std::mutex> lock(g_writable_streams_mutex);
-            auto it = g_writable_streams.find(writable_id);
+            auto it = g_writable_streams.find(dest_id);
             if (it != g_writable_streams.end()) {
                 writable_state = it->second;
             }
         }
 
-        if (!writable_state) {
-            throw SwaziError("Error", "Writable stream not found or already destroyed", tok.loc);
-        }
-
-        // Parse options
-        bool end_on_finish = true;  // Default: end writable when readable ends
-
+        // Parse options for end behavior
+        bool end_on_finish = true;
         if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
             ObjectPtr opts = std::get<ObjectPtr>(args[1]);
             auto end_it = opts->properties.find("end");
@@ -540,7 +535,100 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
             }
         }
 
-        // Implement the pipe
+        // If not found in writable streams, assume it's a duplex and wire manually
+        if (!writable_state) {
+            // Wire up readable -> duplex manually using direct function calls
+            Token evt_tok{};
+            evt_tok.loc = TokenLocation("<pipe-to-duplex>", 0, 0, 0);
+
+            // Data handler: calls duplex.write(chunk) when data arrives
+            auto data_handler = [dest_obj, state](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+                if (args.empty()) return std::monostate{};
+
+                auto write_it = dest_obj->properties.find("write");
+                if (write_it == dest_obj->properties.end()) return std::monostate{};
+
+                if (!std::holds_alternative<FunctionPtr>(write_it->second.value)) return std::monostate{};
+
+                FunctionPtr write_fn = std::get<FunctionPtr>(write_it->second.value);
+
+                // Call the write function - it's a native function so call native_impl directly
+                if (write_fn->is_native && write_fn->native_impl) {
+                    try {
+                        return write_fn->native_impl({args[0]}, env, token);
+                    } catch (...) {
+                        return Value{false};
+                    }
+                }
+
+                // For non-native functions, would need evaluator->invoke_function
+                // but duplex write() is always native, so this shouldn't happen
+                return Value{false};
+            };
+
+            auto data_fn = std::make_shared<FunctionValue>("pipe.data", data_handler, nullptr, evt_tok);
+            state->data_listeners.push_back(data_fn);
+
+            // End handler: calls duplex.end() when readable ends (if end_on_finish is true)
+            if (end_on_finish) {
+                auto end_handler = [dest_obj](const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
+                    auto end_it = dest_obj->properties.find("end");
+                    if (end_it == dest_obj->properties.end()) return std::monostate{};
+
+                    if (!std::holds_alternative<FunctionPtr>(end_it->second.value)) return std::monostate{};
+
+                    FunctionPtr end_fn = std::get<FunctionPtr>(end_it->second.value);
+
+                    // Call the end function - it's a native function
+                    if (end_fn->is_native && end_fn->native_impl) {
+                        try {
+                            return end_fn->native_impl({}, env, token);
+                        } catch (...) {
+                            return std::monostate{};
+                        }
+                    }
+
+                    return std::monostate{};
+                };
+
+                auto end_fn = std::make_shared<FunctionValue>("pipe.end", end_handler, nullptr, evt_tok);
+                state->end_listeners.push_back(end_fn);
+            }
+
+            // Start flowing if not already
+            if (!state->flowing && !state->ended && !state->destroyed) {
+                state->flowing = true;
+
+                uv_timer_t* timer = new uv_timer_t;
+                ReadableStreamState* raw_state = state.get();
+                timer->data = raw_state;
+                uv_timer_init(scheduler_get_loop(), timer);
+
+                uv_timer_start(timer, [](uv_timer_t* handle) {
+                ReadableStreamState* raw = static_cast<ReadableStreamState*>(handle->data);
+                ReadableStreamStatePtr st;
+                {
+                    std::lock_guard<std::mutex> lock(g_readable_streams_mutex);
+                    auto it = g_readable_streams.find(raw->id);
+                    if (it != g_readable_streams.end()) {
+                        st = it->second;
+                    }
+                }
+                
+                if (st && st->flowing && !st->paused && !st->ended && !st->destroyed) {
+                    schedule_next_read(st);
+                }
+                
+                uv_close((uv_handle_t*)handle, [](uv_handle_t* h) {
+                    delete (uv_timer_t*)h;
+                }); }, 0, 0);
+            }
+
+            // Return the duplex object for chaining
+            return Value{dest_obj};
+        }
+
+        // Regular writable stream path - use implement_pipe
         return implement_pipe(state, writable_state, end_on_finish, tok);
     };
     obj->properties["pipe"] = {
@@ -611,7 +699,7 @@ Value native_createReadStream(const std::vector<Value>& args, EnvPtr env, Evalua
     }
 
     auto state = std::make_shared<ReadableStreamState>();
-    state->id = g_next_readable_stream_id.fetch_add(1);
+    state->id = g_next_stream_id.fetch_add(1);
     state->fd = fd;
     state->path = path;
     state->file_size = file_size;
