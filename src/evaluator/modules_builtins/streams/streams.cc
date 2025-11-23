@@ -100,6 +100,13 @@ std::shared_ptr<ObjectValue> make_streams_exports(EnvPtr env, Evaluator* evaluat
     obj->properties["createWritable"] = {
         Value{std::make_shared<FunctionValue>("streams.createWritable", createWritable, env, tok)},
         false, false, true, tok};
+    
+    auto createDuplex = [evaluator](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        return native_createDuplexStream(args, env, evaluator, token);
+    };
+    obj->properties["createDuplex"] = {
+        Value{std::make_shared<FunctionValue>("streams.createDuplex", createDuplex, env, tok)},
+        false, false, true, tok};
 
     return obj;
 }

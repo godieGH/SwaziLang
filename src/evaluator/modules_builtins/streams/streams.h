@@ -210,3 +210,7 @@ Value implement_pipe(ReadableStreamStatePtr readable_state,
                      WritableStreamStatePtr writable_state,
                      bool end_on_finish,
                      const Token& token);
+
+
+
+Value native_createDuplexStream(const std::vector<Value>& args, EnvPtr env, Evaluator* evaluator, const Token& token);
