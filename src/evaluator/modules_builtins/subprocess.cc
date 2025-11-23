@@ -1,6 +1,6 @@
-// Place this file at: src/evaluator/modules_builtins/child_process.cpp
+// Place this file at: src/evaluator/modules_builtins/subprocess.cpp
 // Build with -luv (project already links libuv)
-// Implements a minimal child_process builtin with exec, spawn, fork.
+// Implements a minimal subprocess builtin with exec, spawn, fork.
 // - exec(cmd[, cb]) -> Promise resolving { stdout, stderr, code } OR if cb provided calls cb(err, result).
 // - spawn(cmd, ...args) -> returns a child object with .stdout/.stderr objects that have .on(event, cb)
 // - fork(script, [...args]) -> spawn the same interpreter with provided script and return child with .send(msg) and 'message' listener
@@ -41,7 +41,7 @@ extern char** _environ;
 static Token make_native_token(const std::string& name) {
     Token t;
     t.type = TokenType::IDENTIFIER;
-    t.loc = TokenLocation(std::string("<child_process>"), 0, 0, 0);
+    t.loc = TokenLocation(std::string("<subprocess>"), 0, 0, 0);
     return t;
 }
 
@@ -697,9 +697,9 @@ static Value native_fork(const std::vector<Value>& args, EnvPtr /*env*/, const T
     return Value{child_obj};
 }
 // Factory
-std::shared_ptr<ObjectValue> make_child_process_exports(EnvPtr env, Evaluator* evaluator) {
+std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
-    Token t = make_native_token("child_process");
+    Token t = make_native_token("subprocess");
 
     // Capture evaluator in native_exec closure
     auto native_exec_impl = [evaluator](const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) -> Value {
@@ -838,13 +838,13 @@ std::shared_ptr<ObjectValue> make_child_process_exports(EnvPtr env, Evaluator* e
     };
 
     auto fn_exec = std::make_shared<FunctionValue>(
-        "native:child_process.exec", native_exec_impl, nullptr, t);
+        "native:subprocess.exec", native_exec_impl, nullptr, t);
     obj->properties["exec"] = PropertyDescriptor{Value{fn_exec}, false, false, false, t};
 
-    auto fn_spawn = std::make_shared<FunctionValue>("native:child_process.spawn", native_spawn, nullptr, t);
+    auto fn_spawn = std::make_shared<FunctionValue>("native:subprocess.spawn", native_spawn, nullptr, t);
     obj->properties["spawn"] = PropertyDescriptor{Value{fn_spawn}, false, false, false, t};
 
-    auto fn_fork = std::make_shared<FunctionValue>("native:child_process.fork", native_fork, nullptr, t);
+    auto fn_fork = std::make_shared<FunctionValue>("native:subprocess.fork", native_fork, nullptr, t);
     obj->properties["fork"] = PropertyDescriptor{Value{fn_fork}, false, false, false, t};
 
     return obj;
