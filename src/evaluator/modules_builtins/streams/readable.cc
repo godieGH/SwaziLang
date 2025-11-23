@@ -21,6 +21,7 @@
 #include <unistd.h>
 #endif
 
+#include "./streams.h"
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"
 #include "builtins.hpp"
@@ -28,59 +29,16 @@
 #include "uv.h"
 
 // ============================================================================
-// ACTIVE OPERATIONS TRACKING
+// GLOBAL STATE DEFINITIONS
 // ============================================================================
 
-static std::atomic<size_t> g_active_stream_operations{0};
-
-bool streams_have_active_work() {
-    return g_active_stream_operations.load() > 0;
-}
-
-// ============================================================================
-// UTILITY HELPERS
-// ============================================================================
-
-static std::string value_to_string_simple(const Value& v) {
-    if (std::holds_alternative<std::string>(v)) {
-        return std::get<std::string>(v);
-    }
-    if (std::holds_alternative<double>(v)) {
-        std::ostringstream ss;
-        ss << std::get<double>(v);
-        return ss.str();
-    }
-    if (std::holds_alternative<bool>(v)) {
-        return std::get<bool>(v) ? "true" : "false";
-    }
-    return "";
-}
-
-static void schedule_listener_call(FunctionPtr cb, const std::vector<Value>& args) {
-    if (!cb) return;
-    CallbackPayload* p = new CallbackPayload(cb, args);
-    enqueue_callback_global(static_cast<void*>(p));
-}
-
-// ============================================================================
-// ENCODING HELPERS
-// ============================================================================
-
-static Value encode_buffer_for_emission(const BufferPtr& buf, const std::string& encoding) {
-    if (!buf) return std::monostate{};
-
-    if (encoding == "utf8" || encoding == "utf-8") {
-        return Value{std::string(buf->data.begin(), buf->data.end())};
-    } else {
-        // binary (default) - return raw buffer
-        return Value{buf};
-    }
-}
+std::mutex g_readable_streams_mutex;
+static std::atomic<long long> g_next_readable_stream_id{1};
+std::unordered_map<long long, ReadableStreamStatePtr> g_readable_streams;
 
 // ============================================================================
 // STREAM OPTIONS
 // ============================================================================
-
 struct StreamOptions {
     size_t high_water_mark = 65536;  // 64KB default
     std::string encoding = "binary";
@@ -170,65 +128,11 @@ static StreamOptions parse_stream_options(const Value& opts_val) {
 // READABLE STREAM STATE
 // ============================================================================
 
-struct ReadableStreamState : public std::enable_shared_from_this<ReadableStreamState> {
-    long long id;
-    uv_file fd = -1;
-    std::string path;
-
-    size_t current_position = 0;
-    size_t stream_start = 0;
-    size_t stream_end = 0;
-    size_t file_size = 0;
-
-    size_t high_water_mark = 65536;
-    std::string encoding = "binary";
-    bool auto_close = true;
-    double speed = 1.0;
-
-    bool paused = false;
-    bool ended = false;
-    bool reading = false;
-    bool destroyed = false;
-    bool flowing = false;
-
-    EnvPtr env;
-    Evaluator* evaluator = nullptr;  // ADD THIS
-
-    std::vector<FunctionPtr> data_listeners;
-    std::vector<FunctionPtr> end_listeners;
-    std::vector<FunctionPtr> error_listeners;
-    std::vector<FunctionPtr> close_listeners;
-
-    std::vector<std::shared_ptr<ReadableStreamState>> self_references;
-
-    void keep_alive() {
-        self_references.push_back(shared_from_this());
-    }
-
-    void release_keepalive() {
-        self_references.clear();
-    }
-
-    void close_file() {
-        if (fd >= 0) {
-            uv_fs_t close_req;
-            uv_fs_close(scheduler_get_loop(), &close_req, fd, NULL);
-            uv_fs_req_cleanup(&close_req);
-            fd = -1;
-        }
-    }
-};
 struct ReadContext {
     ReadableStreamState* state;
     char* buffer;
     size_t buffer_size;
 };
-
-using ReadableStreamStatePtr = std::shared_ptr<ReadableStreamState>;
-
-static std::mutex g_readable_streams_mutex;
-static std::atomic<long long> g_next_readable_stream_id{1};
-static std::unordered_map<long long, ReadableStreamStatePtr> g_readable_streams;
 
 // ============================================================================
 // EVENT EMISSION - SYNCHRONOUS VERSION
@@ -270,8 +174,6 @@ static void emit_readable_event_sync(ReadableStreamStatePtr state,
 // ============================================================================
 // ASYNC READ OPERATIONS
 // ============================================================================
-
-static void schedule_next_read(ReadableStreamStatePtr state);
 
 static void on_read_complete(uv_fs_t* req) {
     g_active_stream_operations.fetch_sub(1);
@@ -392,7 +294,7 @@ static void on_read_complete(uv_fs_t* req) {
         schedule_next_read(state);
     }
 }
-static void schedule_next_read(ReadableStreamStatePtr state) {
+void schedule_next_read(ReadableStreamStatePtr state) {
     if (!state || state->destroyed || state->ended || state->paused || state->reading) {
         return;
     }
@@ -445,10 +347,29 @@ static void schedule_next_read(ReadableStreamStatePtr state) {
 }
 
 // ============================================================================
+// READABLE STREAM STATE METHODS
+// ============================================================================
+
+void ReadableStreamState::pause() {
+    paused = true;
+    flowing = false;
+}
+
+void ReadableStreamState::resume() {
+    bool was_paused = paused;
+    paused = false;
+    flowing = true;
+
+    if (was_paused && !ended && !destroyed && !reading) {
+        schedule_next_read(shared_from_this());
+    }
+}
+
+// ============================================================================
 // STREAM OBJECT
 // ============================================================================
 
-static ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
+ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
     auto obj = std::make_shared<ObjectValue>();
     Token tok{};
     tok.loc = TokenLocation("<streams>", 0, 0, 0);
@@ -510,14 +431,14 @@ static ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
 
         return std::monostate{};
     };
-    obj->properties["on"] = {Value{std::make_shared<FunctionValue>("stream.on", on_impl, nullptr, tok)}, false, false, false, tok};
+    obj->properties["on"] = {Value{std::make_shared<FunctionValue>("stream.on", on_impl, nullptr, tok)}, false, false, true, tok};
 
     auto pause_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
         state->paused = true;
         state->flowing = false;
         return std::monostate{};
     };
-    obj->properties["pause"] = {Value{std::make_shared<FunctionValue>("stream.pause", pause_impl, nullptr, tok)}, false, false, false, tok};
+    obj->properties["pause"] = {Value{std::make_shared<FunctionValue>("stream.pause", pause_impl, nullptr, tok)}, false, false, true, tok};
 
     auto resume_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
         bool was_paused = state->paused;
@@ -529,7 +450,7 @@ static ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
         }
         return std::monostate{};
     };
-    obj->properties["resume"] = {Value{std::make_shared<FunctionValue>("stream.resume", resume_impl, nullptr, tok)}, false, false, false, tok};
+    obj->properties["resume"] = {Value{std::make_shared<FunctionValue>("stream.resume", resume_impl, nullptr, tok)}, false, false, true, tok};
 
     auto destroy_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
         if (state->destroyed) return std::monostate{};
@@ -545,17 +466,86 @@ static ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
         state->release_keepalive();
         return std::monostate{};
     };
-    obj->properties["destroy"] = {Value{std::make_shared<FunctionValue>("stream.destroy", destroy_impl, nullptr, tok)}, false, false, false, tok};
+    obj->properties["destroy"] = {Value{std::make_shared<FunctionValue>("stream.destroy", destroy_impl, nullptr, tok)}, false, false, true, tok};
 
     auto is_paused_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
         return Value{state->paused};
     };
-    obj->properties["isPaused"] = {Value{std::make_shared<FunctionValue>("stream.isPaused", is_paused_impl, nullptr, tok)}, false, false, false, tok};
+    obj->properties["isPaused"] = {Value{std::make_shared<FunctionValue>("stream.isPaused", is_paused_impl, nullptr, tok)}, false, true, true, tok};
 
     auto is_ended_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
         return Value{state->ended};
     };
-    obj->properties["isEnded"] = {Value{std::make_shared<FunctionValue>("stream.isEnded", is_ended_impl, nullptr, tok)}, false, false, false, tok};
+    obj->properties["isEnded"] = {Value{std::make_shared<FunctionValue>("stream.isEnded", is_ended_impl, nullptr, tok)}, false, true, true, tok};
+
+    obj->properties["stream_start"] = {Value{(double)state->stream_start}, false, false, true, tok};
+    obj->properties["stream_end"] = {Value{(double)state->stream_end}, false, false, true, tok};
+    obj->properties["speed"] = {Value{(double)state->speed}, false, false, true, tok};
+    obj->properties["encoding"] = {Value{state->encoding}, false, false, true, tok};
+    obj->properties["chunkSize"] = {Value{(double)state->high_water_mark}, false, false, true, tok};
+    obj->properties["filePath"] = {Value{state->path}, false, false, true, tok};
+    obj->properties["fileSize"] = {Value{(double)state->file_size}, false, false, true, tok};
+    obj->properties["_fd"] = {Value{(double)state->fd}, false, false, true, tok};
+    obj->properties["_id"] = {Value{(double)state->id}, false, false, true, tok};
+
+    auto stream_events_arr_val = std::make_shared<ArrayValue>();
+    stream_events_arr_val->elements.push_back(Value(std::string("data")));
+    stream_events_arr_val->elements.push_back(Value(std::string("end")));
+    stream_events_arr_val->elements.push_back(Value(std::string("close")));
+    stream_events_arr_val->elements.push_back(Value(std::string("error")));
+    obj->properties["_events"] = {stream_events_arr_val, false, false, true, tok};
+
+    auto pipe_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& tok) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "readable.pipe(writable) requires a writable stream as destination", tok.loc);
+        }
+
+        if (!std::holds_alternative<ObjectPtr>(args[0])) {
+            throw SwaziError("TypeError", "pipe destination must be a writable stream object", tok.loc);
+        }
+
+        ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
+
+        // Extract writable stream ID from destination object
+        auto id_it = dest_obj->properties.find("_id");
+        if (id_it == dest_obj->properties.end() ||
+            !std::holds_alternative<double>(id_it->second.value)) {
+            throw SwaziError("TypeError", "Invalid writable stream object", tok.loc);
+        }
+
+        long long writable_id = static_cast<long long>(std::get<double>(id_it->second.value));
+
+        // Find writable stream state
+        WritableStreamStatePtr writable_state;
+        {
+            std::lock_guard<std::mutex> lock(g_writable_streams_mutex);
+            auto it = g_writable_streams.find(writable_id);
+            if (it != g_writable_streams.end()) {
+                writable_state = it->second;
+            }
+        }
+
+        if (!writable_state) {
+            throw SwaziError("Error", "Writable stream not found or already destroyed", tok.loc);
+        }
+
+        // Parse options
+        bool end_on_finish = true;  // Default: end writable when readable ends
+
+        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+            auto end_it = opts->properties.find("end");
+            if (end_it != opts->properties.end() && std::holds_alternative<bool>(end_it->second.value)) {
+                end_on_finish = std::get<bool>(end_it->second.value);
+            }
+        }
+
+        // Implement the pipe
+        return implement_pipe(state, writable_state, end_on_finish, tok);
+    };
+    obj->properties["pipe"] = {
+        Value(std::make_shared<FunctionValue>("stream.pipe", pipe_impl, nullptr, tok)),
+        false, false, true, tok};
 
     return obj;
 }
@@ -564,7 +554,7 @@ static ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
 // FACTORY
 // ============================================================================
 
-static Value native_createReadStream(const std::vector<Value>& args, EnvPtr env, Evaluator* evaluator, const Token& token) {
+Value native_createReadStream(const std::vector<Value>& args, EnvPtr env, Evaluator* evaluator, const Token& token) {
     if (args.empty()) {
         throw SwaziError("TypeError", "streams.createReadable requires path argument", token.loc);
     }
@@ -641,38 +631,4 @@ static Value native_createReadStream(const std::vector<Value>& args, EnvPtr env,
     }
 
     return Value{create_readable_stream_object(state)};
-}
-
-// ============================================================================
-// EXPORTS
-// ============================================================================
-
-std::shared_ptr<ObjectValue> make_streams_exports(EnvPtr env, Evaluator* evaluator) {
-    auto obj = std::make_shared<ObjectValue>();
-    Token tok{};
-    tok.loc = TokenLocation("<streams>", 0, 0, 0);
-
-    auto createReadable = [evaluator](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
-        return native_createReadStream(args, env, evaluator, token);
-    };
-
-    obj->properties["readable"] = {
-        Value{std::make_shared<FunctionValue>("streams.readable", createReadable, env, tok)},
-        false, false, false, tok};
-
-    return obj;
-}
-
-// ============================================================================
-// NETWORK STREAM STUBS
-// ============================================================================
-
-ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket) {
-    auto obj = std::make_shared<ObjectValue>();
-    return obj;
-}
-
-ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket) {
-    auto obj = std::make_shared<ObjectValue>();
-    return obj;
 }
