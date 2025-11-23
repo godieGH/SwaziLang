@@ -2372,6 +2372,10 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
 }
 
 // ----------------- PROCESS module -----------------
+
+Value process_send_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token);
+Value process_on_message_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token);
+
 std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
@@ -2440,6 +2444,28 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
     {
         auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
         obj->properties["cwd"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    {
+        Token t;
+        t.type = TokenType::IDENTIFIER;
+        t.loc = TokenLocation("<process>", 0, 0, 0);
+
+        // process.send(message)
+        auto fn_send = std::make_shared<FunctionValue>(
+            "process.send",
+            process_send_ipc,  // Implemented in process_ipc.cc
+            env,
+            t);
+        obj->properties["send"] = PropertyDescriptor{fn_send, false, false, false, t};
+
+        // process.on(event, callback)
+        auto fn_on = std::make_shared<FunctionValue>(
+            "process.on",
+            process_on_message_ipc,  // Implemented in process_ipc.cc
+            env,
+            t);
+        obj->properties["on"] = PropertyDescriptor{fn_on, false, false, false, t};
     }
 
     return obj;

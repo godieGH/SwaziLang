@@ -72,7 +72,7 @@ struct ChildEntry {
     std::vector<FunctionPtr> stderr_data_listeners;
     std::vector<FunctionPtr> exit_listeners;
     std::vector<FunctionPtr> message_listeners;  // for fork IPC
-    
+
     bool closed = false;
 };
 static std::unordered_map<long long, std::shared_ptr<ChildEntry>> g_children;
@@ -153,7 +153,6 @@ static ObjectPtr make_child_object(std::shared_ptr<ChildEntry> entry) {
     auto fn_kill = std::make_shared<FunctionValue>("native:child.kill", kill_impl, nullptr, tok_kill);
     child_obj->properties["kill"] = PropertyDescriptor{fn_kill, false, false, false, tok_kill};
 
-    
     // store pid property (may be set later)
     child_obj->properties["pid"] = {std::monostate{}, false, false, true, Token{}};
 
@@ -288,7 +287,7 @@ static ObjectPtr do_spawn(const std::string& file,
 
     auto entry = std::make_shared<ChildEntry>();
     entry->id = g_next_child_id.fetch_add(1);
-    
+
     // allocate process & pipes (we'll create pipes conditionally)
     uv_process_t* proc = new uv_process_t;
     proc->data = entry.get();
