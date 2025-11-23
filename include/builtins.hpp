@@ -13,6 +13,9 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr env);
+
+// Fork implementation (defined in subprocess_fork.cc)
+Value native_fork(const std::vector<Value>& args, EnvPtr env, const Token& token);
 std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* evaluator);
 
 std::shared_ptr<ObjectValue> make_base64_exports(EnvPtr env);

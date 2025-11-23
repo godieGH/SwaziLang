@@ -72,8 +72,7 @@ struct ChildEntry {
     std::vector<FunctionPtr> stderr_data_listeners;
     std::vector<FunctionPtr> exit_listeners;
     std::vector<FunctionPtr> message_listeners;  // for fork IPC
-    // optional write queue not implemented extensively — we use uv_write with immediate buffer
-    bool is_fork_child = false;
+    
     bool closed = false;
 };
 static std::unordered_map<long long, std::shared_ptr<ChildEntry>> g_children;
@@ -154,42 +153,7 @@ static ObjectPtr make_child_object(std::shared_ptr<ChildEntry> entry) {
     auto fn_kill = std::make_shared<FunctionValue>("native:child.kill", kill_impl, nullptr, tok_kill);
     child_obj->properties["kill"] = PropertyDescriptor{fn_kill, false, false, false, tok_kill};
 
-    // If fork: child.send(msg)
-    auto send_impl = [entry](const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) -> Value {
-        if (!entry->is_fork_child) throw SwaziError("TypeError", "send only available on forked children", token.loc);
-        if (args.empty()) throw SwaziError("TypeError", "send requires a message", token.loc);
-        // Serialize first arg to string (simple stringify)
-        std::string out;
-        if (std::holds_alternative<std::string>(args[0]))
-            out = std::get<std::string>(args[0]);
-        else if (std::holds_alternative<double>(args[0])) {
-            std::ostringstream ss;
-            ss << std::get<double>(args[0]);
-            out = ss.str();
-        } else if (std::holds_alternative<bool>(args[0]))
-            out = std::get<bool>(args[0]) ? "true" : "false";
-        else
-            out = "";
-
-        // Append newline as message delimiter
-        out.push_back('\n');
-        uv_buf_t buf = uv_buf_init((char*)malloc(out.size()), static_cast<unsigned int>(out.size()));
-        memcpy(buf.base, out.data(), out.size());
-
-        if (!entry->stdin_pipe) return std::monostate{};
-        uv_write_t* req = new uv_write_t;
-        // attach buffer pointer for cleanup in write cb
-        req->data = buf.base;
-        uv_write(req, (uv_stream_t*)entry->stdin_pipe, &buf, 1, [](uv_write_t* req, int status) {
-            if (req->data) free(req->data);
-            delete req;
-        });
-        return std::monostate{};
-    };
-    Token tok_send = make_native_token("child.send");
-    auto fn_send = std::make_shared<FunctionValue>("native:child.send", send_impl, nullptr, tok_send);
-    child_obj->properties["send"] = PropertyDescriptor{fn_send, false, false, false, tok_send};
-
+    
     // store pid property (may be set later)
     child_obj->properties["pid"] = {std::monostate{}, false, false, true, Token{}};
 
@@ -220,20 +184,6 @@ static void stdout_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* b
             for (auto& cb : listeners) {
                 if (!cb) continue;
                 schedule_listener_call(cb, {Value{s}});
-            }
-            // For forked children, also treat each newline-terminated chunk as a 'message' for simple IPC
-            if (entry_ptr->is_fork_child) {
-                // split lines in s and send each as message event
-                std::istringstream iss(s);
-                std::string line;
-                while (std::getline(iss, line)) {
-                    std::vector<FunctionPtr> mlisteners;
-                    {
-                        std::lock_guard<std::mutex> lk(entry_ptr->listeners_mutex);
-                        mlisteners = entry_ptr->message_listeners;
-                    }
-                    for (auto& mcb : mlisteners) schedule_listener_call(mcb, {Value{line}});
-                }
             }
         }
     } else if (nread < 0) {
@@ -330,7 +280,6 @@ struct SpawnOptions {
 // spawn implementation (low-level)
 static ObjectPtr do_spawn(const std::string& file,
     const std::vector<std::string>& args,
-    bool enable_ipc,
     int& out_pid,
     const Token& token,
     const SpawnOptions& opts) {
@@ -339,8 +288,7 @@ static ObjectPtr do_spawn(const std::string& file,
 
     auto entry = std::make_shared<ChildEntry>();
     entry->id = g_next_child_id.fetch_add(1);
-    entry->is_fork_child = enable_ipc;
-
+    
     // allocate process & pipes (we'll create pipes conditionally)
     uv_process_t* proc = new uv_process_t;
     proc->data = entry.get();
@@ -628,74 +576,10 @@ static Value native_spawn(const std::vector<Value>& args, EnvPtr /*env*/, const 
     }
 
     int pid = 0;
-    auto child_obj = do_spawn(cmd, argv, false, pid, token, opts);
+    auto child_obj = do_spawn(cmd, argv, pid, token, opts);
     return Value{child_obj};
 }
-// Builtin: fork(script, ...args)
-// Spawns the current interpreter executable (argv[0]) with script and args, enables simple line-based IPC
-static Value native_fork(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
-    if (args.empty() || !std::holds_alternative<std::string>(args[0])) {
-        throw SwaziError("TypeError", "fork requires script path", token.loc);
-    }
-    std::string script = std::get<std::string>(args[0]);
 
-    std::string interpreter = "/proc/self/exe";
-#ifdef _WIN32
-    interpreter = "swazi.exe";
-#endif
-
-    std::vector<std::string> argv;
-    argv.push_back(script);
-
-    // Parse args array (second param)
-    size_t options_index = 1;
-    if (args.size() >= 2 && std::holds_alternative<ArrayPtr>(args[1])) {
-        ArrayPtr arr = std::get<ArrayPtr>(args[1]);
-        for (auto& el : arr->elements) {
-            argv.push_back(value_to_string_simple_local(el));
-        }
-        options_index = 2;
-    }
-
-    // ADD THIS: Parse options object (third param or second if no args array)
-    SpawnOptions opts;
-    if (args.size() > options_index && std::holds_alternative<ObjectPtr>(args[options_index])) {
-        ObjectPtr o = std::get<ObjectPtr>(args[options_index]);
-
-        // cwd
-        auto itcwd = o->properties.find("cwd");
-        if (itcwd != o->properties.end()) opts.cwd = value_to_string_simple_local(itcwd->second.value);
-
-        // env object
-        auto itenv = o->properties.find("env");
-        if (itenv != o->properties.end() && std::holds_alternative<ObjectPtr>(itenv->second.value)) {
-            ObjectPtr eobj = std::get<ObjectPtr>(itenv->second.value);
-            for (auto& kv : eobj->properties) {
-                std::string key = kv.first;
-                std::string val = value_to_string_simple_local(kv.second.value);
-                opts.env_vec.push_back(key + "=" + val);
-            }
-        }
-
-        // stdio
-        auto itstd = o->properties.find("stdio");
-        if (itstd != o->properties.end()) {
-            if (std::holds_alternative<std::string>(itstd->second.value)) {
-                std::string s = std::get<std::string>(itstd->second.value);
-                opts.stdio = {s, s, s};
-            } else if (std::holds_alternative<ArrayPtr>(itstd->second.value)) {
-                ArrayPtr sarr = std::get<ArrayPtr>(itstd->second.value);
-                for (size_t i = 0; i < sarr->elements.size() && i < 3; ++i) {
-                    opts.stdio.push_back(value_to_string_simple_local(sarr->elements[i]));
-                }
-            }
-        }
-    }
-
-    int pid = 0;
-    auto child_obj = do_spawn(interpreter, argv, true, pid, token, opts);  // PASS opts instead of SpawnOptions{}
-    return Value{child_obj};
-}
 // Factory
 std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
@@ -734,8 +618,7 @@ std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* eval
             Token t = token;
             try {
                 auto child_obj = do_spawn(argv[0],
-                    std::vector<std::string>(argv.begin() + 1, argv.end()),
-                    false, pid, t, SpawnOptions{});
+                    std::vector<std::string>(argv.begin() + 1, argv.end()), pid, t, SpawnOptions{});
 
                 std::shared_ptr<ChildEntry> entry;
                 {
