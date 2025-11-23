@@ -167,13 +167,11 @@ static void alloc_pipe_cb(uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* b
 static void stdout_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     ChildEntry* entry_ptr = static_cast<ChildEntry*>(stream->data);
     if (nread > 0) {
-        std::string s(buf->base, nread);
-        std::shared_ptr<ChildEntry> entry;
-        {
-            std::lock_guard<std::mutex> lk(g_children_mutex);
-            // no strong mapping possible here — we use raw pointer to entry stored in data.
-        }
-        // build Value and schedule for each listener
+        // Create buffer instead of string
+        auto buffer = std::make_shared<BufferValue>();
+        buffer->data.assign(buf->base, buf->base + nread);
+        buffer->encoding = "binary";
+
         if (entry_ptr) {
             std::vector<FunctionPtr> listeners;
             {
@@ -182,27 +180,31 @@ static void stdout_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* b
             }
             for (auto& cb : listeners) {
                 if (!cb) continue;
-                schedule_listener_call(cb, {Value{s}});
+                schedule_listener_call(cb, {Value{buffer}});
             }
         }
     } else if (nread < 0) {
-        // EOF or error -> stop reading
         uv_read_stop(stream);
     }
 
     if (buf && buf->base) free(buf->base);
 }
+
 static void stderr_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     ChildEntry* entry_ptr = static_cast<ChildEntry*>(stream->data);
     if (nread > 0) {
-        std::string s(buf->base, nread);
+        // Create buffer instead of string
+        auto buffer = std::make_shared<BufferValue>();
+        buffer->data.assign(buf->base, buf->base + nread);
+        buffer->encoding = "binary";
+
         if (entry_ptr) {
             std::vector<FunctionPtr> listeners;
             {
                 std::lock_guard<std::mutex> lk(entry_ptr->listeners_mutex);
                 listeners = entry_ptr->stderr_data_listeners;
             }
-            for (auto& cb : listeners) schedule_listener_call(cb, {Value{s}});
+            for (auto& cb : listeners) schedule_listener_call(cb, {Value{buffer}});
         }
     } else if (nread < 0) {
         uv_read_stop(stream);
@@ -642,31 +644,30 @@ std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* eval
                 {
                     std::lock_guard<std::mutex> lk(entry->listeners_mutex);
 
-                    // stdout collector (unchanged)
                     entry->stdout_data_listeners.push_back(
                         std::make_shared<FunctionValue>(
                             "internal:exec_stdout_collector",
                             [entry, ctx](const std::vector<Value>& a, EnvPtr, const Token&) -> Value {
-                                if (!a.empty() && std::holds_alternative<std::string>(a[0])) {
-                                    ctx->out += std::get<std::string>(a[0]);
+                                if (!a.empty() && std::holds_alternative<BufferPtr>(a[0])) {
+                                    BufferPtr buf = std::get<BufferPtr>(a[0]);
+                                    ctx->out.append(buf->data.begin(), buf->data.end());
                                 }
                                 return std::monostate{};
                             },
                             nullptr, Token{}));
 
-                    // stderr collector (unchanged)
                     entry->stderr_data_listeners.push_back(
                         std::make_shared<FunctionValue>(
                             "internal:exec_stderr_collector",
                             [entry, ctx](const std::vector<Value>& a, EnvPtr, const Token&) -> Value {
-                                if (!a.empty() && std::holds_alternative<std::string>(a[0])) {
-                                    ctx->err += std::get<std::string>(a[0]);
+                                if (!a.empty() && std::holds_alternative<BufferPtr>(a[0])) {
+                                    BufferPtr buf = std::get<BufferPtr>(a[0]);
+                                    ctx->err.append(buf->data.begin(), buf->data.end());
                                 }
                                 return std::monostate{};
                             },
                             nullptr, Token{}));
 
-                    // CRITICAL FIX: exit handler uses evaluator
                     entry->exit_listeners.push_back(
                         std::make_shared<FunctionValue>(
                             "internal:exec_exit_handler",

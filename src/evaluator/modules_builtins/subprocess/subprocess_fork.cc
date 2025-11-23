@@ -50,9 +50,6 @@ struct ForkChildEntry {
     std::vector<FunctionPtr> message_listeners;  // IPC messages only
     std::vector<FunctionPtr> exit_listeners;
 
-    // IPC message buffer (JSON newline-delimited)
-    std::string ipc_read_buffer;
-
     bool closed = false;
 };
 
@@ -88,35 +85,6 @@ static Token make_native_token(const std::string& name) {
     return t;
 }
 
-// Escape JSON string (simple version - handles quotes and backslashes)
-static std::string json_escape(const std::string& s) {
-    std::string result;
-    result.reserve(s.size());
-    for (char c : s) {
-        switch (c) {
-            case '"':
-                result += "\\\"";
-                break;
-            case '\\':
-                result += "\\\\";
-                break;
-            case '\n':
-                result += "\\n";
-                break;
-            case '\r':
-                result += "\\r";
-                break;
-            case '\t':
-                result += "\\t";
-                break;
-            default:
-                result += c;
-                break;
-        }
-    }
-    return result;
-}
-
 // Allocate buffer for reading
 static void alloc_pipe_cb(uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* buf) {
     buf->base = (char*)malloc(suggested);
@@ -128,49 +96,45 @@ static void ipc_message_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* b
     ForkChildEntry* entry_ptr = static_cast<ForkChildEntry*>(stream->data);
 
     if (nread > 0 && entry_ptr) {
-        // Append to buffer
-        entry_ptr->ipc_read_buffer.append(buf->base, nread);
+        // Create buffer directly from received bytes (no JSON parsing)
+        auto buffer = std::make_shared<BufferValue>();
+        buffer->data.assign(buf->base, buf->base + nread);
+        buffer->encoding = "binary";
 
-        // Extract complete JSON messages (newline-delimited)
-        size_t pos;
-        while ((pos = entry_ptr->ipc_read_buffer.find('\n')) != std::string::npos) {
-            std::string json_line = entry_ptr->ipc_read_buffer.substr(0, pos);
-            entry_ptr->ipc_read_buffer.erase(0, pos + 1);
+        // Fire message listeners with raw buffer
+        std::vector<FunctionPtr> listeners;
+        {
+            std::lock_guard<std::mutex> lk(entry_ptr->listeners_mutex);
+            listeners = entry_ptr->message_listeners;
+        }
 
-            if (json_line.empty()) continue;
-
-            // Fire message listeners with JSON string
-            std::vector<FunctionPtr> listeners;
-            {
-                std::lock_guard<std::mutex> lk(entry_ptr->listeners_mutex);
-                listeners = entry_ptr->message_listeners;
-            }
-
-            for (auto& cb : listeners) {
-                if (cb) schedule_listener_call(cb, {Value{json_line}});
-            }
+        for (auto& cb : listeners) {
+            if (cb) schedule_listener_call(cb, {Value{buffer}});
         }
     } else if (nread < 0) {
-        // EOF or error
         uv_read_stop(stream);
     }
 
     if (buf && buf->base) free(buf->base);
 }
 
-// Standard output callback (if piped)
+// Standard output callback - now returns buffers
 static void stdout_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     ForkChildEntry* entry_ptr = static_cast<ForkChildEntry*>(stream->data);
 
     if (nread > 0 && entry_ptr) {
-        std::string s(buf->base, nread);
+        // Create buffer from stdout data
+        auto buffer = std::make_shared<BufferValue>();
+        buffer->data.assign(buf->base, buf->base + nread);
+        buffer->encoding = "binary";
+
         std::vector<FunctionPtr> listeners;
         {
             std::lock_guard<std::mutex> lk(entry_ptr->listeners_mutex);
             listeners = entry_ptr->stdout_data_listeners;
         }
         for (auto& cb : listeners) {
-            if (cb) schedule_listener_call(cb, {Value{s}});
+            if (cb) schedule_listener_call(cb, {Value{buffer}});
         }
     } else if (nread < 0) {
         uv_read_stop(stream);
@@ -179,19 +143,23 @@ static void stdout_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* b
     if (buf && buf->base) free(buf->base);
 }
 
-// Standard error callback (if piped)
+// Standard error callback - now returns buffers
 static void stderr_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     ForkChildEntry* entry_ptr = static_cast<ForkChildEntry*>(stream->data);
 
     if (nread > 0 && entry_ptr) {
-        std::string s(buf->base, nread);
+        // Create buffer from stderr data
+        auto buffer = std::make_shared<BufferValue>();
+        buffer->data.assign(buf->base, buf->base + nread);
+        buffer->encoding = "binary";
+
         std::vector<FunctionPtr> listeners;
         {
             std::lock_guard<std::mutex> lk(entry_ptr->listeners_mutex);
             listeners = entry_ptr->stderr_data_listeners;
         }
         for (auto& cb : listeners) {
-            if (cb) schedule_listener_call(cb, {Value{s}});
+            if (cb) schedule_listener_call(cb, {Value{buffer}});
         }
     } else if (nread < 0) {
         uv_read_stop(stream);
@@ -333,18 +301,41 @@ static ObjectPtr make_fork_child_object(std::shared_ptr<ForkChildEntry> entry) {
     auto send_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (args.empty()) throw SwaziError("TypeError", "send requires a message", token.loc);
 
-        // Convert value to string
-        std::string data_str = value_to_string_simple_local(args[0]);
+        std::vector<uint8_t> data_bytes;
 
-        // Build JSON: {"type":"message","data":"..."}
-        std::string json_msg = "{\"type\":\"message\",\"data\":\"" + json_escape(data_str) + "\"}\n";
+        // Convert value to bytes
+        if (std::holds_alternative<std::string>(args[0])) {
+            std::string str = std::get<std::string>(args[0]);
+            data_bytes.assign(str.begin(), str.end());
+        } else if (std::holds_alternative<double>(args[0])) {
+            // Convert number to string, then to bytes
+            std::ostringstream ss;
+            ss << std::get<double>(args[0]);
+            std::string str = ss.str();
+            data_bytes.assign(str.begin(), str.end());
+        } else if (std::holds_alternative<bool>(args[0])) {
+            std::string str = std::get<bool>(args[0]) ? "true" : "false";
+            data_bytes.assign(str.begin(), str.end());
+        } else if (std::holds_alternative<BufferPtr>(args[0])) {
+            // Send buffer directly
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            data_bytes = buf->data;
+        } else {
+            throw SwaziError("TypeError", "send() requires string, number, boolean, or buffer", token.loc);
+        }
+
+        if (data_bytes.empty()) {
+            return std::monostate{};
+        }
 
         if (!entry->ipc_write_pipe) {
             throw SwaziError("IOError", "IPC pipe not available", token.loc);
         }
 
-        uv_buf_t buf = uv_buf_init((char*)malloc(json_msg.size()), static_cast<unsigned int>(json_msg.size()));
-        memcpy(buf.base, json_msg.data(), json_msg.size());
+        // Allocate and send raw bytes
+        uv_buf_t buf = uv_buf_init((char*)malloc(data_bytes.size()),
+            static_cast<unsigned int>(data_bytes.size()));
+        memcpy(buf.base, data_bytes.data(), data_bytes.size());
 
         uv_write_t* req = new uv_write_t;
         req->data = buf.base;

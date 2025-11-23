@@ -40,35 +40,6 @@ static void schedule_message_listener(FunctionPtr cb, const std::vector<Value>& 
     enqueue_callback_global(static_cast<void*>(p));
 }
 
-// Helper to escape JSON strings
-static std::string json_escape(const std::string& s) {
-    std::string result;
-    result.reserve(s.size());
-    for (char c : s) {
-        switch (c) {
-            case '"':
-                result += "\\\"";
-                break;
-            case '\\':
-                result += "\\\\";
-                break;
-            case '\n':
-                result += "\\n";
-                break;
-            case '\r':
-                result += "\\r";
-                break;
-            case '\t':
-                result += "\\t";
-                break;
-            default:
-                result += c;
-                break;
-        }
-    }
-    return result;
-}
-
 // Helper to convert Value to string
 static std::string value_to_string_ipc(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
@@ -108,30 +79,22 @@ static void alloc_ipc_cb(uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* bu
 // Read callback for fd 3 (parent sends messages)
 static void ipc_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     if (nread > 0) {
-        // Append to buffer
-        g_ipc_state.read_buffer.append(buf->base, nread);
+        // Create buffer from raw bytes
+        auto buffer = std::make_shared<BufferValue>();
+        buffer->data.assign(buf->base, buf->base + nread);
+        buffer->encoding = "binary";
 
-        // Extract complete JSON messages (newline-delimited)
-        size_t pos;
-        while ((pos = g_ipc_state.read_buffer.find('\n')) != std::string::npos) {
-            std::string json_line = g_ipc_state.read_buffer.substr(0, pos);
-            g_ipc_state.read_buffer.erase(0, pos + 1);
+        // Fire message listeners with buffer
+        std::vector<FunctionPtr> listeners;
+        {
+            std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+            listeners = g_ipc_state.message_listeners;
+        }
 
-            if (json_line.empty()) continue;
-
-            // Fire message listeners with JSON string
-            std::vector<FunctionPtr> listeners;
-            {
-                std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
-                listeners = g_ipc_state.message_listeners;
-            }
-
-            for (auto& cb : listeners) {
-                if (cb) schedule_message_listener(cb, {Value{json_line}});
-            }
+        for (auto& cb : listeners) {
+            if (cb) schedule_message_listener(cb, {Value{buffer}});
         }
     } else if (nread < 0) {
-        // EOF or error - parent closed the pipe
         uv_read_stop(stream);
     }
 
@@ -204,12 +167,9 @@ static Value process_send(const std::vector<Value>& args, EnvPtr /*env*/, const 
         initialize_child_ipc();
     }
 
-    // Check if this is a forked child
+    // SILENT MODE: If not a forked child, just return (do nothing)
     if (!g_ipc_state.is_forked_child) {
-        throw SwaziError("RuntimeError",
-            "process.send() can only be called in forked child processes. "
-            "This process was not created with fork().",
-            token.loc);
+        return std::monostate{};
     }
 
     if (args.empty()) {
@@ -217,22 +177,42 @@ static Value process_send(const std::vector<Value>& args, EnvPtr /*env*/, const 
     }
 
     if (!g_ipc_state.write_pipe) {
-        throw SwaziError("IOError", "IPC write pipe not available", token.loc);
+        // Silent failure - pipe not available
+        return std::monostate{};
     }
 
-    // Convert value to string
-    std::string data_str = value_to_string_ipc(args[0]);
+    // Convert value to bytes
+    std::vector<uint8_t> data_bytes;
 
-    // Build JSON message: {"type":"message","data":"..."}
-    std::string json_msg = "{\"type\":\"message\",\"data\":\"" + json_escape(data_str) + "\"}\n";
+    if (std::holds_alternative<std::string>(args[0])) {
+        std::string str = std::get<std::string>(args[0]);
+        data_bytes.assign(str.begin(), str.end());
+    } else if (std::holds_alternative<double>(args[0])) {
+        std::ostringstream ss;
+        ss << std::get<double>(args[0]);
+        std::string str = ss.str();
+        data_bytes.assign(str.begin(), str.end());
+    } else if (std::holds_alternative<bool>(args[0])) {
+        std::string str = std::get<bool>(args[0]) ? "true" : "false";
+        data_bytes.assign(str.begin(), str.end());
+    } else if (std::holds_alternative<BufferPtr>(args[0])) {
+        BufferPtr buf = std::get<BufferPtr>(args[0]);
+        data_bytes = buf->data;
+    } else {
+        throw SwaziError("TypeError", "send() requires string, number, boolean, or buffer", token.loc);
+    }
 
-    // Allocate buffer and write
-    uv_buf_t buf = uv_buf_init((char*)malloc(json_msg.size()),
-        static_cast<unsigned int>(json_msg.size()));
-    memcpy(buf.base, json_msg.data(), json_msg.size());
+    if (data_bytes.empty()) {
+        return std::monostate{};
+    }
+
+    // Send raw bytes
+    uv_buf_t buf = uv_buf_init((char*)malloc(data_bytes.size()),
+        static_cast<unsigned int>(data_bytes.size()));
+    memcpy(buf.base, data_bytes.data(), data_bytes.size());
 
     uv_write_t* req = new uv_write_t;
-    req->data = buf.base;  // Store for cleanup
+    req->data = buf.base;
 
     uv_write(req, (uv_stream_t*)g_ipc_state.write_pipe, &buf, 1,
         [](uv_write_t* req, int status) {
@@ -243,13 +223,46 @@ static Value process_send(const std::vector<Value>& args, EnvPtr /*env*/, const 
     return std::monostate{};
 }
 
-// process.on(event, callback) - register listener for IPC messages
-static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
-    // Initialize IPC if not already done
-    if (!g_ipc_state.initialized) {
-        initialize_child_ipc();
+static struct SignalState {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::vector<FunctionPtr>> signal_listeners;
+    std::unordered_map<std::string, uv_signal_t*> signal_handles;
+} g_signal_state;
+
+// Signal callback
+static void signal_cb(uv_signal_t* handle, int signum) {
+    std::string sig_name = "SIG" + std::to_string(signum);
+
+    // Map common signal numbers to names
+    if (signum == SIGTERM)
+        sig_name = "SIGTERM";
+    else if (signum == SIGINT)
+        sig_name = "SIGINT";
+#ifndef _WIN32
+    else if (signum == SIGHUP)
+        sig_name = "SIGHUP";
+    else if (signum == SIGUSR1)
+        sig_name = "SIGUSR1";
+    else if (signum == SIGUSR2)
+        sig_name = "SIGUSR2";
+#endif
+
+    std::vector<FunctionPtr> listeners;
+    {
+        std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+        auto it = g_signal_state.signal_listeners.find(sig_name);
+        if (it != g_signal_state.signal_listeners.end()) {
+            listeners = it->second;
+        }
     }
 
+    for (auto& cb : listeners) {
+        if (cb) schedule_message_listener(cb, {Value{sig_name}});
+    }
+}
+
+// process.on(event, callback) - register listener for IPC messages
+static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
     if (args.size() < 2) {
         throw SwaziError("TypeError",
             "process.on() requires two arguments: event name and callback", token.loc);
@@ -266,26 +279,66 @@ static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, 
     std::string event = std::get<std::string>(args[0]);
     FunctionPtr callback = std::get<FunctionPtr>(args[1]);
 
-    // Only handle "message" event
-    if (event != "message") {
-        // Silently ignore other events or throw
+    // Handle "message" event (IPC)
+    if (event == "message") {
+        // Initialize IPC if not already done
+        if (!g_ipc_state.initialized) {
+            initialize_child_ipc();
+        }
+
+        // SILENT MODE: If not a forked child, just return (do nothing)
+        if (!g_ipc_state.is_forked_child) {
+            return std::monostate{};
+        }
+
+        // Register the listener
+        {
+            std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+            g_ipc_state.message_listeners.push_back(callback);
+        }
+
         return std::monostate{};
     }
 
-    // Check if this is a forked child
-    if (!g_ipc_state.is_forked_child) {
-        throw SwaziError("RuntimeError",
-            "process.on('message', ...) can only be used in forked child processes. "
-            "This process was not created with fork().",
-            token.loc);
+    // Handle signal events (SIGTERM, SIGINT, etc.)
+    int signum = -1;
+    if (event == "SIGTERM")
+        signum = SIGTERM;
+    else if (event == "SIGINT")
+        signum = SIGINT;
+#ifndef _WIN32
+    else if (event == "SIGHUP")
+        signum = SIGHUP;
+    else if (event == "SIGUSR1")
+        signum = SIGUSR1;
+    else if (event == "SIGUSR2")
+        signum = SIGUSR2;
+#endif
+
+    if (signum != -1) {
+        uv_loop_t* loop = scheduler_get_loop();
+        if (!loop) {
+            // No loop - can't register signal handlers
+            return std::monostate{};
+        }
+
+        std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+
+        // Register listener
+        g_signal_state.signal_listeners[event].push_back(callback);
+
+        // Create signal handle if not exists
+        if (g_signal_state.signal_handles.find(event) == g_signal_state.signal_handles.end()) {
+            uv_signal_t* sig_handle = new uv_signal_t;
+            uv_signal_init(loop, sig_handle);
+            uv_signal_start(sig_handle, signal_cb, signum);
+            g_signal_state.signal_handles[event] = sig_handle;
+        }
+
+        return std::monostate{};
     }
 
-    // Register the listener
-    {
-        std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
-        g_ipc_state.message_listeners.push_back(callback);
-    }
-
+    // Unknown event - silently ignore
     return std::monostate{};
 }
 
