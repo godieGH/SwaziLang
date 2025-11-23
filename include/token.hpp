@@ -133,6 +133,16 @@ enum class TokenType {
     PERCENT,
     POWER,
 
+    //-----------------------
+    // Bitwise... for & will use AMPERSAND
+    //-----------------------
+    // BIT_AND, // for & will use AMPERSAND
+    BIT_OR,           // |
+    BIT_XOR,          // ^
+    BIT_SHIFT_LEFT,   // <<
+    BIT_SHIFT_RIGHT,  // >>
+    // BIT_NOT, // for ~ will use TILDE
+
     // -----------------------
     // Compound arithmetic / increments
     // -----------------------

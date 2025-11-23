@@ -110,15 +110,48 @@ std::unique_ptr<ExpressionNode> Parser::parse_equality() {
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_comparison() {
-    auto left = parse_additive();
+    auto left = parse_bitwise();
     while (peek().type == TokenType::GREATERTHAN ||
         peek().type == TokenType::GREATEROREQUALTHAN ||
         peek().type == TokenType::LESSTHAN ||
         peek().type == TokenType::LESSOREQUALTHAN) {
         Token op = consume();
-        auto right = parse_additive();
+        auto right = parse_bitwise();
         auto node = std::make_unique<BinaryExpressionNode>();
         node->op = !op.value.empty() ? op.value : std::string();
+        node->left = std::move(left);
+        node->right = std::move(right);
+        node->token = op;
+        left = std::move(node);
+    }
+    return left;
+}
+
+std::unique_ptr<ExpressionNode> Parser::parse_bitwise() {
+    auto left = parse_additive();
+    while (peek().type == TokenType::AMPERSAND ||     // &
+        peek().type == TokenType::BIT_OR ||           // |
+        peek().type == TokenType::BIT_XOR ||          // ^
+        peek().type == TokenType::BIT_SHIFT_LEFT ||   // <<
+        peek().type == TokenType::BIT_SHIFT_RIGHT) {  // >>
+        Token op = consume();
+        auto right = parse_additive();
+        auto node = std::make_unique<BinaryExpressionNode>();
+        if (!op.value.empty())
+            node->op = op.value;
+        else {
+            // fallback based on type
+            if (op.type == TokenType::AMPERSAND)
+                node->op = "&";
+            else if (op.type == TokenType::BIT_OR)
+                node->op = "|";
+            else if (op.type == TokenType::BIT_XOR)
+                node->op = "^";
+            else if (op.type == TokenType::BIT_SHIFT_LEFT)
+                node->op = "<<";
+            else if (op.type == TokenType::BIT_SHIFT_RIGHT)
+                node->op = ">>";
+        }
         node->left = std::move(left);
         node->right = std::move(right);
         node->token = op;
@@ -183,11 +216,22 @@ std::unique_ptr<ExpressionNode> Parser::parse_exponent() {
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_unary() {
-    if (peek().type == TokenType::NOT || peek().type == TokenType::MINUS) {
+    if (peek().type == TokenType::NOT ||
+        peek().type == TokenType::MINUS ||
+        peek().type == TokenType::TILDE) {
         Token op = consume();
         auto operand = parse_unary();
         auto node = std::make_unique<UnaryExpressionNode>();
-        node->op = !op.value.empty() ? op.value : (op.type == TokenType::NOT ? "!" : "-");
+        if (!op.value.empty())
+            node->op = op.value;
+        else {
+            if (op.type == TokenType::NOT)
+                node->op = "!";
+            else if (op.type == TokenType::MINUS)
+                node->op = "-";
+            else if (op.type == TokenType::TILDE)
+                node->op = "~";
+        }
         node->operand = std::move(operand);
         node->token = op;
         return node;

@@ -817,6 +817,20 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+
+    if (c == '<' && peek_next() == '<') {
+        add_token(out, TokenType::BIT_SHIFT_LEFT, "<<", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '>' && peek_next() == '>') {
+        add_token(out, TokenType::BIT_SHIFT_RIGHT, ">>", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+
     if (c == '+' && peek_next() == '+') {
         add_token(out, TokenType::INCREMENT, "++", line, col, 2);
         advance();
@@ -922,6 +936,14 @@ void Lexer::scan_token(std::vector<Token>& out) {
             return;
         case '~':
             add_token(out, TokenType::TILDE, "~", line, col, 1);
+            advance();
+            return;
+        case '|':
+            add_token(out, TokenType::BIT_OR, "|", line, col, 1);
+            advance();
+            return;
+        case '^':
+            add_token(out, TokenType::BIT_XOR, "^", line, col, 1);
             advance();
             return;
         case '=':

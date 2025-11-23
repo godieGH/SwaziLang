@@ -40,6 +40,7 @@ class Parser {
     std::unique_ptr<ExpressionNode> parse_logical_and();
     std::unique_ptr<ExpressionNode> parse_equality();
     std::unique_ptr<ExpressionNode> parse_comparison();
+    std::unique_ptr<ExpressionNode> parse_bitwise();
     std::unique_ptr<ExpressionNode> parse_additive();
     std::unique_ptr<ExpressionNode> parse_multiplicative();
     std::unique_ptr<ExpressionNode> parse_exponent();

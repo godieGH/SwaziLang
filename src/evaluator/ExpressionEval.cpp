@@ -2736,6 +2736,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return Value{-to_number(operand, u->token)};
         }
 
+        if (u->op == "~") {
+            int32_t val = static_cast<int32_t>(to_number(operand, u->token));
+            return Value{static_cast<double>(~val)};
+        }
+
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
         if (u->op == "aina") {
             return type_name(operand);
@@ -3060,6 +3065,42 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return Value{std::fmod(to_number(left, b->token), r)};
         }
         if (op == "**") return Value{std::pow(to_number(left, b->token), to_number(right, b->token))};
+
+        // Bitwise AND
+        if (op == "&") {
+            int32_t l = static_cast<int32_t>(to_number(left, b->token));
+            int32_t r = static_cast<int32_t>(to_number(right, b->token));
+            return Value{static_cast<double>(l & r)};
+        }
+
+        // Bitwise OR
+        if (op == "|") {
+            int32_t l = static_cast<int32_t>(to_number(left, b->token));
+            int32_t r = static_cast<int32_t>(to_number(right, b->token));
+            return Value{static_cast<double>(l | r)};
+        }
+
+        // Bitwise XOR
+        if (op == "^") {
+            int32_t l = static_cast<int32_t>(to_number(left, b->token));
+            int32_t r = static_cast<int32_t>(to_number(right, b->token));
+            return Value{static_cast<double>(l ^ r)};
+        }
+
+        // Left shift
+        if (op == "<<") {
+            int32_t l = static_cast<int32_t>(to_number(left, b->token));
+            // Shift amount: only lower 5 bits matter (JS spec: 0-31)
+            uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
+            return Value{static_cast<double>(l << r)};
+        }
+
+        // Right shift (sign-extending)
+        if (op == ">>") {
+            int32_t l = static_cast<int32_t>(to_number(left, b->token));
+            uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
+            return Value{static_cast<double>(l >> r)};
+        }
 
         if (op == "===") {
             return Value(to_bool(Value(is_strict_equal(left, right))));
