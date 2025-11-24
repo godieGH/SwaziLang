@@ -829,6 +829,114 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         auto fn_value = std::make_shared<FunctionValue>("crypto.memzero", fn, env, tok);
         obj->properties["memzero"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
+    
+    
+    // ============= UUID GENERATION =============
+    
+    // crypto.randomUUID() -> string (UUID v4)
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            // Generate 16 random bytes
+            uint8_t bytes[16];
+            randombytes_buf(bytes, 16);
+            
+            // Set version (4) and variant bits according to RFC 4122
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;  // Version 4
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;  // Variant 10
+            
+            // Format as UUID string: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+            char uuid[37];  // 32 hex chars + 4 dashes + null terminator
+            snprintf(uuid, sizeof(uuid),
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5],
+                bytes[6], bytes[7],
+                bytes[8], bytes[9],
+                bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+            );
+            
+            return Value{std::string(uuid)};
+        };
+        
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.randomUUID", fn, env, tok);
+        obj->properties["randomUUID"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+    
+    // crypto.uuidToBytes(uuid) -> Buffer (convert UUID string to 16 bytes)
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0])) {
+                throw SwaziError("TypeError", "crypto.uuidToBytes requires UUID string", token.loc);
+            }
+            
+            std::string uuid = std::get<std::string>(args[0]);
+            
+            // Remove dashes
+            std::string hex;
+            for (char c : uuid) {
+                if (c != '-') hex += c;
+            }
+            
+            if (hex.length() != 32) {
+                throw SwaziError("ValueError", "Invalid UUID format (expected 32 hex chars)", token.loc);
+            }
+            
+            // Convert hex to bytes
+            auto result = std::make_shared<BufferValue>();
+            result->data.resize(16);
+            
+            for (size_t i = 0; i < 16; ++i) {
+                std::string byte_str = hex.substr(i * 2, 2);
+                result->data[i] = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+            }
+            
+            result->encoding = "binary";
+            return Value{result};
+        };
+        
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.uuidToBytes", fn, env, tok);
+        obj->properties["uuidToBytes"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+    
+    // crypto.bytesToUUID(buffer) -> string (convert 16 bytes to UUID string)
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "crypto.bytesToUUID requires Buffer", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            if (buf->data.size() != 16) {
+                throw SwaziError("ValueError", "Buffer must be exactly 16 bytes", token.loc);
+            }
+            
+            // Format as UUID string
+            char uuid[37];
+            const uint8_t* bytes = buf->data.data();
+            snprintf(uuid, sizeof(uuid),
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5],
+                bytes[6], bytes[7],
+                bytes[8], bytes[9],
+                bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+            );
+            
+            return Value{std::string(uuid)};
+        };
+        
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.bytesToUUID", fn, env, tok);
+        obj->properties["bytesToUUID"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
 
     return obj;
 }
