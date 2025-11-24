@@ -57,20 +57,36 @@ void Lexer::scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_co
     // skip opening quote
     advance();
     std::string val;
+
     while (!eof()) {
         char c = peek();
         if (c == quote) {
             advance();
             break;
         }
+
         if (c == '\\') {
-            advance();  // backslash
+            advance();  // consume backslash
             char nxt = peek();
+
+            // Standard single-character escapes
             if (nxt == 'n') {
                 val.push_back('\n');
                 advance();
             } else if (nxt == 't') {
                 val.push_back('\t');
+                advance();
+            } else if (nxt == 'r') {
+                val.push_back('\r');
+                advance();
+            } else if (nxt == 'b') {
+                val.push_back('\b');
+                advance();
+            } else if (nxt == 'f') {
+                val.push_back('\f');
+                advance();
+            } else if (nxt == 'v') {
+                val.push_back('\v');
                 advance();
             } else if (nxt == '\'') {
                 val.push_back('\'');
@@ -81,23 +97,143 @@ void Lexer::scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_co
             } else if (nxt == '\\') {
                 val.push_back('\\');
                 advance();
-            } else {
+            }
+            // Octal escape: \0, \00, \000, \033, \177, etc.
+            else if (nxt >= '0' && nxt <= '7') {
+                int octal_value = 0;
+                int digits = 0;
+
+                // Parse up to 3 octal digits
+                while (!eof() && digits < 3 && peek() >= '0' && peek() <= '7') {
+                    octal_value = octal_value * 8 + (peek() - '0');
+                    advance();
+                    digits++;
+                }
+
+                // Clamp to valid byte range [0, 255]
+                if (octal_value > 255) {
+                    std::ostringstream ss;
+                    ss << "Octal escape sequence out of range (> 255) at "
+                       << (filename.empty() ? "<repl>" : filename)
+                       << " line " << tok_line << ", col " << tok_col;
+                    throw std::runtime_error(ss.str());
+                }
+
+                val.push_back(static_cast<char>(octal_value));
+            }
+            // Hex escape: \x1b, \xff, \x00
+            else if (nxt == 'x') {
+                advance();  // consume 'x'
+
+                if (!eof() && std::isxdigit((unsigned char)peek())) {
+                    int hex_value = 0;
+                    int digits = 0;
+
+                    // Parse exactly 2 hex digits
+                    while (!eof() && digits < 2 && std::isxdigit((unsigned char)peek())) {
+                        char hc = peek();
+                        int digit;
+                        if (hc >= '0' && hc <= '9')
+                            digit = hc - '0';
+                        else if (hc >= 'a' && hc <= 'f')
+                            digit = 10 + (hc - 'a');
+                        else if (hc >= 'A' && hc <= 'F')
+                            digit = 10 + (hc - 'A');
+                        else
+                            break;
+
+                        hex_value = hex_value * 16 + digit;
+                        advance();
+                        digits++;
+                    }
+
+                    if (digits > 0) {
+                        val.push_back(static_cast<char>(hex_value));
+                    } else {
+                        // Invalid hex escape - keep literal \x
+                        val.push_back('\\');
+                        val.push_back('x');
+                    }
+                } else {
+                    // No hex digits after \x - keep literal
+                    val.push_back('\\');
+                    val.push_back('x');
+                }
+            }
+            // Unicode escape: \u2713, \u00e9 (4 hex digits)
+            else if (nxt == 'u') {
+                advance();  // consume 'u'
+
+                // Must have exactly 4 hex digits
+                bool valid = true;
+                uint32_t codepoint = 0;
+
+                for (int j = 0; j < 4; j++) {
+                    if (eof() || !std::isxdigit((unsigned char)peek())) {
+                        valid = false;
+                        break;
+                    }
+
+                    char hc = peek();
+                    int digit;
+                    if (hc >= '0' && hc <= '9')
+                        digit = hc - '0';
+                    else if (hc >= 'a' && hc <= 'f')
+                        digit = 10 + (hc - 'a');
+                    else if (hc >= 'A' && hc <= 'F')
+                        digit = 10 + (hc - 'A');
+                    else {
+                        valid = false;
+                        break;
+                    }
+
+                    codepoint = (codepoint << 4) | digit;
+                    advance();
+                }
+
+                if (valid) {
+                    // Convert Unicode codepoint to UTF-8
+                    if (codepoint <= 0x7F) {
+                        // 1-byte UTF-8
+                        val.push_back(static_cast<char>(codepoint));
+                    } else if (codepoint <= 0x7FF) {
+                        // 2-byte UTF-8
+                        val.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+                        val.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                    } else if (codepoint <= 0xFFFF) {
+                        // 3-byte UTF-8
+                        val.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+                        val.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+                        val.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                    } else {
+                        // 4-byte UTF-8 (for completeness, though \u only goes to 0xFFFF)
+                        val.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+                        val.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+                        val.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+                        val.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                    }
+                } else {
+                    // Invalid unicode escape - keep literal \u
+                    val.push_back('\\');
+                    val.push_back('u');
+                }
+            }
+            // Unknown escape - keep the character as-is (e.g., \a remains as 'a')
+            else {
                 val.push_back(nxt);
                 advance();
             }
             continue;
         }
-        // allow multiline strings: advance updates line/col
+
+        // Regular character - allow multiline strings
         val.push_back(advance());
     }
-    int tok_length = static_cast<int>(i - start_index);  // raw source length including quotes and escapes
 
-    TokenType tt = TokenType::STRING;
-    if (quote == '\'') tt = TokenType::SINGLE_QUOTED_STRING;
-
+    int tok_length = static_cast<int>(i - start_index);
+    TokenType tt = (quote == '\'') ? TokenType::SINGLE_QUOTED_STRING : TokenType::STRING;
     add_token(out, tt, val, tok_line, tok_col, tok_length);
 }
-
 // scan template literal with full interpolation support.
 // Emits TEMPLATE_CHUNK tokens (may be empty), TEMPLATE_EXPR_START ("${"),
 // then emits normal tokens for the expression, and when the top-level '}' of the
@@ -131,13 +267,27 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
 
         // escape sequences inside template text
         if (c == '\\') {
-            advance();
+            advance();  // consume backslash
             char nxt = peek();
+
+            // Standard single-character escapes
             if (nxt == 'n') {
                 chunk.push_back('\n');
                 advance();
             } else if (nxt == 't') {
                 chunk.push_back('\t');
+                advance();
+            } else if (nxt == 'r') {
+                chunk.push_back('\r');
+                advance();
+            } else if (nxt == 'b') {
+                chunk.push_back('\b');
+                advance();
+            } else if (nxt == 'f') {
+                chunk.push_back('\f');
+                advance();
+            } else if (nxt == 'v') {
+                chunk.push_back('\v');
                 advance();
             } else if (nxt == '`') {
                 chunk.push_back('`');
@@ -145,7 +295,133 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
             } else if (nxt == '\\') {
                 chunk.push_back('\\');
                 advance();
-            } else {
+            } else if (nxt == '$') {
+                // Allow escaping $ to prevent interpolation: \${ -> literal ${
+                chunk.push_back('$');
+                advance();
+            }
+            // Octal escape: \0, \00, \000, \033, \177, etc.
+            else if (nxt >= '0' && nxt <= '7') {
+                int octal_value = 0;
+                int digits = 0;
+
+                // Parse up to 3 octal digits
+                while (!eof() && digits < 3 && peek() >= '0' && peek() <= '7') {
+                    octal_value = octal_value * 8 + (peek() - '0');
+                    advance();
+                    digits++;
+                }
+
+                // Clamp to valid byte range [0, 255]
+                if (octal_value > 255) {
+                    std::ostringstream ss;
+                    ss << "Octal escape sequence out of range (> 255) in template at "
+                       << (filename.empty() ? "<repl>" : filename)
+                       << " line " << tok_line << ", col " << tok_col;
+                    throw std::runtime_error(ss.str());
+                }
+
+                chunk.push_back(static_cast<char>(octal_value));
+            }
+            // Hex escape: \x1b, \xff, \x00
+            else if (nxt == 'x') {
+                advance();  // consume 'x'
+
+                if (!eof() && std::isxdigit((unsigned char)peek())) {
+                    int hex_value = 0;
+                    int digits = 0;
+
+                    // Parse exactly 2 hex digits
+                    while (!eof() && digits < 2 && std::isxdigit((unsigned char)peek())) {
+                        char hc = peek();
+                        int digit;
+                        if (hc >= '0' && hc <= '9')
+                            digit = hc - '0';
+                        else if (hc >= 'a' && hc <= 'f')
+                            digit = 10 + (hc - 'a');
+                        else if (hc >= 'A' && hc <= 'F')
+                            digit = 10 + (hc - 'A');
+                        else
+                            break;
+
+                        hex_value = hex_value * 16 + digit;
+                        advance();
+                        digits++;
+                    }
+
+                    if (digits > 0) {
+                        chunk.push_back(static_cast<char>(hex_value));
+                    } else {
+                        // Invalid hex escape - keep literal \x
+                        chunk.push_back('\\');
+                        chunk.push_back('x');
+                    }
+                } else {
+                    // No hex digits after \x - keep literal
+                    chunk.push_back('\\');
+                    chunk.push_back('x');
+                }
+            }
+            // Unicode escape: \u2713, \u00e9 (4 hex digits)
+            else if (nxt == 'u') {
+                advance();  // consume 'u'
+
+                // Must have exactly 4 hex digits
+                bool valid = true;
+                uint32_t codepoint = 0;
+
+                for (int j = 0; j < 4; j++) {
+                    if (eof() || !std::isxdigit((unsigned char)peek())) {
+                        valid = false;
+                        break;
+                    }
+
+                    char hc = peek();
+                    int digit;
+                    if (hc >= '0' && hc <= '9')
+                        digit = hc - '0';
+                    else if (hc >= 'a' && hc <= 'f')
+                        digit = 10 + (hc - 'a');
+                    else if (hc >= 'A' && hc <= 'F')
+                        digit = 10 + (hc - 'A');
+                    else {
+                        valid = false;
+                        break;
+                    }
+
+                    codepoint = (codepoint << 4) | digit;
+                    advance();
+                }
+
+                if (valid) {
+                    // Convert Unicode codepoint to UTF-8
+                    if (codepoint <= 0x7F) {
+                        // 1-byte UTF-8
+                        chunk.push_back(static_cast<char>(codepoint));
+                    } else if (codepoint <= 0x7FF) {
+                        // 2-byte UTF-8
+                        chunk.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+                        chunk.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                    } else if (codepoint <= 0xFFFF) {
+                        // 3-byte UTF-8
+                        chunk.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+                        chunk.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+                        chunk.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                    } else {
+                        // 4-byte UTF-8 (for completeness)
+                        chunk.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+                        chunk.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+                        chunk.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+                        chunk.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                    }
+                } else {
+                    // Invalid unicode escape - keep literal \u
+                    chunk.push_back('\\');
+                    chunk.push_back('u');
+                }
+            }
+            // Unknown escape - keep the character as-is
+            else {
                 chunk.push_back(nxt);
                 advance();
             }
