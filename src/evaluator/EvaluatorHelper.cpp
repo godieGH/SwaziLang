@@ -241,12 +241,10 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         FilePtr file = std::get<FilePtr>(v);
         if (!file) return "[emptyFile]";
 
-        std::ostringstream ss;
-        ss << "[";
-        ss << (use_color ? (Color::bright_black + "file object" + Color::reset) : "File Object");
-        ss << "]";
-
-        return ss.str();
+        // Delegate to print_value which has full printing context
+        std::unordered_set<const ObjectValue*> visited;
+        std::unordered_set<const ArrayValue*> arrvisited;
+        return print_value(v, 0, visited, arrvisited);
     }
 
     if (std::holds_alternative<GeneratorPtr>(v)) {
@@ -968,12 +966,51 @@ std::string Evaluator::print_value(
         FilePtr file = std::get<FilePtr>(v);
         if (!file) return "[emptyFile]";
 
-        std::ostringstream ss;
-        ss << "[";
-        ss << (use_color ? (Color::bright_black + "file object" + Color::reset) : "File Object");
-        ss << "]";
+        // Create a temporary ObjectValue to represent the file's state
+        auto fileRepr = std::make_shared<ObjectValue>();
 
-        return ss.str();
+        // Add file descriptor or handle
+#ifdef _WIN32
+        fileRepr->properties["handle"] = PropertyDescriptor{
+            Value{file->handle ? std::to_string(reinterpret_cast<uintptr_t>(file->handle)) : "null"},
+            false, false, false, Token()};
+#else
+        fileRepr->properties["fd"] = PropertyDescriptor{
+            Value{static_cast<double>(file->fd)},
+            false, false, false, Token()};
+#endif
+
+        // Add other properties
+        fileRepr->properties["path"] = PropertyDescriptor{
+            Value{file->path},
+            false, false, false, Token()};
+
+        fileRepr->properties["mode"] = PropertyDescriptor{
+            Value{file->mode},
+            false, false, false, Token()};
+
+        fileRepr->properties["is_open"] = PropertyDescriptor{
+            Value{file->is_open},
+            false, false, false, Token()};
+
+        fileRepr->properties["is_binary"] = PropertyDescriptor{
+            Value{file->is_binary},
+            false, false, false, Token()};
+
+        fileRepr->properties["position"] = PropertyDescriptor{
+            Value{static_cast<double>(file->file_pos)},
+            false, false, false, Token()};
+
+        // Build the label
+        std::string label = use_color
+            ? (Color::bright_black + "[file object]" + Color::reset)
+            : "[file object]";
+
+        // Get the pretty-printed object representation
+        std::string objRepr = print_object(fileRepr, depth, visited);
+
+        // Combine label + object representation
+        return label + " " + objRepr;
     }
 
     if (std::holds_alternative<GeneratorPtr>(v)) {

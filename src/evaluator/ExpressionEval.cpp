@@ -1396,39 +1396,38 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.toStr"), native_impl, env, mem->token)};
             }
-            
-            
+
             // buf.slice(start, end?) -> Buffer
             if (mem->property == "slice") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (!buf) return Value{std::make_shared<BufferValue>()};
-                    
+
                     size_t start = 0;
                     size_t end = buf->data.size();
-                    
+
                     if (!args.empty() && std::holds_alternative<double>(args[0])) {
                         double start_d = std::get<double>(args[0]);
                         start = static_cast<size_t>(std::max(0.0, start_d));
                     }
-                    
+
                     if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
                         double end_d = std::get<double>(args[1]);
                         end = static_cast<size_t>(std::max(0.0, end_d));
                     }
-                    
+
                     start = std::min(start, buf->data.size());
                     end = std::min(end, buf->data.size());
                     if (start > end) start = end;
-                    
+
                     auto result = std::make_shared<BufferValue>();
                     result->data.assign(buf->data.begin() + start, buf->data.begin() + end);
                     result->encoding = buf->encoding;
-                    
+
                     return Value{result};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.slice"), native_impl, env, mem->token)};
             }
-            
+
             // buf.byteAt(index) -> number (0-255)
             if (mem->property == "byteAt") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1438,14 +1437,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nCannot read from null buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     if (args.empty() || !std::holds_alternative<double>(args[0])) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.byteAt() requires index argument." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     size_t index = static_cast<size_t>(std::get<double>(args[0]));
                     if (index >= buf->data.size()) {
                         throw std::runtime_error(
@@ -1453,12 +1452,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nIndex " + std::to_string(index) + " out of bounds (buffer size: " + std::to_string(buf->data.size()) + ")." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     return Value{static_cast<double>(buf->data[index])};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.byteAt"), native_impl, env, mem->token)};
             }
-            
+
             // buf.copy(sourceBuffer, targetStart?, sourceStart?, sourceEnd?) -> number (bytes copied)
             if (mem->property == "copy") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1468,14 +1467,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nCannot copy to null buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.copy() requires source buffer as first argument." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     BufferPtr source = std::get<BufferPtr>(args[0]);
                     if (!source) {
                         throw std::runtime_error(
@@ -1483,11 +1482,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nSource buffer is null." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     size_t targetStart = 0;
                     size_t sourceStart = 0;
                     size_t sourceEnd = source->data.size();
-                    
+
                     if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
                         targetStart = static_cast<size_t>(std::max(0.0, std::get<double>(args[1])));
                     }
@@ -1497,31 +1496,30 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     if (args.size() >= 4 && std::holds_alternative<double>(args[3])) {
                         sourceEnd = static_cast<size_t>(std::max(0.0, std::get<double>(args[3])));
                     }
-                    
+
                     // Clamp to valid ranges
                     sourceStart = std::min(sourceStart, source->data.size());
                     sourceEnd = std::min(sourceEnd, source->data.size());
                     if (sourceStart > sourceEnd) sourceStart = sourceEnd;
-                    
+
                     targetStart = std::min(targetStart, buf->data.size());
-                    
+
                     // Calculate how many bytes to copy
                     size_t sourceLength = sourceEnd - sourceStart;
                     size_t targetAvailable = buf->data.size() - targetStart;
                     size_t bytesToCopy = std::min(sourceLength, targetAvailable);
-                    
+
                     // Copy bytes
                     std::copy(
                         source->data.begin() + sourceStart,
                         source->data.begin() + sourceStart + bytesToCopy,
-                        buf->data.begin() + targetStart
-                    );
-                    
+                        buf->data.begin() + targetStart);
+
                     return Value{static_cast<double>(bytesToCopy)};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.copy"), native_impl, env, mem->token)};
             }
-            
+
             // buf.set(array, offset?) -> void
             if (mem->property == "set") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1531,21 +1529,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nCannot set on null buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     if (args.empty()) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.set() requires array or buffer argument." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     size_t offset = 0;
                     if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
                         offset = static_cast<size_t>(std::max(0.0, std::get<double>(args[1])));
                     }
-                    
+
                     offset = std::min(offset, buf->data.size());
-                    
+
                     // From buffer
                     if (std::holds_alternative<BufferPtr>(args[0])) {
                         BufferPtr source = std::get<BufferPtr>(args[0]);
@@ -1555,10 +1553,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 "\nSource buffer is null." +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-                        
+
                         size_t available = buf->data.size() - offset;
                         size_t toCopy = std::min(source->data.size(), available);
-                        
+
                         std::copy(source->data.begin(), source->data.begin() + toCopy, buf->data.begin() + offset);
                     }
                     // From array
@@ -1570,10 +1568,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 "\nSource array is null." +
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
-                        
+
                         size_t available = buf->data.size() - offset;
                         size_t toCopy = std::min(arr->elements.size(), available);
-                        
+
                         for (size_t i = 0; i < toCopy; ++i) {
                             if (std::holds_alternative<double>(arr->elements[i])) {
                                 double val = std::get<double>(arr->elements[i]);
@@ -1586,92 +1584,90 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nbuf.set() requires array or buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     return std::monostate{};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.set"), native_impl, env, mem->token)};
             }
-            
+
             // buf.equals(other) -> bool
             if (mem->property == "equals") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (!buf) return Value{false};
-                    
+
                     if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
                         return Value{false};
                     }
-                    
+
                     BufferPtr other = std::get<BufferPtr>(args[0]);
                     if (!other) return Value{false};
-                    
+
                     if (buf->data.size() != other->data.size()) return Value{false};
-                    
+
                     return Value{buf->data == other->data};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.equals"), native_impl, env, mem->token)};
             }
-            
+
             // buf.includes(value, byteOffset?) -> bool
             if (mem->property == "includes") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (!buf) return Value{false};
-                    
+
                     if (args.empty()) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.includes() requires a value to search for." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     size_t byteOffset = 0;
                     if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
                         byteOffset = static_cast<size_t>(std::max(0.0, std::get<double>(args[1])));
                     }
-                    
+
                     byteOffset = std::min(byteOffset, buf->data.size());
-                    
+
                     // Search for buffer
                     if (std::holds_alternative<BufferPtr>(args[0])) {
                         BufferPtr needle = std::get<BufferPtr>(args[0]);
                         if (!needle || needle->data.empty()) return Value{true};
-                        
+
                         if (needle->data.size() > buf->data.size() - byteOffset) return Value{false};
-                        
+
                         auto it = std::search(
                             buf->data.begin() + byteOffset,
                             buf->data.end(),
                             needle->data.begin(),
-                            needle->data.end()
-                        );
-                        
+                            needle->data.end());
+
                         return Value{it != buf->data.end()};
                     }
                     // Search for string
                     else if (std::holds_alternative<std::string>(args[0])) {
                         std::string needle = std::get<std::string>(args[0]);
                         if (needle.empty()) return Value{true};
-                        
+
                         std::vector<uint8_t> needleBytes(needle.begin(), needle.end());
-                        
+
                         if (needleBytes.size() > buf->data.size() - byteOffset) return Value{false};
-                        
+
                         auto it = std::search(
                             buf->data.begin() + byteOffset,
                             buf->data.end(),
                             needleBytes.begin(),
-                            needleBytes.end()
-                        );
-                        
+                            needleBytes.end());
+
                         return Value{it != buf->data.end()};
                     }
                     // Search for single byte
                     else if (std::holds_alternative<double>(args[0])) {
                         uint8_t needle = static_cast<uint8_t>(static_cast<int>(std::get<double>(args[0])) & 0xFF);
-                        
+
                         auto it = std::find(buf->data.begin() + byteOffset, buf->data.end(), needle);
                         return Value{it != buf->data.end()};
                     }
-                    
+
                     return Value{false};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.includes"), native_impl, env, mem->token)};
