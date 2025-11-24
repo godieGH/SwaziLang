@@ -60,6 +60,15 @@ static std::string value_to_string_simple_local(const Value& v) {
 static std::mutex g_children_mutex;
 static std::atomic<long long> g_next_child_id{1};
 
+struct WriteCallbackData {
+    FunctionPtr cb;
+    void* buffer;
+};
+struct EndWriteData {
+    void* buffer;
+    uv_pipe_t* pipe;
+};
+
 struct ChildEntry {
     long long id;
     uv_process_t* proc = nullptr;
@@ -76,6 +85,7 @@ struct ChildEntry {
     bool closed = false;
 };
 static std::unordered_map<long long, std::shared_ptr<ChildEntry>> g_children;
+
 
 // Utility to schedule invocation of a JS function on runtime thread (via CallbackPayload)
 static void schedule_listener_call(FunctionPtr cb, const std::vector<Value>& args) {
@@ -114,10 +124,181 @@ static ObjectPtr make_child_object(std::shared_ptr<ChildEntry> entry) {
 
         return stream;
     };
-
     child_obj->properties["stdout"] = {Value{make_stream_obj(true)}, false, false, true, Token{}};
     child_obj->properties["stderr"] = {Value{make_stream_obj(false)}, false, false, true, Token{}};
-
+    
+    // Create stdin stream object (for writing to child's stdin)
+    auto make_stdin_obj = [entry]() {
+        auto stream = std::make_shared<ObjectValue>();
+        
+        // stdin.write(data, [callback])
+        auto write_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (!entry->stdin_pipe) {
+                throw SwaziError("Error", "stdin pipe not available", token.loc);
+            }
+            
+            if (args.empty()) {
+                throw SwaziError("TypeError", "stdin.write() requires data argument", token.loc);
+            }
+            
+            FunctionPtr callback = nullptr;
+            if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
+                callback = std::get<FunctionPtr>(args[1]);
+            }
+            
+            // Convert data to bytes
+            std::vector<uint8_t> data_bytes;
+            
+            if (std::holds_alternative<std::string>(args[0])) {
+                std::string str = std::get<std::string>(args[0]);
+                data_bytes.assign(str.begin(), str.end());
+            } else if (std::holds_alternative<double>(args[0])) {
+                std::ostringstream ss;
+                ss << std::get<double>(args[0]);
+                std::string str = ss.str();
+                data_bytes.assign(str.begin(), str.end());
+            } else if (std::holds_alternative<bool>(args[0])) {
+                std::string str = std::get<bool>(args[0]) ? "true" : "false";
+                data_bytes.assign(str.begin(), str.end());
+            } else if (std::holds_alternative<BufferPtr>(args[0])) {
+                BufferPtr buf = std::get<BufferPtr>(args[0]);
+                data_bytes = buf->data;
+            } else {
+                throw SwaziError("TypeError", "stdin.write() requires string, number, boolean, or buffer", token.loc);
+            }
+            
+            if (data_bytes.empty()) {
+                if (callback) schedule_listener_call(callback, {});
+                return Value{true};
+            }
+            
+            // Allocate and write
+            uv_buf_t buf = uv_buf_init((char*)malloc(data_bytes.size()), 
+                                       static_cast<unsigned int>(data_bytes.size()));
+            memcpy(buf.base, data_bytes.data(), data_bytes.size());
+            
+            uv_write_t* req = new uv_write_t;
+            
+            // Store callback in request data
+            struct WriteCallbackData {
+                FunctionPtr cb;
+                void* buffer;
+            };
+            
+            WriteCallbackData* cb_data = new WriteCallbackData{callback, buf.base};
+            req->data = cb_data;
+            
+            int result = uv_write(req, (uv_stream_t*)entry->stdin_pipe, &buf, 1,
+                [](uv_write_t* req, int status) {
+                    WriteCallbackData* data = static_cast<WriteCallbackData*>(req->data);
+                    
+                    if (data->buffer) free(data->buffer);
+                    
+                    if (data->cb) {
+                        if (status < 0) {
+                            schedule_listener_call(data->cb, {Value{std::string("Write error")}});
+                        } else {
+                            schedule_listener_call(data->cb, {});
+                        }
+                    }
+                    
+                    delete data;
+                    delete req;
+                });
+            
+            if (result < 0) {
+                free(buf.base);
+                delete cb_data;
+                delete req;
+                throw SwaziError("IOError", std::string("stdin.write() failed: ") + uv_strerror(result), token.loc);
+            }
+            
+            return Value{true};
+        };
+        
+        Token tok = make_native_token("stdin.write");
+        auto fn_write = std::make_shared<FunctionValue>("native:stdin.write", write_impl, nullptr, tok);
+        stream->properties["write"] = PropertyDescriptor{fn_write, false, false, false, tok};
+        
+        // stdin.end([data])
+        auto end_impl = [entry](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (!entry->stdin_pipe) {
+                return std::monostate{};
+            }
+            
+            // If final data provided, write it first
+            if (!args.empty() && !std::holds_alternative<std::monostate>(args[0])) {
+                std::vector<uint8_t> data_bytes;
+                
+                if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    data_bytes.assign(str.begin(), str.end());
+                } else if (std::holds_alternative<BufferPtr>(args[0])) {
+                    BufferPtr buf = std::get<BufferPtr>(args[0]);
+                    data_bytes = buf->data;
+                }
+                
+                if (!data_bytes.empty()) {
+                    uv_buf_t buf = uv_buf_init((char*)malloc(data_bytes.size()),
+                                              static_cast<unsigned int>(data_bytes.size()));
+                    memcpy(buf.base, data_bytes.data(), data_bytes.size());
+                    
+                    uv_write_t* req = new uv_write_t;
+                    
+                    // Store both buffer and pipe pointer
+                    struct EndWriteData {
+                        void* buffer;
+                        uv_pipe_t* pipe;
+                    };
+                    
+                    EndWriteData* end_data = new EndWriteData{buf.base, entry->stdin_pipe};
+                    req->data = end_data;
+                    
+                    // Write then close - use static callback
+                    uv_write(req, (uv_stream_t*)entry->stdin_pipe, &buf, 1,
+                        [](uv_write_t* req, int) {
+                            EndWriteData* data = static_cast<EndWriteData*>(req->data);
+                            if (data->buffer) free(data->buffer);
+                            
+                            // Now close stdin pipe
+                            if (data->pipe) {
+                                uv_close((uv_handle_t*)data->pipe, 
+                                    [](uv_handle_t*) { 
+                                        // Don't delete - exit_cb will handle cleanup
+                                    });
+                            }
+                            
+                            delete data;
+                            delete req;
+                        });
+                    
+                    return std::monostate{};
+                }
+            }
+            
+            // No data, just close stdin pipe (send EOF)
+            scheduler_run_on_loop([entry]() {
+                if (entry->stdin_pipe) {
+                    uv_close((uv_handle_t*)entry->stdin_pipe, 
+                        [](uv_handle_t*) {
+                            // Don't delete - exit_cb will handle cleanup
+                        });
+                }
+            });
+            
+            return std::monostate{};
+        };
+        
+        Token tok_end = make_native_token("stdin.end");
+        auto fn_end = std::make_shared<FunctionValue>("native:stdin.end", end_impl, nullptr, tok_end);
+        stream->properties["end"] = PropertyDescriptor{fn_end, false, false, false, tok_end};
+        
+        return stream;
+    };
+    child_obj->properties["stdin"] = {Value{make_stdin_obj()}, false, false, true, Token{}};
+    
+    
+    
     // child.on(event, cb) for 'exit' and 'message'
     auto on_impl = [entry](const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) -> Value {
         if (args.size() < 2) throw SwaziError("TypeError", "child.on requires (event, cb)", token.loc);
