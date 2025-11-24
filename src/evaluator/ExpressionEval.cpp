@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -11,6 +12,18 @@
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+
+inline uint32_t to_uint32(double d) {
+    // Handle NaN and infinity
+    if (!std::isfinite(d)) return 0;
+
+    // Get the integer part
+    int64_t i64 = static_cast<int64_t>(d);
+
+    // JavaScript ToUint32: take modulo 2^32
+    uint32_t result = static_cast<uint32_t>(i64);
+    return result;
+}
 
 Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (!expr) return std::monostate{};
@@ -3208,10 +3221,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
 
         if (u->op == "~") {
-            int32_t val = static_cast<int32_t>(to_number(operand, u->token));
+            uint32_t val = to_uint32(to_number(operand, u->token));
             return Value{static_cast<double>(~val)};
         }
-
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
         if (u->op == "aina") {
             return type_name(operand);
@@ -3539,36 +3551,35 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         // Bitwise AND
         if (op == "&") {
-            int32_t l = static_cast<int32_t>(to_number(left, b->token));
-            int32_t r = static_cast<int32_t>(to_number(right, b->token));
+            uint32_t l = to_uint32(to_number(left, b->token));
+            uint32_t r = to_uint32(to_number(right, b->token));
             return Value{static_cast<double>(l & r)};
         }
 
         // Bitwise OR
         if (op == "|") {
-            int32_t l = static_cast<int32_t>(to_number(left, b->token));
-            int32_t r = static_cast<int32_t>(to_number(right, b->token));
+            uint32_t l = to_uint32(to_number(left, b->token));
+            uint32_t r = to_uint32(to_number(right, b->token));
             return Value{static_cast<double>(l | r)};
         }
 
         // Bitwise XOR
         if (op == "^") {
-            int32_t l = static_cast<int32_t>(to_number(left, b->token));
-            int32_t r = static_cast<int32_t>(to_number(right, b->token));
+            uint32_t l = to_uint32(to_number(left, b->token));
+            uint32_t r = to_uint32(to_number(right, b->token));
             return Value{static_cast<double>(l ^ r)};
         }
 
         // Left shift
         if (op == "<<") {
-            int32_t l = static_cast<int32_t>(to_number(left, b->token));
-            // Shift amount: only lower 5 bits matter (JS spec: 0-31)
+            uint32_t l = to_uint32(to_number(left, b->token));
             uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
             return Value{static_cast<double>(l << r)};
         }
 
-        // Right shift (sign-extending)
+        // Right shift
         if (op == ">>") {
-            int32_t l = static_cast<int32_t>(to_number(left, b->token));
+            uint32_t l = to_uint32(to_number(left, b->token));
             uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
             return Value{static_cast<double>(l >> r)};
         }
