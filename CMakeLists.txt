@@ -96,6 +96,33 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# ===== libsodium Setup =====
+include(ExternalProject)
+
+set(LIBSODIUM_PREFIX "${CMAKE_BINARY_DIR}/libsodium")
+set(LIBSODIUM_INSTALL_DIR "${LIBSODIUM_PREFIX}/install")
+
+# Create the directories that will exist after build (prevents CMake error)
+file(MAKE_DIRECTORY "${LIBSODIUM_INSTALL_DIR}/include")
+file(MAKE_DIRECTORY "${LIBSODIUM_INSTALL_DIR}/lib")
+
+ExternalProject_Add(
+    libsodium_build
+    URL https://github.com/jedisct1/libsodium/releases/download/1.0.20-RELEASE/libsodium-1.0.20.tar.gz
+    URL_HASH SHA256=ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19
+    PREFIX ${LIBSODIUM_PREFIX}
+    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=${LIBSODIUM_INSTALL_DIR} --disable-shared --enable-static --enable-minimal
+    BUILD_COMMAND make -j4
+    INSTALL_COMMAND make install
+    BUILD_IN_SOURCE 0
+)
+
+# Create imported target for libsodium
+add_library(sodium STATIC IMPORTED GLOBAL)
+set_property(TARGET sodium PROPERTY IMPORTED_LOCATION "${LIBSODIUM_INSTALL_DIR}/lib/libsodium.a")
+set_property(TARGET sodium PROPERTY INTERFACE_INCLUDE_DIRECTORIES "${LIBSODIUM_INSTALL_DIR}/include")
+add_dependencies(sodium libsodium_build)
+
 enable_testing()
 
 # Collect all test files
@@ -115,8 +142,9 @@ target_include_directories(swazi_lib PUBLIC
 target_compile_definitions(swazi_lib PUBLIC 
     SWAZI_VERSION=\"${PROJECT_VERSION}\" 
     HAVE_LIBUV=1
+    HAVE_LIBSODIUM=1
 )
-target_link_libraries(swazi_lib PUBLIC linenoise uv)
+target_link_libraries(swazi_lib PUBLIC linenoise uv sodium)
 
 if (CURL_FOUND)
     target_compile_definitions(swazi_lib PUBLIC HAVE_LIBCURL=1)
@@ -125,6 +153,10 @@ endif()
 
 target_sources(swazi_lib PRIVATE "${GENERATED_BUILTIN_CPP}")
 add_dependencies(swazi_lib generate_builtins)
+
+# Link libsodium and set compile definitions for swazi executable
+target_compile_definitions(swazi PRIVATE HAVE_LIBSODIUM=1)
+target_link_libraries(swazi PRIVATE sodium)
 
 # Update swazi executable to use the library
 target_link_libraries(swazi PRIVATE swazi_lib)
