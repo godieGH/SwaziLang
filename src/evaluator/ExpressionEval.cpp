@@ -1672,7 +1672,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.includes"), native_impl, env, mem->token)};
             }
-            
+
             // buf.append(value) -> void (mutates the buffer)
             if (mem->property == "append") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1682,14 +1682,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nCannot append to null buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     if (args.empty()) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.append() requires a value argument." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     // Append another buffer
                     if (std::holds_alternative<BufferPtr>(args[0])) {
                         BufferPtr other = std::get<BufferPtr>(args[0]);
@@ -1730,19 +1730,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
                         buf->data.push_back(static_cast<uint8_t>(val));
-                    }
-                    else {
+                    } else {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.append() requires buffer, string, array, or number." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     return std::monostate{};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.append"), native_impl, env, mem->token)};
             }
-            
+
             // buf.write(value, offset?) -> void (writes and grows if needed)
             if (mem->property == "write") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1752,31 +1751,29 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nCannot write to null buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     if (args.empty()) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.write() requires a value argument." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     size_t offset = 0;
                     if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
                         offset = static_cast<size_t>(std::max(0.0, std::get<double>(args[1])));
                     }
-            
+
                     std::vector<uint8_t> bytes_to_write;
-            
+
                     // Convert value to bytes
                     if (std::holds_alternative<BufferPtr>(args[0])) {
                         BufferPtr other = std::get<BufferPtr>(args[0]);
                         if (other) bytes_to_write = other->data;
-                    }
-                    else if (std::holds_alternative<std::string>(args[0])) {
+                    } else if (std::holds_alternative<std::string>(args[0])) {
                         std::string str = std::get<std::string>(args[0]);
                         bytes_to_write.assign(str.begin(), str.end());
-                    }
-                    else if (std::holds_alternative<ArrayPtr>(args[0])) {
+                    } else if (std::holds_alternative<ArrayPtr>(args[0])) {
                         ArrayPtr arr = std::get<ArrayPtr>(args[0]);
                         if (arr) {
                             for (const auto& elem : arr->elements) {
@@ -1792,8 +1789,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 }
                             }
                         }
-                    }
-                    else if (std::holds_alternative<double>(args[0])) {
+                    } else if (std::holds_alternative<double>(args[0])) {
                         double val = std::get<double>(args[0]);
                         if (val < 0 || val > 255) {
                             throw std::runtime_error(
@@ -1802,28 +1798,27 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 "\n --> Traced at:\n" + token.loc.get_line_trace());
                         }
                         bytes_to_write.push_back(static_cast<uint8_t>(val));
-                    }
-                    else {
+                    } else {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.write() requires buffer, string, array, or number." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     // Grow buffer if necessary
                     size_t needed_size = offset + bytes_to_write.size();
                     if (needed_size > buf->data.size()) {
                         buf->data.resize(needed_size, 0);
                     }
-            
+
                     // Write bytes
                     std::copy(bytes_to_write.begin(), bytes_to_write.end(), buf->data.begin() + offset);
-            
+
                     return std::monostate{};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.write"), native_impl, env, mem->token)};
             }
-            
+
             // buf.resize(n) -> void (grows buffer by n bytes, fills with zeros)
             if (mem->property == "resize") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1833,41 +1828,41 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             "\nCannot resize null buffer." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     if (args.empty() || !std::holds_alternative<double>(args[0])) {
                         throw std::runtime_error(
                             "TypeError at " + token.loc.to_string() +
                             "\nbuf.resize() requires a numeric size argument." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-            
+
                     double delta_d = std::get<double>(args[0]);
-                    
+
                     // Allow both positive and negative deltas
                     int delta = static_cast<int>(delta_d);
-                    
+
                     size_t current_size = buf->data.size();
                     int new_size_signed = static_cast<int>(current_size) + delta;
-                    
+
                     if (new_size_signed < 0) {
                         throw std::runtime_error(
                             "RangeError at " + token.loc.to_string() +
-                            "\nCannot resize buffer to negative size (current: " + 
+                            "\nCannot resize buffer to negative size (current: " +
                             std::to_string(current_size) + ", delta: " + std::to_string(delta) + ")." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     size_t new_size = static_cast<size_t>(new_size_signed);
-                    
+
                     if (new_size > 1e9) {
                         throw std::runtime_error(
                             "RangeError at " + token.loc.to_string() +
                             "\nBuffer size cannot exceed 1e9 bytes." +
                             "\n --> Traced at:\n" + token.loc.get_line_trace());
                     }
-                    
+
                     buf->data.resize(new_size, 0);  // fills new space with zeros
-                    
+
                     return std::monostate{};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.resize"), native_impl, env, mem->token)};

@@ -2777,6 +2777,91 @@ std::shared_ptr<ObjectValue> make_buffer_exports(EnvPtr env) {
         obj->properties["writeUInt32BE"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
+    // buffer.readUInt16BE(buf, offset) -> number
+    {
+        auto fn = make_native_fn("buffer.readUInt16BE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<BufferPtr>(args[0])) {
+            throw SwaziError("TypeError", "buffer.readUInt16BE requires (buffer, offset)", token.loc);
+        }
+        
+        BufferPtr buf = std::get<BufferPtr>(args[0]);
+        size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+        
+        if (offset + 2 > buf->data.size()) {
+            throw SwaziError("RangeError", "Not enough bytes for UInt16", token.loc);
+        }
+        
+        uint16_t value = (buf->data[offset] << 8) | buf->data[offset + 1];
+        return Value{static_cast<double>(value)}; }, env);
+        obj->properties["readUInt16BE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.writeUInt16BE(buf, offset, value) -> buffer
+    {
+        auto fn = make_native_fn("buffer.writeUInt16BE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 3 || !std::holds_alternative<BufferPtr>(args[0])) {
+            throw SwaziError("TypeError", "buffer.writeUInt16BE requires (buffer, offset, value)", token.loc);
+        }
+        
+        BufferPtr buf = std::get<BufferPtr>(args[0]);
+        size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+        uint16_t value = static_cast<uint16_t>(std::get<double>(args[2]));
+        
+        if (offset + 2 > buf->data.size()) {
+            throw SwaziError("RangeError", "Not enough space for UInt16", token.loc);
+        }
+        
+        buf->data[offset] = (value >> 8) & 0xFF;
+        buf->data[offset + 1] = value & 0xFF;
+        return Value{buf}; }, env);
+        obj->properties["writeUInt16BE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.readUInt32LE(buf, offset) -> number
+    {
+        auto fn = make_native_fn("buffer.readUInt32LE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<BufferPtr>(args[0])) {
+            throw SwaziError("TypeError", "buffer.readUInt32LE requires (buffer, offset)", token.loc);
+        }
+        
+        BufferPtr buf = std::get<BufferPtr>(args[0]);
+        size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+        
+        if (offset + 4 > buf->data.size()) {
+            throw SwaziError("RangeError", "Not enough bytes for UInt32", token.loc);
+        }
+        
+        uint32_t value = buf->data[offset] | 
+                       (buf->data[offset + 1] << 8) |
+                       (buf->data[offset + 2] << 16) |
+                       (buf->data[offset + 3] << 24);
+        return Value{static_cast<double>(value)}; }, env);
+        obj->properties["readUInt32LE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.writeUInt32LE(buf, offset, value) -> buffer
+    {
+        auto fn = make_native_fn("buffer.writeUInt32LE", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 3 || !std::holds_alternative<BufferPtr>(args[0])) {
+            throw SwaziError("TypeError", "buffer.writeUInt32LE requires (buffer, offset, value)", token.loc);
+        }
+        
+        BufferPtr buf = std::get<BufferPtr>(args[0]);
+        size_t offset = static_cast<size_t>(std::get<double>(args[1]));
+        uint32_t value = static_cast<uint32_t>(std::get<double>(args[2]));
+        
+        if (offset + 4 > buf->data.size()) {
+            throw SwaziError("RangeError", "Not enough space for UInt32", token.loc);
+        }
+        
+        buf->data[offset] = value & 0xFF;
+        buf->data[offset + 1] = (value >> 8) & 0xFF;
+        buf->data[offset + 2] = (value >> 16) & 0xFF;
+        buf->data[offset + 3] = (value >> 24) & 0xFF;
+        return Value{buf}; }, env);
+        obj->properties["writeUInt32LE"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
     // buffer.readFloat32(buf, offset) -> number
     {
         auto fn = make_native_fn("buffer.readFloat32", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
