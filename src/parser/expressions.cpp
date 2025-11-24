@@ -129,11 +129,12 @@ std::unique_ptr<ExpressionNode> Parser::parse_comparison() {
 
 std::unique_ptr<ExpressionNode> Parser::parse_bitwise() {
     auto left = parse_additive();
-    while (peek().type == TokenType::AMPERSAND ||     // &
-        peek().type == TokenType::BIT_OR ||           // |
-        peek().type == TokenType::BIT_XOR ||          // ^
-        peek().type == TokenType::BIT_SHIFT_LEFT ||   // <<
-        peek().type == TokenType::BIT_SHIFT_RIGHT) {  // >>
+    while (peek().type == TokenType::AMPERSAND ||       // &
+        peek().type == TokenType::BIT_OR ||             // |
+        peek().type == TokenType::BIT_XOR ||            // ^
+        peek().type == TokenType::BIT_SHIFT_LEFT ||     // <<
+        peek().type == TokenType::BIT_SHIFT_RIGHT ||    // >>
+        peek().type == TokenType::BIT_TRIPLE_RSHIFT) {  // >>>
         Token op = consume();
         auto right = parse_additive();
         auto node = std::make_unique<BinaryExpressionNode>();
@@ -151,6 +152,8 @@ std::unique_ptr<ExpressionNode> Parser::parse_bitwise() {
                 node->op = "<<";
             else if (op.type == TokenType::BIT_SHIFT_RIGHT)
                 node->op = ">>";
+            else if (op.type == TokenType::BIT_TRIPLE_RSHIFT)
+                node->op = ">>>";
         }
         node->left = std::move(left);
         node->right = std::move(right);

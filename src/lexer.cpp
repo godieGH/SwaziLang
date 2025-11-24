@@ -1055,6 +1055,13 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+    if (c == '>' && peek_next() == '>' && peek(2) == '>') {
+        add_token(out, TokenType::BIT_TRIPLE_RSHIFT, ">>>", line, col, 3);
+        advance();
+        advance();
+        advance();
+        return;
+    }
 
     // two-char operators
     if (c == '*' && peek_next() == '*') {

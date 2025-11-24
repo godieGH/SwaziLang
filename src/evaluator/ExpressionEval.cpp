@@ -24,6 +24,12 @@ inline uint32_t to_uint32(double d) {
     uint32_t result = static_cast<uint32_t>(i64);
     return result;
 }
+inline int32_t to_int32(double d) {
+    if (!std::isfinite(d)) return 0;
+    int64_t i64 = static_cast<int64_t>(d);
+    int32_t result = static_cast<int32_t>(i64);  // Cast to signed 32-bit integer
+    return result;
+}
 
 Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
     if (!expr) return std::monostate{};
@@ -3221,7 +3227,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
 
         if (u->op == "~") {
-            uint32_t val = to_uint32(to_number(operand, u->token));
+            int32_t val = to_int32(to_number(operand, u->token));
             return Value{static_cast<double>(~val)};
         }
         // new: 'aina' unary operator -> returns runtime type name string (same semantics as obj.aina)
@@ -3549,39 +3555,46 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
         if (op == "**") return Value{std::pow(to_number(left, b->token), to_number(right, b->token))};
 
-        // Bitwise AND
+        // Bitwise AND, OR, XOR MUST use signed conversion (ToInt32).
         if (op == "&") {
-            uint32_t l = to_uint32(to_number(left, b->token));
-            uint32_t r = to_uint32(to_number(right, b->token));
+            int32_t l = to_int32(to_number(left, b->token));
+            int32_t r = to_int32(to_number(right, b->token));
             return Value{static_cast<double>(l & r)};
         }
 
-        // Bitwise OR
         if (op == "|") {
-            uint32_t l = to_uint32(to_number(left, b->token));
-            uint32_t r = to_uint32(to_number(right, b->token));
+            int32_t l = to_int32(to_number(left, b->token));
+            int32_t r = to_int32(to_number(right, b->token));
             return Value{static_cast<double>(l | r)};
         }
 
-        // Bitwise XOR
         if (op == "^") {
-            uint32_t l = to_uint32(to_number(left, b->token));
-            uint32_t r = to_uint32(to_number(right, b->token));
+            int32_t l = to_int32(to_number(left, b->token));
+            int32_t r = to_int32(to_number(right, b->token));
             return Value{static_cast<double>(l ^ r)};
         }
 
-        // Left shift
+        // Left shift (<<) - Uses ToInt32, but result is ToUint32.
         if (op == "<<") {
-            uint32_t l = to_uint32(to_number(left, b->token));
+            int32_t l = to_int32(to_number(left, b->token));
             uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
-            return Value{static_cast<double>(l << r)};
+            int32_t result_int32 = l << r;
+            // Final result must be cast back to unsigned for JS ToUint32 result.
+            return Value{static_cast<double>(static_cast<uint32_t>(result_int32))};
         }
 
-        // Right shift
+        // Right shift (>>) - Uses ToInt32, resulting in Arithmetic Shift.
         if (op == ">>") {
+            int32_t l = to_int32(to_number(left, b->token));
+            uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
+            // C++'s >> on int32_t performs Arithmetic Shift.
+            return Value{static_cast<double>(l >> r)};
+        }
+
+        if (op == ">>>") {
             uint32_t l = to_uint32(to_number(left, b->token));
             uint32_t r = static_cast<uint32_t>(to_number(right, b->token)) & 0x1F;
-            return Value{static_cast<double>(l >> r)};
+            return Value{static_cast<double>(l >> r)};  // Performs logical shift
         }
 
         if (op == "===") {

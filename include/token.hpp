@@ -142,6 +142,7 @@ enum class TokenType {
     BIT_SHIFT_LEFT,   // <<
     BIT_SHIFT_RIGHT,  // >>
     // BIT_NOT, // for ~ will use TILDE
+    BIT_TRIPLE_RSHIFT,
 
     // -----------------------
     // Compound arithmetic / increments
