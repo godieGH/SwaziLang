@@ -1806,6 +1806,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                     }
                                     bytes_to_write.push_back(static_cast<uint8_t>(val));
                                 }
+                                else
+                                  throw SwaziError("TypeError", "Can only use numeric values as elements in buffer arrays", token.loc);
                             }
                         }
                     } else if (std::holds_alternative<double>(args[0])) {
@@ -1886,6 +1888,163 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.resize"), native_impl, env, mem->token)};
             }
+            
+            
+            //-------------------
+            // other useful API, provided or already implement in the buffer module
+            //-------------------
+            const std::string& prop = mem->property;
+            if(prop == "writeUInt8") {
+              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if(args.empty()) {
+                  throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                }
+                
+                if(!std::holds_alternative<double>(args[0])) {
+                  throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                }
+                
+                double value = std::get<double>(args[0]);
+                size_t offset = 0; 
+                
+                if(args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                  offset = static_cast<size_t>(std::get<double>(args[1]));
+                  if(offset >= buf->data.size())
+                    throw SwaziError("RangeError", "offset is out of buffer size bound.", token.loc);
+                }
+                if (value < 0 || value > 255) {
+                  throw SwaziError("RangeError", "Value must be 0-255", token.loc);
+                }
+            
+                buf->data[offset] = static_cast<uint8_t>(value);
+                return Value{buf};
+              };
+              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.writeUInt8"), native_impl, env, mem->token)};
+            }
+            
+            if(prop == "writeUInt16LE") {
+              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if(args.empty()) {
+                  throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                }
+                
+                if(!std::holds_alternative<double>(args[0])) {
+                  throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                }
+                
+                uint16_t value = static_cast<uint16_t>(std::get<double>(args[0]));
+                size_t offset = 0; 
+                
+                if(args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                  offset = static_cast<size_t>(std::get<double>(args[1]));
+                  if(offset >= buf->data.size())
+                    throw SwaziError("RangeError", "offset is out of buffer size bound.", token.loc);
+                }
+            
+                if (offset + 2 > buf->data.size()) {
+                    throw SwaziError("RangeError", "Not enough space for UInt16", token.loc);
+                }            
+                
+                buf->data[offset] = value & 0xFF;
+                buf->data[offset + 1] = (value >> 8) & 0xFF;
+                return Value{buf};
+              };
+              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.writeUInt8"), native_impl, env, mem->token)};
+            }
+            if(prop == "writeUInt16BE") {
+              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if(args.empty()) {
+                  throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                }
+                
+                if(!std::holds_alternative<double>(args[0])) {
+                  throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                }
+                
+                uint16_t value = static_cast<uint16_t>(std::get<double>(args[0]));
+                size_t offset = 0; 
+                
+                if(args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                  offset = static_cast<size_t>(std::get<double>(args[1]));
+                  if(offset >= buf->data.size())
+                    throw SwaziError("RangeError", "offset is out of buffer size bound.", token.loc);
+                }
+            
+                if (offset + 2 > buf->data.size()) {
+                    throw SwaziError("RangeError", "Not enough space for UInt16", token.loc);
+                }            
+                
+                buf->data[offset] = (value >> 8) & 0xFF;
+                buf->data[offset + 1] = value & 0xFF;
+                return Value{buf};
+              };
+              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.writeUInt8"), native_impl, env, mem->token)};
+            }
+            
+            if(prop == "writeUInt32LE") {
+              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if(args.empty()) {
+                  throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                }
+                
+                if(!std::holds_alternative<double>(args[0])) {
+                  throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                }
+                
+                uint32_t value = static_cast<uint32_t>(std::get<double>(args[0]));
+                size_t offset = 0; 
+                
+                if(args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                  offset = static_cast<size_t>(std::get<double>(args[1]));
+                  if(offset >= buf->data.size())
+                    throw SwaziError("RangeError", "offset is out of buffer size bound.", token.loc);
+                }
+            
+                if (offset + 4 > buf->data.size()) {
+                    throw SwaziError("RangeError", "Not enough bytes for UInt32", token.loc);
+                }
+             
+                
+                buf->data[offset] = value & 0xFF;
+                buf->data[offset + 1] = (value >> 8) & 0xFF;
+                buf->data[offset + 2] = (value >> 16) & 0xFF;
+                buf->data[offset + 3] = (value >> 24) & 0xFF;
+                return Value{buf};
+              };
+              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.writeUInt8"), native_impl, env, mem->token)};
+            }
+            if(prop == "writeUInt32BE") {
+              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if(args.empty()) {
+                  throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                }
+                
+                if(!std::holds_alternative<double>(args[0])) {
+                  throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                }
+                
+                uint32_t value = static_cast<uint32_t>(std::get<double>(args[0]));
+                size_t offset = 0; 
+                
+                if(args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                  offset = static_cast<size_t>(std::get<double>(args[1]));
+                  if(offset >= buf->data.size())
+                    throw SwaziError("RangeError", "offset is out of buffer size bound.", token.loc);
+                }
+            
+                if (offset + 4 > buf->data.size()) {
+                    throw SwaziError("RangeError", "Not enough space for UInt16", token.loc);
+                }            
+                
+                buf->data[offset] = (value >> 24) & 0xFF;
+                buf->data[offset + 1] = (value >> 16) & 0xFF;
+                buf->data[offset + 2] = (value >> 8) & 0xFF;
+                buf->data[offset + 3] = value & 0xFF;
+                return Value{buf};
+              };
+              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.writeUInt8"), native_impl, env, mem->token)};
+            }
+            
 
             // No other properties recognized on buffers yet
             throw std::runtime_error(
