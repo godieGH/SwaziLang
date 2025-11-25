@@ -5,8 +5,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
-#include <numeric>
 #include <numbers>
+#include <numeric>
 #include <random>
 #include <thread>
 
@@ -970,13 +970,11 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
             false,
             true,
             Token{}};
-        
+
         hesabuVal->properties["PI"] = {
-          Value(std::numbers::pi), false, false, true, Token{}
-        };
+            Value(std::numbers::pi), false, false, true, Token{}};
         hesabuVal->properties["E"] = {
-          Value(std::numbers::e), false, false, true, Token{}
-        };
+            Value(std::numbers::e), false, false, true, Token{}};
 
         Environment::Variable hesabuVar;
         hesabuVar.value = hesabuVal;
