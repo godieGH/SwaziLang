@@ -16,6 +16,68 @@
 
 namespace fs = std::filesystem;
 
+// ----------------------
+// SUGGESTIONs
+// ----------------------
+
+static size_t levenshtein_distance(const std::string& s1, const std::string& s2) {
+    const size_t len1 = s1.length(), len2 = s2.length();
+    std::vector<std::vector<size_t>> d(len1 + 1, std::vector<size_t>(len2 + 1));
+
+    for (size_t i = 0; i <= len1; ++i) d[i][0] = i;
+    for (size_t j = 0; j <= len2; ++j) d[0][j] = j;
+
+    for (size_t i = 1; i <= len1; ++i) {
+        for (size_t j = 1; j <= len2; ++j) {
+            size_t cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
+            d[i][j] = std::min({d[i - 1][j] + 1,     // Deletion
+                                d[i][j - 1] + 1,     // Insertion
+                                d[i - 1][j - 1] + cost}); // Substitution
+        }
+    }
+    return d[len1][len2];
+}
+
+// Function to suggest the closest file name
+static std::optional<std::string> suggest_closest_file(const fs::path& base_name, int max_distance = 3) {
+    fs::path dir = base_name.parent_path();
+    if (dir.empty()) {
+        dir = fs::current_path();
+    }
+
+    // Only suggest files/modules from the directory specified (or current)
+    if (!fs::exists(dir) || !fs::is_directory(dir)) {
+        return std::nullopt;
+    }
+
+    const std::string search_target = base_name.filename().string();
+    size_t best_distance = max_distance + 1;
+    std::string best_match;
+
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file()) {
+            std::string current_name = entry.path().filename().string();
+            size_t distance = levenshtein_distance(search_target, current_name);
+
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_match = current_name;
+            }
+        }
+    }
+
+    if (best_distance <= max_distance) {
+        // Construct the suggestion path, keeping the directory if present
+        return (dir / best_match).string();
+    }
+
+    return std::nullopt;
+}
+
+
+
+
+
 static void run_file_mode(const std::string& filename, const std::vector<std::string>& cli_args) {
    if (fs::is_directory(filename)) {
       std::cerr << "Error: Cannot execute `" << filename << "` is a directory not a file/module." << std::endl;
@@ -155,6 +217,11 @@ int main(int argc, char* argv[]) {
     } else if (p.has_extension()) {
         // User specified an extension but the file doesn't exist -> error.
         std::cerr << "Error: File not found: " << p << std::endl;
+        
+        auto suggestion = suggest_closest_file(p, 2);
+        if (suggestion.has_value()) {
+          std::cerr << " --> Did you mean: `" << suggestion.value() << "`?" << std::endl;
+        }
         return 1;
     } else {
         // No extension provided and file-as-is doesn't exist: try extension fallbacks.
