@@ -17,9 +17,15 @@
 namespace fs = std::filesystem;
 
 static void run_file_mode(const std::string& filename, const std::vector<std::string>& cli_args) {
+   if (fs::is_directory(filename)) {
+      std::cerr << "Error: Cannot execute `" << filename << "` is a directory not a file/module." << std::endl;
+      return;
+    }
+    
+    
     std::ifstream file(filename);
     if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filename << std::endl;
+        std::cerr << "Error: Could not open file `" << filename << "`. " << std::endl;
         return;
     }
     std::stringstream buffer;
