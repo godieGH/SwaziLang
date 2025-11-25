@@ -30,9 +30,9 @@ static size_t levenshtein_distance(const std::string& s1, const std::string& s2)
     for (size_t i = 1; i <= len1; ++i) {
         for (size_t j = 1; j <= len2; ++j) {
             size_t cost = (s1[i - 1] == s2[j - 1]) ? 0 : 1;
-            d[i][j] = std::min({d[i - 1][j] + 1,     // Deletion
-                                d[i][j - 1] + 1,     // Insertion
-                                d[i - 1][j - 1] + cost}); // Substitution
+            d[i][j] = std::min({d[i - 1][j] + 1,  // Deletion
+                d[i][j - 1] + 1,                  // Insertion
+                d[i - 1][j - 1] + cost});         // Substitution
         }
     }
     return d[len1][len2];
@@ -74,17 +74,12 @@ static std::optional<std::string> suggest_closest_file(const fs::path& base_name
     return std::nullopt;
 }
 
-
-
-
-
 static void run_file_mode(const std::string& filename, const std::vector<std::string>& cli_args) {
-   if (fs::is_directory(filename)) {
-      std::cerr << "Error: Cannot execute `" << filename << "` is a directory not a file/module." << std::endl;
-      return;
+    if (fs::is_directory(filename)) {
+        std::cerr << "Error: Cannot execute `" << filename << "` is a directory not a file/module." << std::endl;
+        return;
     }
-    
-    
+
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file `" << filename << "`. " << std::endl;
@@ -217,10 +212,10 @@ int main(int argc, char* argv[]) {
     } else if (p.has_extension()) {
         // User specified an extension but the file doesn't exist -> error.
         std::cerr << "Error: File not found: " << p << std::endl;
-        
+
         auto suggestion = suggest_closest_file(p, 2);
         if (suggestion.has_value()) {
-          std::cerr << " --> Did you mean: `" << suggestion.value() << "`?" << std::endl;
+            std::cerr << " --> Did you mean: `" << suggestion.value() << "`?" << std::endl;
         }
         return 1;
     } else {
