@@ -6,6 +6,7 @@
 #include <iostream>
 #include <mutex>
 #include <numeric>
+#include <numbers>
 #include <random>
 #include <thread>
 
@@ -160,7 +161,7 @@ static Value builtin_bool(const std::vector<Value>& args, EnvPtr env, const Toke
     return args.empty() ? false : value_to_bool(args[0]);
 }
 
-static Value builtin_ingiza(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_soma(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     std::string prompt = args.empty() ? "" : value_to_string(args[0]);
     if (!prompt.empty()) std::cout << prompt;
     std::string input;
@@ -368,11 +369,11 @@ static Value builtin_sign(const std::vector<Value>& args, EnvPtr env, const Toke
 }
 static Value builtin_deg2rad(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     double d = args.empty() ? 0.0 : value_to_number(args[0]);
-    return d * (M_PI / 180.0);
+    return d * (std::numbers::pi / 180.0);
 }
 static Value builtin_rad2deg(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     double r = args.empty() ? 0.0 : value_to_number(args[0]);
-    return r * (180.0 / M_PI);
+    return r * (180.0 / std::numbers::pi);
 }
 static void collect_numbers_from_args_or_array(const std::vector<Value>& args, std::vector<double>& out) {
     if (args.size() == 1 && std::holds_alternative<ArrayPtr>(args[0])) {
@@ -846,7 +847,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     add_fn("Bool", builtin_bool);
     add_fn("Namba", builtin_namba);
     add_fn("Neno", builtin_neno);
-    add_fn("soma", builtin_ingiza);
+    add_fn("soma", builtin_soma);
     add_fn("Makosa", builtin_throw);
     add_fn("Error", builtin_Error);
     add_fn("thibitisha", builtin_thibitisha);
@@ -950,7 +951,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
         add("mean", builtin_mean);
         add("median", builtin_median);
         add("stddev", builtin_stddev);
-        add("fixA", builtin_roundTo);
+        add("fixAt", builtin_roundTo);
 
         Value nanValue = Value(std::numeric_limits<double>::quiet_NaN());
 
@@ -969,6 +970,13 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
             false,
             true,
             Token{}};
+        
+        hesabuVal->properties["PI"] = {
+          Value(std::numbers::pi), false, false, true, Token{}
+        };
+        hesabuVal->properties["E"] = {
+          Value(std::numbers::e), false, false, true, Token{}
+        };
 
         Environment::Variable hesabuVar;
         hesabuVar.value = hesabuVal;
@@ -1002,7 +1010,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
 
         // --- stdin ---
         auto stdinVal = std::make_shared<ObjectValue>();
-        add_method(stdinVal, "readLine", builtin_ingiza);
+        add_method(stdinVal, "readLine", builtin_soma);
 
         // Attach standard IO objects
         programVal->properties["stdout"] = {stdoutVal, false, false, true, Token{}};
@@ -1015,7 +1023,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
 
         // --- backward compatibility aliases ---
         // swazi.cin -> swazi.stdin.readLine
-        auto cinFn = std::make_shared<FunctionValue>("cin", builtin_ingiza, env, Token{});
+        auto cinFn = std::make_shared<FunctionValue>("cin", builtin_soma, env, Token{});
         programVal->properties["cin"] = {cinFn, false, false, true, Token{}};
 
         // swazi.cerr -> swazi.stderr.write
