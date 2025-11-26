@@ -170,9 +170,13 @@ static Value builtin_soma(const std::vector<Value>& args, EnvPtr env, const Toke
 }
 
 static Value builtin_namba(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    return args.empty() ? 0.0 : value_to_number(args[0]);
+}
+
+static Value builtin_parseInt(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     // 1. Validate Input Argument Count
     if (args.empty()) {
-        return 0.0;
+        throw SwaziError("TypeError", "You should pass atleast one argument to parseInt(valu).", tok.loc);
     }
 
     const Value& input_value = args[0];
@@ -208,16 +212,14 @@ static Value builtin_namba(const std::vector<Value>& args, EnvPtr env, const Tok
         const std::string& str = std::get<std::string>(input_value);
         
         try {
-            // std::stoll is generally better for arbitrary bases (2-36) and integer-like values.
-            // If you need large floating point results, use strtod with a custom base implementation.
-            // For general scripting, std::stoll is usually sufficient for base conversion.
-            size_t *pos = nullptr; // strtol/stoll requires a pointer to check for full parsing
-            long long l_val = std::stoll(str, pos, base);
             
-            // Optional: Check if the entire string was consumed. If *pos != str.length(), 
-            // the string had garbage characters after the valid number (e.g., "10x").
-            // For simplicity, we skip this check, letting the exceptions handle most errors.
-
+            size_t end_idx = 0; 
+            long long l_val = std::stoll(str, &end_idx, base);
+            
+            if(end_idx != str.length()) {
+              throw SwaziError("TypeError", "The string has garbage characters after the valid number.", tok.loc);
+            }
+            
             return static_cast<double>(l_val);
             
         } catch (const std::invalid_argument& e) {
@@ -916,6 +918,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     add_fn("Orodha", builtin_orodha);
     add_fn("Bool", builtin_bool);
     add_fn("Namba", builtin_namba);
+    add_fn("parseInt", builtin_parseInt);
     add_fn("Neno", builtin_neno);
     add_fn("soma", builtin_soma);
     add_fn("Makosa", builtin_throw);
