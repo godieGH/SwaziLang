@@ -170,8 +170,78 @@ static Value builtin_soma(const std::vector<Value>& args, EnvPtr env, const Toke
 }
 
 static Value builtin_namba(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    return args.empty() ? 0.0 : value_to_number(args[0]);
+    // 1. Validate Input Argument Count
+    if (args.empty()) {
+        return 0.0;
+    }
+
+    const Value& input_value = args[0];
+
+    // 2. Determine the base for conversion (optional second argument)
+    int base = 10; // Default base is 10 (decimal)
+
+    if (args.size() >= 2) {
+        const Value& base_value = args[1];
+
+        // Ensure the base argument is a number (double variant)
+        if (std::holds_alternative<double>(base_value)) {
+            double base_double = std::get<double>(base_value);
+            
+            // Check if the base is an integer and convert it
+            if (std::abs(base_double - std::round(base_double)) > 1e-9) {
+                 throw SwaziError("TypeError", "The conversion base must be an integer.", tok.loc);
+            }
+            base = static_cast<int>(std::round(base_double));
+
+            // Input validation: Base must be between 2 and 36 for std::stoll/stod
+            if (base < 2 || base > 36) {
+                throw SwaziError("RangeError", "Base for conversion must be between 2 and 36.", tok.loc);
+            }
+        } else {
+            // Error if the second argument is provided but isn't a number
+            throw SwaziError("TypeError", "The second argument (base) must be a number.", tok.loc);
+        }
+    }
+    
+    // 3. Perform the conversion from String to Number
+    if (std::holds_alternative<std::string>(input_value)) {
+        const std::string& str = std::get<std::string>(input_value);
+        
+        try {
+            // std::stoll is generally better for arbitrary bases (2-36) and integer-like values.
+            // If you need large floating point results, use strtod with a custom base implementation.
+            // For general scripting, std::stoll is usually sufficient for base conversion.
+            size_t *pos = nullptr; // strtol/stoll requires a pointer to check for full parsing
+            long long l_val = std::stoll(str, pos, base);
+            
+            // Optional: Check if the entire string was consumed. If *pos != str.length(), 
+            // the string had garbage characters after the valid number (e.g., "10x").
+            // For simplicity, we skip this check, letting the exceptions handle most errors.
+
+            return static_cast<double>(l_val);
+            
+        } catch (const std::invalid_argument& e) {
+            // String couldn't be parsed (e.g., "G" in base 10)
+            std::string msg = "Invalid string '" + str + "' for conversion in base " + std::to_string(base) + ".";
+            throw SwaziError("ValueError", msg, tok.loc);
+            
+        } catch (const std::out_of_range& e) {
+            // Number is too large for long long
+            std::string msg = "Number '" + str + "' is out of range for conversion.";
+            throw SwaziError("RangeError", msg, tok.loc);
+        }
+
+    } 
+    
+    // 4. Fallback for Non-String Types
+    // If input_value is already a number (double), or another valid type, use original logic.
+    // This allows `namba(5.5)` to return 5.5, or `namba(true)` to return 1.0 (if value_to_number handles it).
+    else {
+        // Assuming value_to_number handles conversion from other types in the Value variant (like bool) to double.
+        return value_to_number(input_value);
+    }
 }
+
 
 static Value builtin_neno(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     return args.empty() ? std::string("") : value_to_string(args[0]);
