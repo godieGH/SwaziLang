@@ -16,7 +16,6 @@
 // libuv
 #include "uv.h"
 
-// Timer bookkeeping (unchanged)...
 static std::mutex g_timers_mutex;
 static std::atomic<long long> g_next_timer_id{1};
 struct TimerEntry {
@@ -139,15 +138,20 @@ static long long create_timer(long long delay_ms, long long interval_ms, Functio
         std::shared_ptr<TimerEntry> te_copy = te;
         scheduler_run_on_loop([loop, te_copy]() {
             if (!te_copy) return;
-            // allocate handle on heap — must be freed by uv_close callback
+
+            // Check if cancelled before creating
+            if (te_copy->cancelled.load()) {
+                std::lock_guard<std::mutex> lk(g_timers_mutex);
+                g_timers.erase(te_copy->id);
+                return;
+            }
+
             uv_timer_t* timer_handle = new uv_timer_t;
             timer_handle->data = te_copy.get();
             te_copy->uv_handle = timer_handle;
 
-            // initialize & start on the loop thread
             int r = uv_timer_init(loop, timer_handle);
             if (r != 0) {
-                // initialization failed; clean up and remove entry
                 delete timer_handle;
                 {
                     std::lock_guard<std::mutex> lk(g_timers_mutex);
@@ -156,10 +160,19 @@ static long long create_timer(long long delay_ms, long long interval_ms, Functio
                 return;
             }
 
+            // Check again after init, before starting
+            if (te_copy->cancelled.load()) {
+                uv_close(reinterpret_cast<uv_handle_t*>(timer_handle), [](uv_handle_t* h) {
+                    delete reinterpret_cast<uv_timer_t*>(h);
+                });
+                std::lock_guard<std::mutex> lk(g_timers_mutex);
+                g_timers.erase(te_copy->id);
+                return;
+            }
+
             uint64_t repeat = (te_copy->interval_ms > 0) ? static_cast<uint64_t>(te_copy->interval_ms) : 0;
             uv_timer_start(timer_handle, uv_timer_callback, static_cast<uint64_t>(te_copy->delay_ms), repeat);
         });
-
         return te->id;
     }
 
