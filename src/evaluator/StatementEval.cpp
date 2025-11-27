@@ -617,6 +617,76 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             return;
         }
 
+        else if (std::holds_alternative<RangePtr>(iterableVal)) {
+            RangePtr range = std::get<RangePtr>(iterableVal);
+            if (!range) return;
+
+            // Create a copy to iterate without modifying the original range
+            RangeValue r = *range;
+
+            // Safety check: prevent infinite or extremely large loops
+            const size_t MAX_RANGE_ITERATIONS = 10000000;  // 10 million iterations max
+            size_t iteration_count = 0;
+            size_t position = 0;  // tracks loop count (0-based index from start)
+
+            while (r.hasNext() && iteration_count < MAX_RANGE_ITERATIONS) {
+                auto loopEnv = std::make_shared<Environment>(env);
+
+                // Get current value from range
+                int currentValue = r.next();
+                iteration_count++;
+
+                // Bind valueVar to the current range value
+                if (fin->valueVar) {
+                    Environment::Variable var{
+                        static_cast<double>(currentValue),
+                        false};
+                    loopEnv->set(fin->valueVar->name, var);
+                }
+
+                // Bind indexVar to the position/loop count (0-based)
+                if (fin->indexVar) {
+                    Environment::Variable var{
+                        static_cast<double>(position),
+                        false};
+                    loopEnv->set(fin->indexVar->name, var);
+                }
+
+                // Execute body
+                for (auto& s : fin->body) {
+                    evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                    if (did_return && *did_return) return;
+                    if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                }
+
+                // Handle break -> stop iterating the range
+                if (loopCtrl->did_break) {
+                    loopCtrl->did_break = false;
+                    break;
+                }
+
+                // Handle continue -> reset and proceed to next value
+                if (loopCtrl->did_continue) {
+                    loopCtrl->did_continue = false;
+                    position++;
+                    continue;
+                }
+
+                position++;
+            }
+
+            // Check if we hit the iteration limit
+            if (iteration_count >= MAX_RANGE_ITERATIONS && r.hasNext()) {
+                throw SwaziError(
+                    "RangeError",
+                    "Range iteration exceeded maximum limit of 10,000,000 iterations. "
+                    "Use a smaller range or increase step size.",
+                    fin->token.loc);
+            }
+
+            return;
+        }
+
         // Object case
         else if (std::holds_alternative<ObjectPtr>(iterableVal)) {
             ObjectPtr obj = std::get<ObjectPtr>(iterableVal);
@@ -661,7 +731,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         else {
             throw SwaziError(
                 "TypeError",
-                "Cannot iterate over a non-array/non-object value in 'kwa kila' loop.",
+                "Cannot iterate over a non-array/non-object/non-range value in 'kwa kila' loop.",
                 fin->token.loc);
         }
     }

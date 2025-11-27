@@ -58,6 +58,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<PromisePtr>(v)) return "promise";
     if (std::holds_alternative<BufferPtr>(v)) return "buffer";
     if (std::holds_alternative<FilePtr>(v)) return "file";
+    if (std::holds_alternative<RangePtr>(v)) return "range";
     return "unknown";
 }
 
@@ -271,6 +272,11 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         std::ostringstream ss;
         ss << "[generator " << fname << " <" << state_str << ">]";
         return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
+    }
+    if (std::holds_alternative<RangePtr>(v)) {
+        auto range = std::get<RangePtr>(v);
+        if (!range) return "R(0..0 step 0)";
+        return print_value(v);
     }
 
     return "";
@@ -1037,6 +1043,21 @@ std::string Evaluator::print_value(
         std::ostringstream ss;
         ss << "[generator " << fname << " <" << state_str << ">]";
         return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
+    }
+
+    if (std::holds_alternative<RangePtr>(v)) {
+        auto range = std::get<RangePtr>(v);
+        if (!range) return "R(0..0 step 0)";
+
+        std::string range_string = std::to_string(range->start) +
+            (range->inclusive ? "..." : "..") +
+            std::to_string(range->end) + " step " +
+            std::to_string(range->step);
+        std::ostringstream ss;
+        ss << "R(";
+        ss << range_string;
+        ss << ") -> " << print_value(Value(static_cast<double>(range->cur)));
+        return ss.str();
     }
 
     return "<?>";  // fallback

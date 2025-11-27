@@ -851,6 +851,70 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
     return ret;
 }
 
+// --------------------
+// rangeE and rangeI
+// --------------------
+
+static Value builtin_range_exclusive(const std::vector<Value>& args, EnvPtr env, const Token& token) {
+    // Check minimum arguments
+    if (args.size() < 2) {
+        throw SwaziError(
+            "TypeError",
+            "builtin_range_exclusive(start, end, step?) requires at least 2 arguments: start and end",
+            token.loc);
+    }
+
+    // Extract start and end
+    int start = static_cast<int>(std::get<double>(args[0]));
+    int end = static_cast<int>(std::get<double>(args[1]));
+
+    // Extract step if provided, default = 1
+    size_t step = 1;
+    if (args.size() >= 3) {
+        step = static_cast<size_t>(std::get<double>(args[2]));
+        if (step == 0) step = 1;  // enforce step != 0
+    }
+
+    // Create RangeValue
+    auto range = std::make_shared<RangeValue>(start, end, step, false);  // false = exclusive
+    // inclusive = false by constructor
+    range->cur = start;  // current value starts at start
+
+    // Direction inferred automatically
+    range->increasing = (start <= end);
+
+    // Wrap in your runtime Value type
+    return Value(range);
+}
+static Value builtin_range_inclusive(const std::vector<Value>& args, EnvPtr env, const Token& token) {
+    // Check minimum arguments
+    if (args.size() < 2) {
+        throw SwaziError(
+            "TypeError",
+            "builtin_range_inclusive(start, end, step?) requires at least 2 arguments: start and end",
+            token.loc);
+    }
+
+    // Extract start and end
+    int start = static_cast<int>(std::get<double>(args[0]));
+    int end = static_cast<int>(std::get<double>(args[1]));
+
+    // Extract step if provided, default = 1
+    size_t step = 1;
+    if (args.size() >= 3) {
+        step = static_cast<size_t>(std::get<double>(args[2]));
+        if (step == 0) step = 1;  // enforce step != 0
+    }
+
+    // Create RangeValue
+    auto range = std::make_shared<RangeValue>(start, end, step, true);  // true = inclusive
+    range->cur = start;                                                 // start iteration at start
+    range->increasing = (start <= end);                                 // infer direction automatically
+
+    // Wrap in your runtime Value type
+    return Value(range);
+}
+
 void init_globals(EnvPtr env, Evaluator* evaluator) {
     if (!env) return;
 
@@ -924,6 +988,8 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     add_fn("thibitisha", builtin_thibitisha);
     add_fn("assert", builtin_thibitisha);
     add_fn("sleep", builtin_sleep);
+    add_fn("rangeE", builtin_range_exclusive);
+    add_fn("rangeI", builtin_range_inclusive);
 
     auto objectVal = std::make_shared<ObjectValue>();
 

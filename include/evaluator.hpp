@@ -89,11 +89,45 @@ using CallFramePtr = std::shared_ptr<CallFrame>;
 struct PromiseValue;
 using PromisePtr = std::shared_ptr<PromiseValue>;
 
-// sentinel type to represent a JavaScript-like "hole" (an empty slot).
-// It's an empty struct used only to distinguish holes from `null`/undefined`.
 struct HoleValue {};
 
-// Value union: add HoleValue so arrays can hold explicit holes distinct from null/undefined.
+struct RangeValue {
+    int start;
+    int end;
+    size_t step;
+    int cur;
+    bool inclusive;
+    bool increasing;
+
+    // Constructor
+    RangeValue(int s, int e, size_t st = 1, bool inc = false)
+        : start(s), end(e), step(st), cur(s), inclusive(inc) {
+        if (step == 0) step = 1;    // step cannot be 0
+        increasing = start <= end;  // infer direction
+    }
+
+    // Returns true if there is a next value
+    bool hasNext() const {
+        if (increasing) {
+            return inclusive ? cur <= end : cur < end;
+        } else {
+            return inclusive ? cur >= end : cur > end;
+        }
+    }
+
+    // Return current value and advance
+    int next() {
+        int val = cur;
+        if (increasing) {
+            cur += (int)step;
+        } else {
+            cur -= (int)step;
+        }
+        return val;
+    }
+};
+using RangePtr = std::shared_ptr<RangeValue>;
+
 using Value = std::variant<
     std::monostate,
     double,
@@ -107,7 +141,8 @@ using Value = std::variant<
     PromisePtr,
     GeneratorPtr,
     BufferPtr,
-    FilePtr>;
+    FilePtr,
+    RangePtr>;
 
 struct PropertyDescriptor {
     Value value;
@@ -156,21 +191,17 @@ struct PromiseValue {
     std::weak_ptr<PromiseValue> parent;
 };
 
-// Generator runtime holder (declared above as forward); defined in evaluator.cpp or FunctionCall.cpp
 struct GeneratorValue {
     enum class State { SuspendedStart,
         SuspendedYield,
         Executing,
         Completed };
-    CallFramePtr frame;  // frame that executes generator body
+    CallFramePtr frame;
     State state = State::SuspendedStart;
     bool is_done = false;
 };
 
-// Now that Value is defined, define ArrayValue containing a vector of Values.
 struct ArrayValue {
-    // We keep simple contiguous vector storage, but elements can now be HoleValue
-    // to indicate an empty slot (a "hole") which differs from std::monostate/null.
     std::vector<Value> elements;
 };
 

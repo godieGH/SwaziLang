@@ -2250,6 +2250,179 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             throw SwaziError("ReferenceError", "Unknown file property: " + prop, mem->token.loc);
         }
 
+        if (std::holds_alternative<RangePtr>(objVal)) {
+            RangePtr range = std::get<RangePtr>(objVal);
+            const std::string& prop = mem->property;
+
+            // Helper to create native function values
+            auto make_fn = [this, range, env, mem](std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
+                auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    return impl(args, callEnv, token);
+                };
+                auto fn = std::make_shared<FunctionValue>(std::string("native:range.") + mem->property, native_impl, env, mem->token);
+                return Value{fn};
+            };
+
+            // r.toArray() -> converts range to array
+            if (prop == "toArray") {
+                return make_fn([this, range](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!range) {
+                        throw SwaziError("TypeError", "Cannot convert null range to array", token.loc);
+                    }
+
+                    auto arr = std::make_shared<ArrayValue>();
+
+                    // Create a copy to iterate without modifying original
+                    RangeValue r = *range;
+
+                    // Limit array size to prevent memory issues
+                    const size_t MAX_RANGE_ELEMENTS = 1000000;  // 1 million elements max
+                    size_t count = 0;
+
+                    while (r.hasNext() && count < MAX_RANGE_ELEMENTS) {
+                        arr->elements.push_back(Value{static_cast<double>(r.next())});
+                        count++;
+                    }
+
+                    if (count >= MAX_RANGE_ELEMENTS && r.hasNext()) {
+                        throw SwaziError(
+                            "RangeError",
+                            "Range too large to convert to array (exceeds 1,000,000 elements)",
+                            token.loc);
+                    }
+
+                    return Value{arr};
+                });
+            }
+
+            // r.reverse() / r.geuza() -> reverses the range
+            if (prop == "reverse" || prop == "geuza") {
+                return make_fn([this, range](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!range) {
+                        throw SwaziError("TypeError", "Cannot reverse null range", token.loc);
+                    }
+
+                    // Create a new reversed range
+                    auto reversed = std::make_shared<RangeValue>(
+                        range->end,  // swap start and end
+                        range->start,
+                        range->step,
+                        range->inclusive);
+
+                    // Reset to start position
+                    reversed->cur = reversed->start;
+
+                    // Infer direction (will be opposite of original)
+                    reversed->increasing = (reversed->start <= reversed->end);
+
+                    return Value{reversed};
+                });
+            }
+
+            // r.kuna(x) / r.includes(x) -> checks if range contains x
+            if (prop == "kuna" || prop == "includes") {
+                return make_fn([this, range](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!range) {
+                        throw SwaziError("TypeError", "Cannot check inclusion on null range", token.loc);
+                    }
+
+                    if (args.empty()) {
+                        throw SwaziError(
+                            "TypeError",
+                            "range.kuna/includes requires an argument (number or range)",
+                            token.loc);
+                    }
+
+                    const Value& arg = args[0];
+
+                    // Case 1: Check if a number is in the range
+                    if (std::holds_alternative<double>(arg)) {
+                        int x = static_cast<int>(std::get<double>(arg));
+
+                        // Check if x is within bounds (inclusive/exclusive aware)
+                        bool withinBounds;
+                        if (range->increasing) {
+                            if (range->inclusive) {
+                                withinBounds = (x >= range->start && x <= range->end);
+                            } else {
+                                withinBounds = (x >= range->start && x < range->end);
+                            }
+                        } else {
+                            if (range->inclusive) {
+                                withinBounds = (x <= range->start && x >= range->end);
+                            } else {
+                                withinBounds = (x <= range->start && x > range->end);
+                            }
+                        }
+
+                        if (!withinBounds) return Value{false};
+
+                        // Check if x aligns with the step
+                        int offset = std::abs(x - range->start);
+                        return Value{(offset % static_cast<int>(range->step)) == 0};
+                    }
+
+                    // Case 2: Check if another range is entirely contained within this range
+                    if (std::holds_alternative<RangePtr>(arg)) {
+                        RangePtr other = std::get<RangePtr>(arg);
+                        if (!other) return Value{false};
+
+                        // Both ranges must have the same direction
+                        if (range->increasing != other->increasing) {
+                            return Value{false};
+                        }
+
+                        // Check if other's bounds are within this range's bounds
+                        bool startContained, endContained;
+
+                        if (range->increasing) {
+                            if (range->inclusive) {
+                                startContained = (other->start >= range->start && other->start <= range->end);
+                                endContained = (other->end >= range->start && other->end <= range->end);
+                            } else {
+                                startContained = (other->start >= range->start && other->start < range->end);
+                                endContained = (other->end >= range->start && other->end < range->end);
+                            }
+                        } else {
+                            if (range->inclusive) {
+                                startContained = (other->start <= range->start && other->start >= range->end);
+                                endContained = (other->end <= range->start && other->end >= range->end);
+                            } else {
+                                startContained = (other->start <= range->start && other->start > range->end);
+                                endContained = (other->end <= range->start && other->end > range->end);
+                            }
+                        }
+
+                        // Both endpoints must be contained
+                        if (!startContained || !endContained) return Value{false};
+
+                        // Check step alignment: other's step should be a multiple of this range's step
+                        // or the ranges should produce compatible sequences
+                        if (other->step % range->step != 0) {
+                            // If steps don't align, check if other's start aligns with this range's step
+                            int offset = std::abs(other->start - range->start);
+                            if ((offset % static_cast<int>(range->step)) != 0) {
+                                return Value{false};
+                            }
+                        }
+
+                        return Value{true};
+                    }
+
+                    throw SwaziError(
+                        "TypeError",
+                        "range.kuna/includes expects a number or another range",
+                        token.loc);
+                });
+            }
+
+            // If no matching property found, throw error
+            throw std::runtime_error(
+                "ReferenceError at " + mem->token.loc.to_string() +
+                "\nUnknown property '" + mem->property + "' on range." +
+                "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
+        }
+
         // String property 'herufi' (length)
         if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {
             const std::string& s = std::get<std::string>(objVal);
@@ -3390,11 +3563,56 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // Now safe to evaluate the index expression.
         Value indexVal = evaluate_expression(idx->index.get(), env);
 
-        // Array indexing uses numeric interpretation of indexVal
+        // Array indexing uses numeric interpretation of indexVal OR range slicing
         if (std::holds_alternative<ArrayPtr>(objVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
             if (!arr) return std::monostate{};
 
+            // Case 1: Range-based slicing (arr[range])
+            if (std::holds_alternative<RangePtr>(indexVal)) {
+                RangePtr range = std::get<RangePtr>(indexVal);
+                if (!range) return std::monostate{};
+
+                // Create result array
+                auto result = std::make_shared<ArrayValue>();
+
+                // Create a copy to iterate
+                RangeValue r = *range;
+
+                // Safety check for extremely large ranges
+                const size_t MAX_SLICE_SIZE = 1000000;  // 1 million elements max
+                size_t collected = 0;
+
+                while (r.hasNext() && collected < MAX_SLICE_SIZE) {
+                    int index = r.next();
+
+                    // Skip negative indices
+                    if (index < 0) continue;
+
+                    // Skip indices beyond array bounds
+                    if ((size_t)index >= arr->elements.size()) {
+                        // If we're past the end and moving forward, stop early
+                        if (r.increasing) break;
+                        continue;
+                    }
+
+                    // Add element at this index
+                    result->elements.push_back(arr->elements[(size_t)index]);
+                    collected++;
+                }
+
+                // Check if we hit the safety limit
+                if (collected >= MAX_SLICE_SIZE && r.hasNext()) {
+                    throw std::runtime_error(
+                        "RangeError at " + idx->token.loc.to_string() +
+                        "\nRange slice exceeded maximum size of 1,000,000 elements." +
+                        "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
+                }
+
+                return Value{result};
+            }
+
+            // Case 2: Single numeric index (existing behavior)
             long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
             if (rawIndex < 0 || (size_t)rawIndex >= arr->elements.size()) {
                 return std::monostate{};
@@ -3402,9 +3620,68 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return arr->elements[(size_t)rawIndex];
         }
 
-        // String indexing: return single-char string (optional)
+        // String indexing: return single-char string OR range slice
         if (std::holds_alternative<std::string>(objVal)) {
             std::string s = std::get<std::string>(objVal);
+
+            // Case 1: Range-based slicing (str[range])
+            if (std::holds_alternative<RangePtr>(indexVal)) {
+                RangePtr range = std::get<RangePtr>(indexVal);
+                if (!range) return std::monostate{};
+
+                // Create result string
+                std::string result;
+
+                // Create a copy to iterate
+                RangeValue r = *range;
+
+                // Safety check for extremely large ranges
+                const size_t MAX_STRING_SLICE = 10000000;  // 10 million characters max
+                size_t collected = 0;
+
+                // Pre-allocate if we can estimate size (for efficiency)
+                if (r.increasing) {
+                    size_t estimated = 0;
+                    if (r.inclusive) {
+                        estimated = (r.end >= r.start) ? ((r.end - r.start) / r.step + 1) : 0;
+                    } else {
+                        estimated = (r.end > r.start) ? ((r.end - r.start - 1) / r.step + 1) : 0;
+                    }
+                    if (estimated > 0 && estimated < MAX_STRING_SLICE) {
+                        result.reserve(std::min(estimated, s.size()));
+                    }
+                }
+
+                while (r.hasNext() && collected < MAX_STRING_SLICE) {
+                    int index = r.next();
+
+                    // Skip negative indices
+                    if (index < 0) continue;
+
+                    // Skip indices beyond string bounds
+                    if ((size_t)index >= s.size()) {
+                        // If we're past the end and moving forward, stop early
+                        if (r.increasing) break;
+                        continue;
+                    }
+
+                    // Add character at this index
+                    result += s[(size_t)index];
+                    collected++;
+                }
+
+                // Check if we hit the safety limit
+                if (collected >= MAX_STRING_SLICE && r.hasNext()) {
+                    throw std::runtime_error(
+                        "RangeError at " + idx->token.loc.to_string() +
+                        "\nString slice exceeded maximum size of 10,000,000 characters." +
+                        "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
+                }
+
+                return Value{result};
+            }
+
+            // Case 2: Single numeric index (existing behavior)
             long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
             if (rawIndex < 0 || (size_t)rawIndex >= s.size()) {
                 return std::monostate{};
