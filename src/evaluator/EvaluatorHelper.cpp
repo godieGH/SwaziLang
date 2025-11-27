@@ -297,6 +297,13 @@ bool Evaluator::to_bool(const Value& v) {
         return obj && !obj->properties.empty();
     };
     if (std::holds_alternative<ClassPtr>(v)) return true;  // classes always return true as they appear
+    if (std::holds_alternative<HoleValue>(v)) return false;
+    
+    // complex objects
+    if (std::holds_alternative<FilePtr>(v)) return true;
+    if (std::holds_alternative<BufferPtr>(v)) return true;
+    if (std::holds_alternative<RangePtr>(v)) return true; 
+    if (std::holds_alternative<PromisePtr>(v)) return true; 
     return false;
 }
 
