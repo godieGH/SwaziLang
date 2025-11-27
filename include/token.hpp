@@ -186,6 +186,12 @@ enum class TokenType {
     DEDENT,
 
     // -----------------------
+    // ranges
+    // -----------------------
+    DOUBLEDOTS,
+    STEP,
+
+    // -----------------------
     // Miscellaneous
     // -----------------------
     BLOCK_DU,

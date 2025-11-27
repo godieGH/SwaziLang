@@ -713,6 +713,30 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             self->token.loc);
     }
 
+    if (auto rn = dynamic_cast<RangeExpressionNode*>(expr)) {
+        Value startVal = evaluate_expression(rn->start.get(), env);
+        Value endVal = evaluate_expression(rn->end.get(), env);
+
+        int start = static_cast<int>(to_number(startVal, rn->token));
+        int end = static_cast<int>(to_number(endVal, rn->token));
+
+        size_t step = 1;
+        if (rn->step) {
+            Value stepVal = evaluate_expression(rn->step.get(), env);
+            double stepNum = to_number(stepVal, rn->token);
+            if (stepNum == 0.0) {
+                throw SwaziError(
+                    "ValueError",
+                    "Range step cannot be zero",
+                    rn->token.loc);
+            }
+            step = static_cast<size_t>(std::abs(stepNum));
+        }
+
+        auto range = std::make_shared<RangeValue>(start, end, step, rn->inclusive);
+        return Value{range};
+    }
+
     // Member access: object.property (e.g., arr.idadi, arr.ongeza, str.herufi)
     if (auto mem = dynamic_cast<MemberExpressionNode*>(expr)) {
         Value objVal = evaluate_expression(mem->object.get(), env);

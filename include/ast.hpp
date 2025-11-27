@@ -508,6 +508,33 @@ struct SelfExpressionNode : public ExpressionNode {
     }
 };
 
+struct RangeExpressionNode : public ExpressionNode {
+    std::unique_ptr<ExpressionNode> start;
+    std::unique_ptr<ExpressionNode> end;
+    std::unique_ptr<ExpressionNode> step;  // optional
+    bool inclusive = false;                // true for a...b, false for a..b
+
+    std::string to_string() const override {
+        std::string s = start ? start->to_string() : "<null>";
+        s += inclusive ? "..." : "..";
+        s += end ? end->to_string() : "<null>";
+        if (step) {
+            s += " step " + step->to_string();
+        }
+        return s;
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<RangeExpressionNode>();
+        n->token = token;
+        n->inclusive = inclusive;
+        if (start) n->start = start->clone();
+        if (end) n->end = end->clone();
+        if (step) n->step = step->clone();
+        return n;
+    }
+};
+
 // Statements
 struct StatementNode : public Node {
     // Non-pure virtual clone: default returns nullptr (safe, non-breaking).

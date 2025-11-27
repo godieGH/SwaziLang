@@ -1056,7 +1056,7 @@ std::string Evaluator::print_value(
         std::ostringstream ss;
         ss << "R(";
         ss << range_string;
-        ss << ") -> " << print_value(Value(static_cast<double>(range->cur)));
+        ss << ")";
         return ss.str();
     }
 

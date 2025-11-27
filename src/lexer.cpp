@@ -781,8 +781,9 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"await", TokenType::AWAIT},
         {"subiri", TokenType::AWAIT},
 
-        {"yield", TokenType::YIELD}
+        {"yield", TokenType::YIELD},
 
+        {"step", TokenType::STEP},
     };
 
     auto it = keywords.find(id);
@@ -1152,6 +1153,12 @@ void Lexer::scan_token(std::vector<Token>& out) {
     }
     if (c == '|' && peek_next() == '|') {
         add_token(out, TokenType::OR, "||", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '.' && peek_next() == '.') {
+        add_token(out, TokenType::DOUBLEDOTS, "..", line, col, 2);
         advance();
         advance();
         return;

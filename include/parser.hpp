@@ -47,6 +47,7 @@ class Parser {
     std::unique_ptr<ExpressionNode> parse_unary();
     std::unique_ptr<ExpressionNode> parse_primary();
     std::unique_ptr<ExpressionNode> parse_call(std::unique_ptr<ExpressionNode> callee);
+    std::unique_ptr<ExpressionNode> parse_range();
 
     // NEW: helper to parse a template literal (backtick-style). Implementation in expressions.cpp
     std::unique_ptr<ExpressionNode> parse_template_literal();

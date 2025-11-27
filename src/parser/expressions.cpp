@@ -12,7 +12,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_expression() {
 }
 
 std::unique_ptr<ExpressionNode> Parser::parse_ternary() {
-    auto cond = parse_logical_or();
+    auto cond = parse_range();
 
     if (peek().type != TokenType::QUESTIONMARK) {
         return cond;
@@ -48,7 +48,33 @@ std::unique_ptr<ExpressionNode> Parser::parse_ternary() {
     node->elseExpr = std::move(elseExpr);
     return node;
 }
+std::unique_ptr<ExpressionNode> Parser::parse_range() {
+    auto left = parse_logical_or();
 
+    // Check for range operators: ".." or "..."
+    if (peek().type == TokenType::DOUBLEDOTS || peek().type == TokenType::ELLIPSIS) {
+        Token opTok = consume();
+        bool inclusive = (opTok.type == TokenType::ELLIPSIS);
+
+        auto right = parse_logical_or();
+
+        auto node = std::make_unique<RangeExpressionNode>();
+        node->token = opTok;
+        node->start = std::move(left);
+        node->end = std::move(right);
+        node->inclusive = inclusive;
+
+        // Optional step: check for "step" keyword
+        if (peek().type == TokenType::STEP) {
+            consume();  // consume "step"
+            node->step = parse_logical_or();
+        }
+
+        return node;
+    }
+
+    return left;
+}
 std::unique_ptr<ExpressionNode> Parser::parse_logical_or() {
     auto left = parse_logical_and();
     while (peek().type == TokenType::OR) {
