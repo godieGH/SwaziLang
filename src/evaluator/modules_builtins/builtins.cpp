@@ -2627,10 +2627,49 @@ std::shared_ptr<ObjectValue> make_buffer_exports(EnvPtr env) {
                     encoding = std::get<std::string>(args[1]);
                 }
                 
-                // For now, only support utf8 (raw bytes)
+                // Handle hex encoding
+                if (encoding == "hex") {
+                    // Remove common separators and whitespace
+                    std::string cleaned;
+                    cleaned.reserve(str.size());
+                    for (char c : str) {
+                        if (c != ' ' && c != ':' && c != '-' && c != '\n' && c != '\r' && c != '\t') {
+                            cleaned += c;
+                        }
+                    }
+                    
+                    if (cleaned.length() % 2 != 0) {
+                        throw SwaziError("TypeError", "Hex string must have even length", token.loc);
+                    }
+                    
+                    buf->data.reserve(cleaned.length() / 2);
+                    
+                    auto hexCharToInt = [](char c) -> int {
+                        if (c >= '0' && c <= '9') return c - '0';
+                        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                        return -1;
+                    };
+                    
+                    for (size_t i = 0; i < cleaned.length(); i += 2) {
+                        int high = hexCharToInt(cleaned[i]);
+                        int low = hexCharToInt(cleaned[i + 1]);
+                        
+                        if (high == -1 || low == -1) {
+                            throw SwaziError("TypeError", "Invalid hex character in string", token.loc);
+                        }
+                        
+                        buf->data.push_back(static_cast<uint8_t>((high << 4) | low));
+                    }
+                    
+                    buf->encoding = "hex";
+                    return Value{buf};
+                }
+                
+                // Handle utf8 and binary
                 if (encoding != "utf8" && encoding != "binary") {
                     throw SwaziError("NotImplementedError", 
-                        "Only 'utf8' and 'binary' encodings are currently supported", token.loc);
+                        "Only 'utf8', 'binary', and 'hex' encodings are currently supported", token.loc);
                 }
                 
                 buf->data.assign(str.begin(), str.end());
@@ -3065,6 +3104,76 @@ std::shared_ptr<ObjectValue> make_buffer_exports(EnvPtr env) {
             
             return Value{buf}; }, env);
         obj->properties["fromBase64"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.fromHex(str) -> Buffer
+    {
+        auto fn = make_native_fn("buffer.fromHex", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<std::string>(args[0])) {
+                throw SwaziError("TypeError", "buffer.fromHex requires a string", token.loc);
+            }
+            
+            std::string str = std::get<std::string>(args[0]);
+            
+            // Remove common separators and whitespace
+            std::string cleaned;
+            cleaned.reserve(str.size());
+            for (char c : str) {
+                if (c != ' ' && c != ':' && c != '-' && c != '\n' && c != '\r' && c != '\t') {
+                    cleaned += c;
+                }
+            }
+            
+            if (cleaned.length() % 2 != 0) {
+                throw SwaziError("TypeError", "Hex string must have even length", token.loc);
+            }
+            
+            auto buf = std::make_shared<BufferValue>();
+            buf->data.reserve(cleaned.length() / 2);
+            buf->encoding = "hex";
+            
+            auto hexCharToInt = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            
+            for (size_t i = 0; i < cleaned.length(); i += 2) {
+                int high = hexCharToInt(cleaned[i]);
+                int low = hexCharToInt(cleaned[i + 1]);
+                
+                if (high == -1 || low == -1) {
+                    throw SwaziError("TypeError", "Invalid hex character in string", token.loc);
+                }
+                
+                buf->data.push_back(static_cast<uint8_t>((high << 4) | low));
+            }
+            
+            return Value{buf}; }, env);
+        obj->properties["fromHex"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // buffer.toHex(buf) -> string
+    {
+        auto fn = make_native_fn("buffer.toHex", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<BufferPtr>(args[0])) {
+                throw SwaziError("TypeError", "buffer.toHex requires a buffer", token.loc);
+            }
+            
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            
+            static const char hex_chars[] = "0123456789abcdef";
+            std::string result;
+            result.reserve(buf->data.size() * 2);
+            
+            for (uint8_t byte : buf->data) {
+                result += hex_chars[byte >> 4];
+                result += hex_chars[byte & 0x0F];
+            }
+            
+            return Value{result}; }, env);
+        obj->properties["toHex"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
