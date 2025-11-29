@@ -1,10 +1,13 @@
 #include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "AsyncBridge.hpp"
@@ -30,7 +33,7 @@ static std::atomic<bool> g_discard_on_resume(false);
 static uv_async_t* g_pause_keepalive = nullptr;
 static std::string g_line_buffer;
 
-// NEW: Prompt state
+// Prompt state
 static std::string g_current_prompt;
 static std::atomic<bool> g_prompt_active(false);
 
@@ -213,6 +216,32 @@ static void stdin_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* bu
     if (buf && buf->base) free(buf->base);
 }
 
+// Global signal handler flag
+static bool g_signal_handlers_installed = false;
+
+// Signal handler function
+static void cleanup_on_signal(int signum) {
+    // Reset terminal immediately
+    std::cout << "\x1b[?25h" << std::flush;  // Show cursor
+    std::cout << "\x1b[0m" << std::flush;    // Reset colors
+    std::cout << "\n"
+              << std::flush;  // New line for clean exit
+
+    if (g_stdin_handle) {
+        uv_tty_set_mode(g_stdin_handle, UV_TTY_MODE_NORMAL);
+    }
+
+    // Clear state
+    {
+        std::lock_guard<std::mutex> lk(g_stdin_mutex);
+        g_line_buffer.clear();
+    }
+
+    // Re-raise signal for default handling
+    signal(signum, SIG_DFL);
+    raise(signum);
+}
+
 std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
     Token tok{};
@@ -224,6 +253,26 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
         uv_loop_t* loop = scheduler_get_loop();
         if (!loop) {
             throw SwaziError("RuntimeError", "stdin requires event loop", tok.loc);
+        }
+
+        // Install signal handlers ONCE
+        if (!g_signal_handlers_installed) {
+            signal(SIGINT, cleanup_on_signal);
+            signal(SIGTERM, cleanup_on_signal);
+            signal(SIGABRT, cleanup_on_signal);
+#ifndef _WIN32
+            signal(SIGQUIT, cleanup_on_signal);
+#endif
+
+            std::atexit([]() {
+                std::cout << "\x1b[?25h" << std::flush;
+                std::cout << "\n"
+                          << std::flush;
+                if (g_stdin_handle) {
+                    uv_tty_set_mode(g_stdin_handle, UV_TTY_MODE_NORMAL);
+                }
+            });
+            g_signal_handlers_installed = true;
         }
 
         scheduler_run_on_loop([loop]() {
@@ -245,7 +294,6 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
             g_paused.store(false);
         });
     };
-
     // stdin.on(event, callback)
     auto on_impl = [ensure_init](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (args.size() < 2) {
@@ -279,12 +327,11 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
 
         return std::monostate{};
     };
-
     obj->properties["on"] = {
         Value{std::make_shared<FunctionValue>("stdin.on", on_impl, env, tok)},
         false, false, true, tok};
 
-    // NEW: stdin.prompt(text) - sets and displays a prompt
+    // stdin.prompt(text) - sets and displays a prompt
     auto prompt_impl = [ensure_init](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         std::string prompt_text;
 
@@ -311,7 +358,6 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
 
         return std::monostate{};
     };
-
     obj->properties["prompt"] = {
         Value{std::make_shared<FunctionValue>("stdin.prompt", prompt_impl, env, tok)},
         false, false, true, tok};
@@ -322,7 +368,7 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
 
         if (!g_paused.load()) {
             g_paused.store(true);
-            g_prompt_active.store(false);  // Disable prompt when paused
+            g_prompt_active.store(false);
             scheduler_run_on_loop([]() {
                 uv_loop_t* loop = scheduler_get_loop();
                 if (!loop) return;
@@ -354,7 +400,6 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
                     }
                     uv_read_start((uv_stream_t*)g_stdin_handle, stdin_alloc_cb, stdin_read_cb);
 
-                    // Re-enable and display prompt if set
                     if (!g_current_prompt.empty()) {
                         g_prompt_active.store(true);
                         write_prompt(g_current_prompt);
@@ -381,7 +426,7 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
         if (enabled && !g_raw_mode.load()) {
             std::lock_guard<std::mutex> lk(g_stdin_mutex);
             g_line_buffer.clear();
-            g_prompt_active.store(false);  // Disable prompts in raw mode
+            g_prompt_active.store(false);
         }
 
         g_raw_mode.store(enabled);
@@ -442,6 +487,282 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
     };
     obj->properties["close"] = {
         Value{std::make_shared<FunctionValue>("stdin.close", close_impl, env, tok)},
+        false, false, true, tok};
+
+    auto echo_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "stdin.echo requires a string argument", token.loc);
+        }
+
+        std::string text;
+        if (std::holds_alternative<std::string>(args[0])) {
+            text = std::get<std::string>(args[0]);
+        } else if (auto buf = std::get_if<std::shared_ptr<BufferValue>>(&args[0])) {
+            const auto& data = (*buf)->data;
+            text = std::string(data.begin(), data.end());
+        } else {
+            throw SwaziError("TypeError", "stdin.echo requires string or buffer", token.loc);
+        }
+
+        std::cout << text << std::flush;
+        return std::monostate{};
+    };
+    obj->properties["echo"] = {
+        Value{std::make_shared<FunctionValue>("stdin.echo", echo_impl, env, tok)},
+        false, false, true, tok};
+
+    // ============================================================================
+    // TERMINAL SIZE
+    // ============================================================================
+
+    // stdin.getTermSize() -> {width: number, height: number} | null
+    auto getTermSize_impl = [](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+        uv_loop_t* loop = scheduler_get_loop();
+        if (!loop) {
+            throw SwaziError("RuntimeError", "stdin requires event loop", token.loc);
+        }
+
+        // Use existing handle if already initialized
+        uv_tty_t* query_handle = g_stdin_handle;
+        bool temp_handle = false;
+
+        // If no handle exists, create a temporary one just for querying
+        if (!query_handle) {
+            query_handle = new uv_tty_t;
+            int r = uv_tty_init(loop, query_handle, 0, 1);
+            if (r != 0) {
+                delete query_handle;
+                return std::monostate{};
+            }
+            temp_handle = true;
+        }
+
+        int width = 80, height = 24;
+        int result = uv_tty_get_winsize(query_handle, &width, &height);
+
+        // Clean up temporary handle
+        if (temp_handle) {
+            uv_close((uv_handle_t*)query_handle, [](uv_handle_t* h) {
+                delete (uv_tty_t*)h;
+            });
+        }
+
+        if (result != 0) {
+            return std::monostate{};
+        }
+
+        auto obj = std::make_shared<ObjectValue>();
+        Token tok{};
+        tok.loc = TokenLocation("<stdin>", 0, 0, 0);
+
+        obj->properties["width"] = {Value{static_cast<double>(width)}, false, false, true, tok};
+        obj->properties["height"] = {Value{static_cast<double>(height)}, false, false, true, tok};
+
+        return Value{obj};
+    };
+    obj->properties["getTermSize"] = {
+        Value{std::make_shared<FunctionValue>("stdin.getTermSize", getTermSize_impl, env, tok)},
+        false, false, true, tok};
+
+    // ============================================================================
+    // CURSOR CONTROL
+    // ============================================================================
+
+    auto cursorTo_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "stdin.cursorTo requires (x, y)", token.loc);
+        }
+
+        if (!std::holds_alternative<double>(args[0]) || !std::holds_alternative<double>(args[1])) {
+            throw SwaziError("TypeError", "x and y must be numbers", token.loc);
+        }
+
+        int x = static_cast<int>(std::get<double>(args[0]));
+        int y = static_cast<int>(std::get<double>(args[1]));
+
+        std::string seq = "\x1b[" + std::to_string(y + 1) + ";" + std::to_string(x + 1) + "H";
+        std::cout << seq << std::flush;
+
+        return std::monostate{};
+    };
+
+    obj->properties["cursorTo"] = {
+        Value{std::make_shared<FunctionValue>("stdin.cursorTo", cursorTo_impl, env, tok)},
+        false, false, true, tok};
+
+    auto cursorMove_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "stdin.cursorMove requires (dx, dy)", token.loc);
+        }
+
+        if (!std::holds_alternative<double>(args[0]) || !std::holds_alternative<double>(args[1])) {
+            throw SwaziError("TypeError", "dx and dy must be numbers", token.loc);
+        }
+
+        int dx = static_cast<int>(std::get<double>(args[0]));
+        int dy = static_cast<int>(std::get<double>(args[1]));
+
+        std::string seq;
+
+        if (dy < 0) {
+            seq += "\x1b[" + std::to_string(-dy) + "A";
+        } else if (dy > 0) {
+            seq += "\x1b[" + std::to_string(dy) + "B";
+        }
+
+        if (dx > 0) {
+            seq += "\x1b[" + std::to_string(dx) + "C";
+        } else if (dx < 0) {
+            seq += "\x1b[" + std::to_string(-dx) + "D";
+        }
+
+        if (!seq.empty()) {
+            std::cout << seq << std::flush;
+        }
+
+        return std::monostate{};
+    };
+
+    obj->properties["cursorMove"] = {
+        Value{std::make_shared<FunctionValue>("stdin.cursorMove", cursorMove_impl, env, tok)},
+        false, false, true, tok};
+
+    auto saveCursor_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        std::cout << "\x1b[s" << std::flush;
+        return std::monostate{};
+    };
+
+    obj->properties["saveCursor"] = {
+        Value{std::make_shared<FunctionValue>("stdin.saveCursor", saveCursor_impl, env, tok)},
+        false, false, true, tok};
+
+    auto restoreCursor_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        std::cout << "\x1b[u" << std::flush;
+        return std::monostate{};
+    };
+
+    obj->properties["restoreCursor"] = {
+        Value{std::make_shared<FunctionValue>("stdin.restoreCursor", restoreCursor_impl, env, tok)},
+        false, false, true, tok};
+
+    auto hideCursor_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        std::cout << "\x1b[?25l" << std::flush;
+        return std::monostate{};
+    };
+
+    obj->properties["hideCursor"] = {
+        Value{std::make_shared<FunctionValue>("stdin.hideCursor", hideCursor_impl, env, tok)},
+        false, false, true, tok};
+
+    auto showCursor_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        std::cout << "\x1b[?25h" << std::flush;
+        return std::monostate{};
+    };
+
+    obj->properties["showCursor"] = {
+        Value{std::make_shared<FunctionValue>("stdin.showCursor", showCursor_impl, env, tok)},
+        false, false, true, tok};
+
+    // ============================================================================
+    // SCREEN CONTROL
+    // ============================================================================
+
+    auto clearLine_impl = [](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        int mode = 2;
+
+        if (!args.empty() && std::holds_alternative<double>(args[0])) {
+            mode = static_cast<int>(std::get<double>(args[0]));
+        }
+
+        std::string seq = "\x1b[" + std::to_string(mode) + "K";
+        std::cout << seq << std::flush;
+
+        return std::monostate{};
+    };
+
+    obj->properties["clearLine"] = {
+        Value{std::make_shared<FunctionValue>("stdin.clearLine", clearLine_impl, env, tok)},
+        false, false, true, tok};
+
+    auto clearScreen_impl = [](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        int mode = 2;
+
+        if (!args.empty() && std::holds_alternative<double>(args[0])) {
+            mode = static_cast<int>(std::get<double>(args[0]));
+        }
+
+        std::string seq = "\x1b[" + std::to_string(mode) + "J";
+        std::cout << seq << std::flush;
+
+        return std::monostate{};
+    };
+
+    obj->properties["clearScreen"] = {
+        Value{std::make_shared<FunctionValue>("stdin.clearScreen", clearScreen_impl, env, tok)},
+        false, false, true, tok};
+
+    auto clearScreenDown_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        std::cout << "\x1b[J" << std::flush;
+        return std::monostate{};
+    };
+
+    obj->properties["clearScreenDown"] = {
+        Value{std::make_shared<FunctionValue>("stdin.clearScreenDown", clearScreenDown_impl, env, tok)},
+        false, false, true, tok};
+
+    // ============================================================================
+    // SCROLLING
+    // ============================================================================
+
+    auto scrollUp_impl = [](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        int lines = 1;
+
+        if (!args.empty() && std::holds_alternative<double>(args[0])) {
+            lines = static_cast<int>(std::get<double>(args[0]));
+        }
+
+        if (lines > 0) {
+            std::string seq = "\x1b[" + std::to_string(lines) + "S";
+            std::cout << seq << std::flush;
+        }
+
+        return std::monostate{};
+    };
+
+    obj->properties["scrollUp"] = {
+        Value{std::make_shared<FunctionValue>("stdin.scrollUp", scrollUp_impl, env, tok)},
+        false, false, true, tok};
+
+    auto scrollDown_impl = [](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        int lines = 1;
+
+        if (!args.empty() && std::holds_alternative<double>(args[0])) {
+            lines = static_cast<int>(std::get<double>(args[0]));
+        }
+
+        if (lines > 0) {
+            std::string seq = "\x1b[" + std::to_string(lines) + "T";
+            std::cout << seq << std::flush;
+        }
+
+        return std::monostate{};
+    };
+
+    obj->properties["scrollDown"] = {
+        Value{std::make_shared<FunctionValue>("stdin.scrollDown", scrollDown_impl, env, tok)},
+        false, false, true, tok};
+
+    // ============================================================================
+    // BEEP/BELL
+    // ============================================================================
+
+    auto beep_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        std::cout << "\x07" << std::flush;
+        return std::monostate{};
+    };
+
+    obj->properties["beep"] = {
+        Value{std::make_shared<FunctionValue>("stdin.beep", beep_impl, env, tok)},
         false, false, true, tok};
 
     return obj;

@@ -273,7 +273,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         if (ps->newline)
             std::cout << out << std::endl;
         else
-            std::cout << out;
+            std::cout << out << std::flush;
         return;
     }
 
