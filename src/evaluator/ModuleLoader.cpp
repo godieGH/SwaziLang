@@ -467,6 +467,25 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             return rec->exports;
         }
 
+        if (module_spec == "stdin" || module_spec == "swazi:stdin") {
+            const std::string key = "__builtin__:stdin";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "stdin", false);
+
+            rec->exports = make_stdin_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
         // --- end built-in short-circuit ---
     }
 
