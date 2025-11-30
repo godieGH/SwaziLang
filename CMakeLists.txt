@@ -114,6 +114,16 @@ else()
     message(WARNING "libcurl not found: http builtin will use a stub")
 endif()
 
+# Optional zlib
+find_package(ZLIB QUIET)
+if (ZLIB_FOUND)
+    message(STATUS "zlib found: enabling archiver compression features")
+    target_compile_definitions(swazi_lib PUBLIC HAVE_ZLIB=1)
+    target_link_libraries(swazi_lib PUBLIC ZLIB::ZLIB)
+else()
+    message(WARNING "zlib not found: archiver will use stubs for compression")
+endif()
+
 # --- MAIN EXECUTABLE (just main.cpp, links to library) ---
 add_executable(swazi src/main.cpp)
 target_link_libraries(swazi PRIVATE swazi_lib)
