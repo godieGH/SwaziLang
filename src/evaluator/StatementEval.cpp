@@ -952,9 +952,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         // Case 1: Simple string - wrap in runtime_error with location
         if (std::holds_alternative<std::string>(throwVal)) {
             std::string msg = std::get<std::string>(throwVal);
-            std::string fullMsg = "Error at " + ts->token.loc.to_string() +
-                "\n" + msg;
-            throw std::runtime_error(fullMsg);
+            throw std::runtime_error(msg);
         }
 
         // Case 2: Object returned by Error() builtin
@@ -1000,9 +998,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
         // Case 3: Other types - convert to string and throw
         std::string msg = to_string_value(throwVal);
-        std::string fullMsg = "Error at " + ts->token.loc.to_string() +
-            "\n" + msg;
-        throw std::runtime_error(fullMsg);
+        throw std::runtime_error(msg);
     }
 
     throw SwaziError(
