@@ -493,7 +493,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 #endif
 
     // archiver.tar(files_array, output_path) -> bool
-    // files_array: [{name: "file1.txt", data: buffer_or_string}, ...]
+    // files_array: [{name: "file1.txt", content: buffer_or_string}, ...]
     {
         auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2 || !std::holds_alternative<ArrayPtr>(args[0])) {
@@ -513,7 +513,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 ObjectPtr file_obj = std::get<ObjectPtr>(elem);
 
                 auto name_it = file_obj->properties.find("name");
-                auto data_it = file_obj->properties.find("data");
+                auto data_it = file_obj->properties.find("content");
 
                 if (name_it == file_obj->properties.end() ||
                     data_it == file_obj->properties.end()) {
@@ -563,7 +563,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 auto buf = std::make_shared<BufferValue>();
                 buf->data = data;
                 buf->encoding = "binary";
-                file_obj->properties["data"] = {Value{buf}, false, false, false, Token()};
+                file_obj->properties["content"] = {Value{buf}, false, false, false, Token()};
 
                 result->elements.push_back(Value{file_obj});
             }
@@ -589,7 +589,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 ObjectPtr file_obj = std::get<ObjectPtr>(elem);
 
                 auto name_it = file_obj->properties.find("name");
-                auto data_it = file_obj->properties.find("data");
+                auto data_it = file_obj->properties.find("content");
                 if (name_it == file_obj->properties.end() ||
                     data_it == file_obj->properties.end()) continue;
 
@@ -641,7 +641,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 auto buf = std::make_shared<BufferValue>();
                 buf->data = data;
                 buf->encoding = "binary";
-                file_obj->properties["data"] = {Value{buf}, false, false, false, Token()};
+                file_obj->properties["content"] = {Value{buf}, false, false, false, Token()};
 
                 result->elements.push_back(Value{file_obj});
             }
