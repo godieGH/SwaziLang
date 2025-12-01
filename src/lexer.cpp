@@ -8,8 +8,8 @@
 #include <unordered_map>
 
 // Constructor
-Lexer::Lexer(const std::string& source, const std::string& filename)
-    : src(source), filename(filename), i(0), line(1), col(1) {
+Lexer::Lexer(const std::string& source, const std::string& filename, const SourceManager* mgr)
+    : src(source), filename(filename), i(0), line(1), col(1), src_mgr(mgr) {
     indent_stack.push_back(0);
 }
 
@@ -29,20 +29,17 @@ char Lexer::advance() {
     if (eof()) return '\0';
     char c = src[i++];
     if (c == '\n') {
-        linestr[line] = linechunk;
-        linechunk = "";
         line++;
         col = 1;
     } else {
         col++;
-        linechunk += c;
     }
     return c;
 }
 
 void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string& value, int tok_line, int tok_col, int tok_length) {
     int len = tok_length >= 0 ? tok_length : static_cast<int>(value.size());
-    TokenLocation loc(filename.empty() ? "<repl>" : filename, tok_line, tok_col, len);
+    TokenLocation loc(filename.empty() ? "<repl>" : filename, tok_line, tok_col, len, src_mgr);
     Token t{type, value, loc};
     out.push_back(std::move(t));
 }
@@ -484,11 +481,6 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
     std::ostringstream ss;
     ss << "Unterminated template literal in file '" << (filename.empty() ? "<repl>" : filename)
        << "' starting at line " << tok_line << ", col " << tok_col;
-    std::stringstream sd;
-    sd << " * " << tok_line << " | ";
-    ss << "\n --> Traced at: \n"
-       << sd.str() << linestr[tok_line] << "\n"
-       << std::string(sd.str().size() + (tok_col - 6), ' ') << "~~~^~~~";
     throw std::runtime_error(ss.str());
 }
 
@@ -549,13 +541,6 @@ bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int
         std::ostringstream ss;
         ss << headline << " in file '" << (filename.empty() ? "<repl>" : filename)
            << "' starting at line " << tok_line << ", col " << tok_col;
-        std::stringstream sd;
-        sd << " * " << tok_line << " | ";
-        ss << "\n --> Traced at: \n"
-           << sd.str() << linestr[tok_line] << "\n"
-           // mark the full raw token span with tildes and a caret at the end for visibility
-           << std::string(sd.str().size() + std::max(0, tok_col - 1), ' ')
-           << std::string(std::max(1, tok_length), '~') << "^";
         throw std::runtime_error(ss.str());
     };
 
@@ -957,13 +942,6 @@ void Lexer::handle_newline(std::vector<Token>& out) {
                    << (filename.empty() ? "<repl>" : filename)
                    << "' at line " << line;
 
-                ss << "\n --> Traced at: \n";
-                std::stringstream sd;
-                sd << " * " << line << " | ";
-
-                ss << sd.str() << linestr[line] << "\n"
-                   << std::string(sd.str().size() + col, ' ') << "^";
-
                 throw std::runtime_error(ss.str());
             }
         }
@@ -1339,10 +1317,6 @@ std::vector<Token> Lexer::tokenize() {
 
     // final EOF token
     add_token(out, TokenType::EOF_TOKEN, "", line, col, 0);
-
-    for (auto& tok : out) {
-        tok.loc.set_map_linestr(linestr);
-    }
 
     return out;
 }

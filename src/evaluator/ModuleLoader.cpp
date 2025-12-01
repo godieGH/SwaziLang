@@ -106,7 +106,9 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         std::string src = srcOpt.value();
         if (src.empty() || src.back() != '\n') src.push_back('\n');
 
-        Lexer lexer(src, std::string("<embedded:") + module_spec + ">");
+        SourceManager src_mgr(std::string("<embedded:") + module_spec + ">", src);
+
+        Lexer lexer(src, std::string("<embedded:") + module_spec + ">", &src_mgr);
         std::vector<Token> tokens = lexer.tokenize();
         Parser parser(tokens);
         std::unique_ptr<ProgramNode> ast = parser.parse();
@@ -563,7 +565,8 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
     if (src.empty() || src.back() != '\n') src.push_back('\n');
 
     // Lex + parse
-    Lexer lexer(src, resolved);
+    SourceManager src_mgr(resolved, src);
+    Lexer lexer(src, resolved, &src_mgr);
     std::vector<Token> tokens = lexer.tokenize();
     Parser parser(tokens);
     std::unique_ptr<ProgramNode> ast = parser.parse();

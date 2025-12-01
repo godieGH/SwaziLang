@@ -8,7 +8,7 @@
 
 class Lexer {
    public:
-    Lexer(const std::string& source, const std::string& filename = "");
+    Lexer(const std::string& source, const std::string& filename = "", const SourceManager* mgr = nullptr);
     std::vector<Token> tokenize();
 
    private:
@@ -18,8 +18,7 @@ class Lexer {
     int line = 1;
     int col = 1;
 
-    std::string linechunk;
-    std::map<int, std::string> linestr;
+    const SourceManager* src_mgr;
 
     // indentation stack (base 0)
     std::vector<int> indent_stack;

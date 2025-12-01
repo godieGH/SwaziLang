@@ -6,6 +6,8 @@
 #include <sstream>
 #include <string>
 
+#include "SourceManager.hpp"
+
 // Token types (keep in sync with your parser/lexer)
 enum class TokenType {
     // -----------------------
@@ -203,36 +205,23 @@ enum class TokenType {
 // Small struct for token location / span in source
 struct TokenLocation {
    public:
-    std::string filename;                 // source filename (or "<repl>")
-    int line = 1;                         // 1-based
-    int col = 1;                          // 1-based column of token start
-    int length = 0;                       // token length in characters
-    std::map<int, std::string> linestrv;  // used for tracing
-    std::string line_trace;               // trace line
+    std::string filename;  // source filename (or "<repl>")
+    int line = 1;          // 1-based
+    int col = 1;           // 1-based column of token start
+    int length = 0;        // token length in characters
+
+    const SourceManager* src_mgr = nullptr;
 
     TokenLocation() = default;
-    TokenLocation(const std::string& fn, int ln, int c, int len = 0)
-        : filename(fn), line(ln), col(c), length(len) {}
+    TokenLocation(const std::string& fn, int ln, int c, int len = 0, const SourceManager* mgr = nullptr)
+        : filename(fn), line(ln), col(c), length(len), src_mgr(mgr) {}
 
-    void set_map_linestr(std::map<int, std::string> line_str) {
-        linestrv = line_str;
-        std::string ss = line_str[line];
-        line_trace = ss;
-    }
     int end_col() const { return col + std::max(0, length - 1); }
 
     std::string to_string() const {
         return filename + ":" + std::to_string(line) + ":" + std::to_string(col);
     }
-    std::string get_line_trace() const {
-        std::stringstream ss;
-        ss << " * " << line << " | ";
-        std::string fss = ss.str();
-        std::string lss = std::string(col + fss.size(), ' ') + "^";
-        ss << line_trace << "\n"
-           << lss;
-        return ss.str();
-    }
+    std::string get_line_trace() const;
 };
 
 // Represents a single token with location
@@ -254,3 +243,10 @@ struct Token {
         return loc.to_string() + " [" + value + "]";
     }
 };
+
+inline std::string TokenLocation::get_line_trace() const {
+    if (!src_mgr) {
+        return "(source context unavailable)";
+    }
+    return src_mgr->format_error_context(line, col);
+}

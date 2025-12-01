@@ -91,7 +91,9 @@ static void run_file_mode(const std::string& filename, const std::vector<std::st
     if (source_code.empty() || source_code.back() != '\n') source_code.push_back('\n');
 
     try {
-        Lexer lexer(source_code, filename);
+        SourceManager src_mgr(filename, source_code);
+
+        Lexer lexer(source_code, filename, &src_mgr);
         std::vector<Token> tokens = lexer.tokenize();
 
         // print_tokens(tokens);

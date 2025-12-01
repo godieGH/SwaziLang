@@ -66,40 +66,12 @@ TokenLocation build_location_from_value(const Value& v, const TokenLocation& def
     if (auto n = get_number("col")) loc.col = *n;
     if (auto n = get_number("length")) loc.length = *n;
 
-    if (auto t = get_string("line_trace"))
-        loc.line_trace = *t;
-    else if (auto t2 = get_string("trace_str"))
-        loc.line_trace = *t2;
-    else if (auto t3 = get_string("trace"))
-        loc.line_trace = *t3;
-
-    auto it_lines = o->properties.find("linestrv");
-    if (it_lines != o->properties.end() &&
-        std::holds_alternative<ObjectPtr>(it_lines->second.value)) {
-        ObjectPtr mobj = std::get<ObjectPtr>(it_lines->second.value);
-        std::map<int, std::string> mp;
-        for (auto& kv : mobj->properties) {
-            try {
-                int ln = std::stoi(kv.first);
-                const Value& valv = kv.second.value;
-                if (std::holds_alternative<std::string>(valv)) {
-                    mp[ln] = std::get<std::string>(valv);
-                } else {
-                    if (std::holds_alternative<double>(valv))
-                        mp[ln] = std::to_string(std::get<double>(valv));
-                    else if (std::holds_alternative<bool>(valv))
-                        mp[ln] = std::get<bool>(valv) ? "true" : "false";
-                }
-            } catch (...) {
-                // ignore non-integer keys
-            }
-        }
-        if (!mp.empty()) loc.set_map_linestr(mp);
-    }
+    // Old fields (line_trace, linestrv) are ignored
+    // User-created locations won't have a SourceManager, so src_mgr stays nullptr
+    // If get_line_trace() is called, it will return "(source context unavailable)"
 
     return loc;
 }
-
 static Value builtin_ainaya(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     if (args.empty()) {
         return std::string("unknown");
