@@ -142,9 +142,18 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<FunctionPtr>(v)) {
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string name = fn->name.empty() ? "<lambda>" : fn->name;
+
+        // Build the prefix based on function type
+        std::string prefix;
+        if (fn->is_generator) {
+            prefix = "gen->";
+        } else if (fn->is_async) {
+            prefix = "Async->";
+        }
+
         std::string s = use_color
-            ? (std::string(Color::bright_cyan) + "[" + (fn->is_async ? "Async->" : "") + "kazi " + name + "]" + Color::reset)
-            : ("[" + std::string(fn->is_async ? "Async->" : "") + "kazi " + name + "]");
+            ? (std::string(Color::bright_cyan) + "[" + prefix + "kazi " + name + "]" + Color::reset)
+            : ("[" + prefix + "kazi " + name + "]");
         return s;
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
@@ -157,6 +166,37 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         ObjectPtr op = std::get<ObjectPtr>(v);
         if (!op) return "{}";
         std::unordered_set<const ObjectValue*> visited;
+
+        auto gen_it = op->properties.find("__generator__");
+        if (gen_it != op->properties.end() &&
+            gen_it->second.is_private &&
+            std::holds_alternative<GeneratorPtr>(gen_it->second.value)) {
+            GeneratorPtr g = std::get<GeneratorPtr>(gen_it->second.value);
+            if (!g || !g->frame || !g->frame->function) {
+                return use_color ? (Color::bright_blue + "[generator <dead>]" + Color::reset) : "[generator <dead>]";
+            }
+
+            std::string fname = g->frame->function->name.empty() ? "<lambda>" : g->frame->function->name;
+            std::string state_str;
+            switch (g->state) {
+                case GeneratorValue::State::SuspendedStart:
+                    state_str = "suspended-start";
+                    break;
+                case GeneratorValue::State::SuspendedYield:
+                    state_str = "suspended";
+                    break;
+                case GeneratorValue::State::Executing:
+                    state_str = "executing";
+                    break;
+                case GeneratorValue::State::Completed:
+                    state_str = "closed";
+                    break;
+            }
+            std::ostringstream ss;
+            ss << "Object [generator " << fname << " <" << state_str << ">] " + print_object(op, 0, visited);
+            return ss.str();
+        }
+
         return print_object(op, 0, visited);  // <- you write this pretty-printer
     }
     if (std::holds_alternative<ClassPtr>(v)) {
@@ -827,10 +867,17 @@ std::string Evaluator::print_value(
         FunctionPtr fn = std::get<FunctionPtr>(v);
         std::string nm = fn->name.empty() ? "<lambda>" : fn->name;
         std::ostringstream ss;
-        ss << "[" << (fn->is_async ? "Async->" : "") << "kazi " << nm << "]";
+
+        std::string prefix;
+        if (fn->is_generator) {
+            prefix = "gen->";
+        } else if (fn->is_async) {
+            prefix = "Async->";
+        }
+
+        ss << "[" << prefix << "kazi " << nm << "]";
         return use_color ? (Color::bright_cyan + ss.str() + Color::reset) : ss.str();
     }
-
     if (std::holds_alternative<ArrayPtr>(v)) {
         ArrayPtr arr = std::get<ArrayPtr>(v);
         if (!arr) return "[]";
@@ -912,6 +959,37 @@ std::string Evaluator::print_value(
     if (std::holds_alternative<ObjectPtr>(v)) {
         ObjectPtr op = std::get<ObjectPtr>(v);
         if (!op) return "{}";
+
+        auto gen_it = op->properties.find("__generator__");
+        if (gen_it != op->properties.end() &&
+            gen_it->second.is_private &&
+            std::holds_alternative<GeneratorPtr>(gen_it->second.value)) {
+            GeneratorPtr g = std::get<GeneratorPtr>(gen_it->second.value);
+            if (!g || !g->frame || !g->frame->function) {
+                return use_color ? (Color::bright_blue + "[generator <dead>]" + Color::reset) : "[generator <dead>]";
+            }
+
+            std::string fname = g->frame->function->name.empty() ? "<lambda>" : g->frame->function->name;
+            std::string state_str;
+            switch (g->state) {
+                case GeneratorValue::State::SuspendedStart:
+                    state_str = "suspended-start";
+                    break;
+                case GeneratorValue::State::SuspendedYield:
+                    state_str = "suspended";
+                    break;
+                case GeneratorValue::State::Executing:
+                    state_str = "executing";
+                    break;
+                case GeneratorValue::State::Completed:
+                    state_str = "closed";
+                    break;
+            }
+            std::ostringstream ss;
+            ss << "Object [generator " << fname << " <" << state_str << ">] " + print_object(op, depth, visited);
+            return ss.str();
+        }
+
         return print_object(op, depth, visited);
     }
 

@@ -1501,6 +1501,26 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.byteAt"), native_impl, env, mem->token)};
             }
 
+            // buf.toArray() -> array of numbers (0-255)
+            if (mem->property == "toArray") {
+                auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!buf) {
+                        auto empty = std::make_shared<ArrayValue>();
+                        return Value{empty};
+                    }
+
+                    auto arr = std::make_shared<ArrayValue>();
+                    arr->elements.reserve(buf->data.size());
+
+                    for (uint8_t byte : buf->data) {
+                        arr->elements.push_back(Value{static_cast<double>(byte)});
+                    }
+
+                    return Value{arr};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.toArray"), native_impl, env, mem->token)};
+            }
+
             // buf.copy(sourceBuffer, targetStart?, sourceStart?, sourceEnd?) -> number (bytes copied)
             if (mem->property == "copy") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
