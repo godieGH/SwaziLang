@@ -747,6 +747,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"kwa", TokenType::FOR},  // for-like loop
         {"kila", TokenType::KILA},
         {"katika", TokenType::KATIKA},
+        {"ktk", TokenType::KATIKA},
         {"wakati", TokenType::WHILE},
         {"fanya", TokenType::DOWHILE},
         {"simama", TokenType::SIMAMA},
