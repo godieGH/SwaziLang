@@ -598,6 +598,11 @@ static void on_connection(uv_stream_t* server, int status) {
                         auto req_stream = create_network_readable_stream_object((uv_tcp_t*)stream);
                         req_obj->properties["stream"] = {Value{req_stream}, false, false, true, Token{}};
 
+                        // Add this when building req_obj
+                        req_obj->properties["url"] = {
+                            Value{http_req->query.empty() ? http_req->path : http_req->path + "?" + http_req->query},
+                            false, false, true, Token{}};
+
                         // response object
                         auto res_obj = std::make_shared<ObjectValue>();
                         auto http_res = std::make_shared<HttpResponse>();
@@ -605,6 +610,34 @@ static void on_connection(uv_stream_t* server, int status) {
                         auto raw_stream = create_network_writable_stream_object((uv_tcp_t*)stream);
                         auto res_stream = wrap_stream_with_http(raw_stream, http_res);
                         res_obj->properties["stream"] = {Value{res_stream}, false, false, true, Token{}};
+
+                        // res.setHeader(name, value)
+                        auto setHeader_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                            if (args.size() < 2) {
+                                throw SwaziError("TypeError", "setHeader requires (name, value)", token.loc);
+                            }
+                            std::string name = value_to_string_simple_local(args[0]);
+                            std::string value = value_to_string_simple_local(args[1]);
+                            http_res->headers[name] = value;
+                            return Value{res_obj};
+                        };
+                        auto setHeader_fn = std::make_shared<FunctionValue>("res.setHeader", setHeader_impl, nullptr, Token{});
+                        res_obj->properties["setHeader"] = {Value{setHeader_fn}, false, false, true, Token{}};
+
+                        // res.getHeader(name)
+                        auto getHeader_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                            if (args.empty()) {
+                                throw SwaziError("TypeError", "getHeader requires header name", token.loc);
+                            }
+                            std::string name = value_to_string_simple_local(args[0]);
+                            auto it = http_res->headers.find(name);
+                            if (it != http_res->headers.end()) {
+                                return Value{it->second};
+                            }
+                            return std::monostate{};  // undefined
+                        };
+                        auto getHeader_fn = std::make_shared<FunctionValue>("res.getHeader", getHeader_impl, nullptr, Token{});
+                        res_obj->properties["getHeader"] = {Value{getHeader_fn}, false, false, true, Token{}};
 
                         // res.writeHead(code, headers)
                         auto writeHead_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
@@ -784,6 +817,36 @@ static void on_connection(uv_stream_t* server, int status) {
                         };
                         auto message_fn = std::make_shared<FunctionValue>("res.message", message_impl, nullptr, Token{});
                         res_obj->properties["message"] = {Value{message_fn}, false, false, true, Token{}};
+
+                        // res.redirect(url, statusCode?)
+                        auto redirect_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                            if (args.empty()) {
+                                throw SwaziError("TypeError", "redirect requires a URL", token.loc);
+                            }
+
+                            std::string location = value_to_string_simple_local(args[0]);
+                            int code = 302;  // Default to 302 Found
+
+                            // Optional status code (301, 302, 303, 307, 308)
+                            if (args.size() >= 2) {
+                                code = static_cast<int>(value_to_number_simple_local(args[1]));
+                                // Validate it's a redirect code
+                                if (code < 300 || code >= 400) {
+                                    code = 302;  // Fallback to safe default
+                                }
+                            }
+
+                            http_res->status_code = code;
+                            http_res->reason = HttpResponse::reason_for_code(code);
+                            http_res->headers["Location"] = location;
+
+                            // End with empty body (redirects shouldn't have content)
+                            http_res->end("");
+
+                            return Value{res_obj};
+                        };
+                        auto redirect_fn = std::make_shared<FunctionValue>("res.redirect", redirect_impl, nullptr, Token{});
+                        res_obj->properties["redirect"] = {Value{redirect_fn}, false, false, true, Token{}};
 
                         // Call handler
                         if (srv->request_handler) {
