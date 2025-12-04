@@ -2407,46 +2407,59 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
 
                     // Case 2: Check if another range is entirely contained within this range
+                    // True only if EVERY element of the other range is in this range
                     if (std::holds_alternative<RangePtr>(arg)) {
                         RangePtr other = std::get<RangePtr>(arg);
                         if (!other) return Value{false};
 
-                        // Both ranges must have the same direction
-                        if (range->increasing != other->increasing) {
-                            return Value{false};
-                        }
+                        // Iterate through all elements of the other range
+                        // and check if each one is contained in this range
+                        int current = other->start;
+                        int step = static_cast<int>(other->step);
 
-                        // Check if other's bounds are within this range's bounds
-                        bool startContained, endContained;
-
-                        if (range->increasing) {
-                            if (range->inclusive) {
-                                startContained = (other->start >= range->start && other->start <= range->end);
-                                endContained = (other->end >= range->start && other->end <= range->end);
+                        while (true) {
+                            // Check if current element is in this range
+                            bool withinBounds;
+                            if (range->increasing) {
+                                if (range->inclusive) {
+                                    withinBounds = (current >= range->start && current <= range->end);
+                                } else {
+                                    withinBounds = (current >= range->start && current < range->end);
+                                }
                             } else {
-                                startContained = (other->start >= range->start && other->start < range->end);
-                                endContained = (other->end >= range->start && other->end < range->end);
+                                if (range->inclusive) {
+                                    withinBounds = (current <= range->start && current >= range->end);
+                                } else {
+                                    withinBounds = (current <= range->start && current > range->end);
+                                }
                             }
-                        } else {
-                            if (range->inclusive) {
-                                startContained = (other->start <= range->start && other->start >= range->end);
-                                endContained = (other->end <= range->start && other->end >= range->end);
-                            } else {
-                                startContained = (other->start <= range->start && other->start > range->end);
-                                endContained = (other->end <= range->start && other->end > range->end);
-                            }
-                        }
 
-                        // Both endpoints must be contained
-                        if (!startContained || !endContained) return Value{false};
+                            if (!withinBounds) return Value{false};
 
-                        // Check step alignment: other's step should be a multiple of this range's step
-                        // or the ranges should produce compatible sequences
-                        if (other->step % range->step != 0) {
-                            // If steps don't align, check if other's start aligns with this range's step
-                            int offset = std::abs(other->start - range->start);
+                            // Check step alignment
+                            int offset = std::abs(current - range->start);
                             if ((offset % static_cast<int>(range->step)) != 0) {
                                 return Value{false};
+                            }
+
+                            // Move to next element in other range
+                            // Check if we've reached the end
+                            if (other->increasing) {
+                                if (other->inclusive) {
+                                    if (current == other->end) break;
+                                    if (current + step > other->end) break;
+                                } else {
+                                    if (current + step >= other->end) break;
+                                }
+                                current += step;
+                            } else {
+                                if (other->inclusive) {
+                                    if (current == other->end) break;
+                                    if (current - step < other->end) break;
+                                } else {
+                                    if (current - step <= other->end) break;
+                                }
+                                current -= step;
                             }
                         }
 
