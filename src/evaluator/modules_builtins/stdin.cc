@@ -33,6 +33,11 @@ static std::atomic<bool> g_discard_on_resume(false);
 static uv_async_t* g_pause_keepalive = nullptr;
 static std::string g_line_buffer;
 
+// Escape sequence buffering
+static std::string g_escape_buffer;
+static uv_timer_t* g_escape_timer = nullptr;
+static const int ESCAPE_TIMEOUT_MS = 10;
+
 // Prompt state
 static std::string g_current_prompt;
 static std::atomic<bool> g_prompt_active(false);
@@ -115,6 +120,50 @@ static void destroy_pause_keepalive(uv_loop_t* loop) {
     g_pause_keepalive = nullptr;
 }
 
+// Timer callback to flush incomplete escape sequence
+static void escape_timeout_cb(uv_timer_t* handle) {
+    if (!g_escape_buffer.empty()) {
+        enqueue_data_callbacks_from_bytes(g_escape_buffer.c_str(), g_escape_buffer.length());
+        g_escape_buffer.clear();
+    }
+}
+
+// Helper to check if we're in the middle of an escape sequence
+static bool is_potential_escape_sequence(const std::string& buf) {
+    if (buf.empty()) return false;
+    if (buf[0] != '\x1b') return false;
+
+    size_t len = buf.length();
+
+    // Just ESC - wait for more
+    if (len == 1) return true;
+
+    // ESC [ ... - CSI sequence
+    if (len >= 2 && buf[1] == '[') {
+        // CSI sequences end with a letter (A-Z, a-z) or ~
+        char last = buf[len - 1];
+        if ((last >= 'A' && last <= 'Z') || (last >= 'a' && last <= 'z') || last == '~') {
+            return false;  // Complete sequence
+        }
+        return true;  // Still building
+    }
+
+    // ESC O ... - SS3 sequence (function keys F1-F4)
+    if (len >= 2 && buf[1] == 'O') {
+        if (len == 2) return true;  // Wait for final character
+        char last = buf[len - 1];
+        if (last >= 'A' && last <= 'Z') {
+            return false;  // Complete
+        }
+        return true;
+    }
+
+    // Other ESC sequences are typically 2 characters
+    if (len >= 2) return false;
+
+    return true;
+}
+
 // Main read callback
 static void stdin_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     if (g_stdin_closed.load()) {
@@ -141,17 +190,63 @@ static void stdin_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* bu
             for (ssize_t i = 0; i < len; ++i) {
                 unsigned char ch = static_cast<unsigned char>(data[i]);
 
+                // Handle Ctrl+C - flush any pending escape sequence first
                 if (ch == 0x03) {
+                    if (!g_escape_buffer.empty()) {
+                        enqueue_data_callbacks_from_bytes(g_escape_buffer.c_str(), g_escape_buffer.length());
+                        g_escape_buffer.clear();
+                        if (g_escape_timer) {
+                            uv_timer_stop(g_escape_timer);
+                        }
+                    }
                     enqueue_sigint_callbacks();
                     enqueue_data_callbacks_from_bytes((const char*)&ch, 1);
-                } else if (ch == 0x04) {
+                    continue;
+                }
+
+                // Handle Ctrl+D - flush any pending escape sequence first
+                if (ch == 0x04) {
+                    if (!g_escape_buffer.empty()) {
+                        enqueue_data_callbacks_from_bytes(g_escape_buffer.c_str(), g_escape_buffer.length());
+                        g_escape_buffer.clear();
+                        if (g_escape_timer) {
+                            uv_timer_stop(g_escape_timer);
+                        }
+                    }
                     enqueue_eof_callbacks();
                     enqueue_data_callbacks_from_bytes((const char*)&ch, 1);
+                    continue;
+                }
+
+                // Check if this starts or continues an escape sequence
+                if (ch == 0x1b || !g_escape_buffer.empty()) {
+                    g_escape_buffer.push_back(static_cast<char>(ch));
+
+                    // Check if sequence is complete
+                    if (!is_potential_escape_sequence(g_escape_buffer)) {
+                        // Complete sequence - send it as one unit
+                        enqueue_data_callbacks_from_bytes(g_escape_buffer.c_str(), g_escape_buffer.length());
+                        g_escape_buffer.clear();
+                        if (g_escape_timer) {
+                            uv_timer_stop(g_escape_timer);
+                        }
+                    } else {
+                        // Incomplete sequence - start/reset timer
+                        uv_loop_t* loop = scheduler_get_loop();
+                        if (!g_escape_timer && loop) {
+                            g_escape_timer = new uv_timer_t;
+                            uv_timer_init(loop, g_escape_timer);
+                        }
+                        if (g_escape_timer) {
+                            uv_timer_stop(g_escape_timer);
+                            uv_timer_start(g_escape_timer, escape_timeout_cb, ESCAPE_TIMEOUT_MS, 0);
+                        }
+                    }
                 } else {
+                    // Regular character - send immediately
                     enqueue_data_callbacks_from_bytes((const char*)&ch, 1);
                 }
             }
-
         } else {
             for (ssize_t i = 0; i < len; ++i) {
                 unsigned char ch = static_cast<unsigned char>(data[i]);
@@ -235,6 +330,7 @@ static void cleanup_on_signal(int signum) {
     {
         std::lock_guard<std::mutex> lk(g_stdin_mutex);
         g_line_buffer.clear();
+        g_escape_buffer.clear();
     }
 
     // Re-raise signal for default handling
@@ -423,10 +519,24 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
             enabled = std::get<bool>(args[0]);
         }
 
-        if (enabled && !g_raw_mode.load()) {
+        // Clear buffers when changing modes
+        {
             std::lock_guard<std::mutex> lk(g_stdin_mutex);
-            g_line_buffer.clear();
-            g_prompt_active.store(false);
+            if (enabled && !g_raw_mode.load()) {
+                // Switching TO raw mode
+                g_line_buffer.clear();
+                g_prompt_active.store(false);
+            } else if (!enabled && g_raw_mode.load()) {
+                // Switching FROM raw mode TO normal mode
+                g_escape_buffer.clear();
+                if (g_escape_timer) {
+                    scheduler_run_on_loop([]() {
+                        if (g_escape_timer) {
+                            uv_timer_stop(g_escape_timer);
+                        }
+                    });
+                }
+            }
         }
 
         g_raw_mode.store(enabled);
@@ -479,6 +589,16 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
             }
 
             if (loop) destroy_pause_keepalive(loop);
+
+            // Clean up escape timer
+            if (g_escape_timer) {
+                uv_timer_stop(g_escape_timer);
+                uv_close((uv_handle_t*)g_escape_timer, [](uv_handle_t* h) {
+                    delete (uv_timer_t*)h;
+                });
+                g_escape_timer = nullptr;
+            }
+            g_escape_buffer.clear();
 
             g_stdin_initialized.store(false);
         });
@@ -763,6 +883,18 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
 
     obj->properties["beep"] = {
         Value{std::make_shared<FunctionValue>("stdin.beep", beep_impl, env, tok)},
+        false, false, true, tok};
+
+    // ============================================================================
+    // some other tools
+    // ============================================================================
+
+    auto isTTY_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        if (!g_stdin_handle) return Value{false};
+        return Value{uv_guess_handle(0) == UV_TTY};
+    };
+    obj->properties["isTTY"] = {
+        Value{std::make_shared<FunctionValue>("stdin.isTTY", isTTY_impl, env, tok)},
         false, false, true, tok};
 
     return obj;
