@@ -76,6 +76,15 @@ add_dependencies(sodium libsodium_build)
 # --- libuv Setup ---
 add_subdirectory(thirdparty/libuv-1.51.0)
 
+# --- nlohmann/json Setup ---
+include(FetchContent)
+FetchContent_Declare(
+  nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # --- CORE LIBRARY (compile everything once here) ---
 file(GLOB_RECURSE LIB_SOURCES "src/*.cpp" "src/*.cc" "src/*.c")
 list(FILTER LIB_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
@@ -100,6 +109,7 @@ target_link_libraries(swazi_lib PUBLIC
     swazi_net
     uv
     sodium
+    nlohmann_json::nlohmann_json
 )
 
 add_dependencies(swazi_lib generate_builtins)
@@ -134,7 +144,6 @@ install(TARGETS swazi DESTINATION bin)
 # --- TESTING ---
 enable_testing()
 
-include(FetchContent)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/releases/download/v1.17.0/googletest-1.17.0.tar.gz

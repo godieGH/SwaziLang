@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -7,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "cli_commands.hpp"
 #include "evaluator.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
@@ -138,17 +140,26 @@ int main(int argc, char* argv[]) {
     // uv_init();
     auto print_usage = []() {
         std::cout << "Usage: swazi [options] [file]\n"
+                  << "       swazi [command] [args...]\n"
                   << "Options:\n"
                   << "  -v, --version    Print version and exit\n"
                   << "  -i               Start REPL (interactive)\n"
                   << "  -h, --help       Show this help message\n"
+                  << "\n"
+                  << "Commands:\n"
+                  << "  init             Initialize a new Swazi project\n"
+                  << "  project          Project information commands\n"
+                  << "  vendor           Vendor directory management\n"
+                  << "  cache            Cache management\n"
+                  << "  start            Run the project\n"
+                  << "  publish          Publish to registry\n"
+                  << "  install          Install dependencies\n"
                   << "\n"
                   << "If a filename starts with '-', either use `--` to end options\n"
                   << "or prefix the filename with a path (for example `./-file.sl`):\n"
                   << "  swazi -- -file.sl\n";
     };
 
-    // Build CLI args vector (include argv[0] so scripts can see script path in argv[0])
     std::vector<std::string> cli_args;
     cli_args.reserve((size_t)argc);
     for (int i = 0; i < argc; ++i) cli_args.emplace_back(argv[i]);
@@ -156,6 +167,27 @@ int main(int argc, char* argv[]) {
     if (argc == 1) {
         run_repl_mode();
         return 0;
+    }
+
+    // Check if first argument is a CLI command
+    std::string first_arg = argv[1];
+    std::vector<std::string> known_commands = {
+        "init", "project", "vendor", "cache", "start", "run", "publish", "install"};
+
+    bool is_command = std::find(known_commands.begin(), known_commands.end(), first_arg) != known_commands.end();
+
+    if (is_command) {
+        // Build args vector for CLI commands (skip argv[0])
+        std::vector<std::string> command_args;
+        for (int i = 1; i < argc; ++i) {
+            command_args.emplace_back(argv[i]);
+        }
+
+        auto result = swazi::cli::execute_command(command_args);
+        if (!result.message.empty()) {
+            std::cerr << result.message << std::endl;
+        }
+        return result.exit_code;
     }
 
     // Simple options parser: scan argv until we hit a non-option or `--`.

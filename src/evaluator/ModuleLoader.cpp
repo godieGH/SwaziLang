@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <sstream>
 
 #include "SwaziError.hpp"
@@ -9,6 +10,74 @@
 #include "lexer.hpp"
 #include "parser.hpp"
 namespace fs = std::filesystem;
+
+using json = nlohmann::json;
+
+// Helper to check if a module spec is a vendor import
+bool is_vendor_spec(const std::string& module_spec) {
+    return module_spec.rfind("vendor:", 0) == 0;
+}
+
+// Helper to check if a module spec is a URL import
+bool is_url_spec(const std::string& module_spec) {
+    return module_spec.rfind("url:", 0) == 0;
+}
+
+// Parse vendor specifier: "vendor:foo" -> "foo", "vendor:ns/foo" -> "ns/foo"
+std::string parse_vendor_spec(const std::string& module_spec) {
+    if (module_spec.rfind("vendor:", 0) == 0) {
+        return module_spec.substr(7);  // Skip "vendor:"
+    }
+    return module_spec;
+}
+
+// Load vendor package's swazi.json to find entry point
+std::optional<std::string> get_vendor_entry_point(const fs::path& vendor_path) {
+    fs::path config_path = vendor_path / "swazi.json";
+
+    if (!fs::exists(config_path)) {
+        return std::nullopt;
+    }
+
+    try {
+        std::ifstream file(config_path);
+        if (!file.is_open()) {
+            return std::nullopt;
+        }
+
+        json j = json::parse(file);
+
+        // Check for "entry" field
+        if (j.contains("entry") && j["entry"].is_string()) {
+            return j["entry"].get<std::string>();
+        }
+
+        // Default to index.sl if no entry specified
+        return std::string("index.sl");
+
+    } catch (const json::exception&) {
+        return std::nullopt;
+    }
+}
+
+// Find project root by looking for swazi.json
+std::string find_project_root(const std::string& start_path) {
+    fs::path current = fs::absolute(start_path);
+
+    while (true) {
+        fs::path config_path = current / "swazi.json";
+        if (fs::exists(config_path)) {
+            return current.string();
+        }
+
+        if (!current.has_parent_path() || current == current.parent_path()) {
+            break;
+        }
+        current = current.parent_path();
+    }
+
+    return "";
+}
 
 // Resolve the module specifier to an existing file path. Tries:
 // - If spec has extension and exists -> use it.
@@ -158,6 +227,156 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
 
         rec->state = ModuleRecord::State::Loaded;
         return rec->exports;
+    }
+
+    // ============ VENDOR MODULE LOADING ============
+    if (is_vendor_spec(module_spec)) {
+        std::string vendor_name = parse_vendor_spec(module_spec);
+
+        // Find project root
+        std::string project_root = find_project_root(requesterTok.loc.filename);
+        if (project_root.empty()) {
+            project_root = fs::current_path().string();
+        }
+
+        // Build vendor package path
+        fs::path vendor_base = fs::path(project_root) / "vendor";
+        fs::path vendor_package_path = vendor_base / vendor_name;
+
+        // Check if vendor package exists
+        if (!fs::exists(vendor_package_path) || !fs::is_directory(vendor_package_path)) {
+            throw SwaziError(
+                "ModuleError",
+                "Vendor package '" + vendor_name +
+                    "' not found in vendor/ directory. "
+                    "Run 'swazi vendor add " +
+                    vendor_name + "' to install it.",
+                requesterTok.loc);
+        }
+
+        // Get entry point from vendor package's swazi.json
+        auto entry_opt = get_vendor_entry_point(vendor_package_path);
+        if (!entry_opt.has_value()) {
+            throw SwaziError(
+                "ModuleError",
+                "Vendor package '" + vendor_name + "' has no valid swazi.json or entry point.",
+                requesterTok.loc);
+        }
+
+        std::string entry_file = entry_opt.value();
+        fs::path full_entry_path = vendor_package_path / entry_file;
+
+        // Check if entry file exists
+        if (!fs::exists(full_entry_path)) {
+            throw SwaziError(
+                "ModuleError",
+                "Vendor package '" + vendor_name + "' entry point '" + entry_file + "' not found.",
+                requesterTok.loc);
+        }
+
+        // Use canonical path as cache key
+        std::string resolved = fs::weakly_canonical(full_entry_path).string();
+        std::string key = "__vendor__:" + vendor_name + ":" + resolved;
+
+        // Check cache
+        auto it = module_cache.find(key);
+        if (it != module_cache.end()) {
+            auto rec = it->second;
+            if (rec->state == ModuleRecord::State::Loading) {
+                return rec->exports;
+            }
+            return rec->exports;
+        }
+
+        // Create new module record
+        auto rec = std::make_shared<ModuleRecord>();
+        rec->state = ModuleRecord::State::Loading;
+        rec->exports = std::make_shared<ObjectValue>();
+        rec->path = key;
+        rec->module_env = std::make_shared<Environment>(global_env);
+        module_cache[key] = rec;
+
+        populate_module_metadata(rec->module_env, resolved, vendor_name, false);
+
+        // Read and execute vendor module file
+        std::ifstream in(full_entry_path);
+        if (!in.is_open()) {
+            module_cache.erase(key);
+            throw SwaziError(
+                "IOError",
+                "Unable to open vendor module file: '" + full_entry_path.string() + "'.",
+                requesterTok.loc);
+        }
+
+        std::stringstream buf;
+        buf << in.rdbuf();
+        std::string src = buf.str();
+        if (src.empty() || src.back() != '\n') src.push_back('\n');
+
+        SourceManager src_mgr(resolved, src);
+        Lexer lexer(src, resolved, &src_mgr);
+        std::vector<Token> tokens = lexer.tokenize();
+        Parser parser(tokens);
+        std::unique_ptr<ProgramNode> ast = parser.parse();
+
+        try {
+            for (auto& stmt : ast->body) {
+                if (!stmt) continue;
+
+                if (auto ed = dynamic_cast<ExportDeclarationNode*>(stmt.get())) {
+                    if (ed->is_default) {
+                        if (ed->single_identifier.empty()) {
+                            rec->exports->properties["default"] = PropertyDescriptor{
+                                std::monostate{}, false, false, false, ed->token};
+                        } else {
+                            if (!rec->module_env->has(ed->single_identifier)) {
+                                throw SwaziError(
+                                    "ReferenceError",
+                                    "Export name '" + ed->single_identifier + "' not defined in vendor module.",
+                                    ed->token.loc);
+                            }
+                            Environment::Variable& v = rec->module_env->get(ed->single_identifier);
+                            rec->exports->properties["default"] = PropertyDescriptor{
+                                v.value, false, false, false, ed->token};
+                        }
+                    } else {
+                        for (const auto& nm : ed->names) {
+                            if (!rec->module_env->has(nm)) {
+                                rec->exports->properties[nm] = PropertyDescriptor{
+                                    std::monostate{}, false, false, false, ed->token};
+                            } else {
+                                Environment::Variable& v = rec->module_env->get(nm);
+                                rec->exports->properties[nm] = PropertyDescriptor{
+                                    v.value, false, false, false, ed->token};
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                evaluate_statement(stmt.get(), rec->module_env);
+            }
+        } catch (...) {
+            module_cache.erase(key);
+            throw;
+        }
+
+        rec->state = ModuleRecord::State::Loaded;
+        return rec->exports;
+    }
+
+    if (is_url_spec(module_spec)) {
+        // Parse url:package or url:package@version
+        std::string url_spec = module_spec.substr(4);  // Skip "url:"
+
+        // TODO: Implement URL module downloading and caching
+        // For now, throw a helpful error
+        throw SwaziError(
+            "NotImplementedError",
+            "URL module imports are not yet implemented. Requested: '" + url_spec +
+                "'\n"
+                "This feature will download packages from the Swazi registry to ~/.swazi/cache/",
+            requesterTok.loc);
     }
 
     {
