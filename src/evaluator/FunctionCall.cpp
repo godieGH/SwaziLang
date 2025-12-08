@@ -10,6 +10,25 @@
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
 
+static bool is_stack_near_limit() {
+    // Get approximate stack pointer address
+    volatile char stack_var;
+    uintptr_t current_sp = reinterpret_cast<uintptr_t>(&stack_var);
+
+    // First call initializes the baseline
+    static uintptr_t stack_start = current_sp;
+
+    // Calculate bytes used
+    uintptr_t stack_used = (stack_start > current_sp)
+        ? (stack_start - current_sp)   // Stack grows down (most systems)
+        : (current_sp - stack_start);  // Stack grows up (rare)
+
+    // Leave 1MB safety margin from your ulimit (64MB)
+    const size_t SAFE_STACK_LIMIT = 63 * 1024 * 1024;  // 63MB
+
+    return stack_used > SAFE_STACK_LIMIT;
+}
+
 void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise) {
     if (!frame || !frame->function) return;
 
@@ -248,6 +267,13 @@ Value Evaluator::resume_generator(GeneratorPtr gen, const Value& arg, bool is_re
 }
 
 Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
+    if (is_stack_near_limit()) {
+        throw SwaziError(
+            "StackOverflowError",
+            "Stack space exhausted. Reduce recursion depth or increase stack size (ulimit -s)",
+            callToken.loc);
+    }
+
     if (!fn) {
         throw SwaziError(
             "TypeError",
@@ -528,6 +554,13 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
     return result;
 }
 Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {
+    if (is_stack_near_limit()) {
+        throw SwaziError(
+            "StackOverflowError",
+            "Stack space exhausted. Reduce recursion depth or increase stack size (ulimit -s)",
+            callToken.loc);
+    }
+
     if (!fn) {
         throw SwaziError(
             "TypeError",

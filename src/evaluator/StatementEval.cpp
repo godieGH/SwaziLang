@@ -728,6 +728,52 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             return;
         }
 
+        // String case - iterate over characters
+        else if (std::holds_alternative<std::string>(iterableVal)) {
+            std::string str = std::get<std::string>(iterableVal);
+
+            for (size_t i = 0; i < str.size(); ++i) {
+                auto loopEnv = std::make_shared<Environment>(env);
+
+                // valueVar gets the character as a single-character string
+                if (fin->valueVar) {
+                    Environment::Variable var{
+                        std::string(1, str[i]),  // Single character as string
+                        false};
+                    loopEnv->set(fin->valueVar->name, var);
+                }
+
+                // indexVar gets the position (0-based)
+                if (fin->indexVar) {
+                    Environment::Variable var{
+                        static_cast<double>(i),
+                        false};
+                    loopEnv->set(fin->indexVar->name, var);
+                }
+
+                // Execute body
+                for (auto& s : fin->body) {
+                    evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                    if (did_return && *did_return) return;
+                    if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                }
+
+                // Handle break
+                if (loopCtrl->did_break) {
+                    loopCtrl->did_break = false;
+                    break;
+                }
+
+                // Handle continue
+                if (loopCtrl->did_continue) {
+                    loopCtrl->did_continue = false;
+                    continue;
+                }
+            }
+
+            return;
+        }
+
         else {
             throw SwaziError(
                 "TypeError",
