@@ -47,6 +47,12 @@ class Lexer {
     // Emits TEMPLATE_CHUNK, TEMPLATE_EXPR_START, TEMPLATE_EXPR_END and TEMPLATE_END tokens.
     void scan_template(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
 
+    // Attempts to scan a datetime literal (ISO 8601 with mandatory timezone).
+    // Returns true if successfully scanned and emitted DATETIME_LITERAL token.
+    // Returns false if the pattern doesn't match (caller should handle as normal number).
+    // Throws std::runtime_error on malformed datetime literals with detailed diagnostics.
+    bool try_scan_datetime(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
+
     void skip_line_comment();
     void handle_newline(std::vector<Token>& out);
     void emit_remaining_dedents(std::vector<Token>& out);

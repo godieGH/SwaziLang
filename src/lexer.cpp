@@ -484,6 +484,247 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
     throw std::runtime_error(ss.str());
 }
 
+bool Lexer::try_scan_datetime(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
+    // Quick validation: must start with 4 digits followed by '-'
+    if (!std::isdigit((unsigned char)peek(0)) ||
+        !std::isdigit((unsigned char)peek(1)) ||
+        !std::isdigit((unsigned char)peek(2)) ||
+        !std::isdigit((unsigned char)peek(3)) ||
+        peek(4) != '-') {
+        return false;
+    }
+
+    // Lookahead to check if this matches datetime pattern YYYY-MM-DDTHH:MM
+    // We need to see at least: YYYY-MM-DDTHH:MM (16 chars minimum)
+    size_t lookahead = 0;
+    auto check_digit = [&]() -> bool {
+        return lookahead < 50 && (i + lookahead) < src.size() &&
+            std::isdigit((unsigned char)src[i + lookahead++]);
+    };
+    auto check_char = [&](char expected) -> bool {
+        return lookahead < 50 && (i + lookahead) < src.size() &&
+            src[i + lookahead++] == expected;
+    };
+
+    // Check pattern: YYYY-MM-DDTHH:MM
+    if (!(check_digit() && check_digit() && check_digit() && check_digit() &&  // YYYY
+            check_char('-') &&
+            check_digit() && check_digit() &&  // MM
+            check_char('-') &&
+            check_digit() && check_digit() &&  // DD
+            check_char('T') &&
+            check_digit() && check_digit() &&  // HH
+            check_char(':') &&
+            check_digit() && check_digit())) {  // MM
+        return false;                           // Not a datetime pattern
+    }
+
+    // Pattern matches - commit to scanning datetime
+    auto throw_error = [&](const std::string& msg) -> void {
+        std::ostringstream ss;
+        ss << msg << " in datetime literal at "
+           << (filename.empty() ? "<repl>" : filename)
+           << " line " << tok_line << ", col " << tok_col;
+        throw std::runtime_error(ss.str());
+    };
+
+    auto scan_digits = [&](int count, const std::string& component) -> int {
+        int value = 0;
+        for (int j = 0; j < count; j++) {
+            if (eof() || !std::isdigit((unsigned char)peek())) {
+                throw_error("Expected " + std::to_string(count) + " digits for " + component);
+            }
+            value = value * 10 + (peek() - '0');
+            advance();
+        }
+        return value;
+    };
+
+    auto expect_char = [&](char expected, const std::string& context) -> void {
+        if (eof() || peek() != expected) {
+            throw_error("Expected '" + std::string(1, expected) + "' " + context);
+        }
+        advance();
+    };
+
+    // Scan YYYY
+    int year = scan_digits(4, "year");
+    expect_char('-', "after year");
+
+    // Scan MM
+    int month = scan_digits(2, "month");
+    if (month < 1 || month > 12) {
+        throw_error("Invalid month '" + std::to_string(month) + "' (must be 01-12)");
+    }
+    expect_char('-', "after month");
+
+    // Scan DD
+    int day = scan_digits(2, "day");
+    if (day < 1 || day > 31) {
+        throw_error("Invalid day '" + std::to_string(day) + "' (must be 01-31)");
+    }
+
+    // Validate day against month/year (calendar validation)
+    auto is_leap_year = [](int y) -> bool {
+        return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    };
+
+    int max_day = 31;
+    if (month == 2) {
+        max_day = is_leap_year(year) ? 29 : 28;
+    } else if (month == 4 || month == 6 || month == 9 || month == 11) {
+        max_day = 30;
+    }
+
+    if (day > max_day) {
+        std::ostringstream msg;
+        msg << "Invalid day '" << day << "' for "
+            << (month == 2 ? (is_leap_year(year) ? "February (leap year)" : "February")
+                           : "month " + std::to_string(month))
+            << " " << year << " (max " << max_day << ")";
+        throw_error(msg.str());
+    }
+
+    expect_char('T', "after date (required separator)");
+
+    // Scan HH
+    int hour = scan_digits(2, "hour");
+    if (hour > 23) {
+        throw_error("Invalid hour '" + std::to_string(hour) + "' (must be 00-23)");
+    }
+    expect_char(':', "after hour");
+
+    // Scan MM (minutes)
+    int minute = scan_digits(2, "minute");
+    if (minute > 59) {
+        throw_error("Invalid minute '" + std::to_string(minute) + "' (must be 00-59)");
+    }
+
+    // Optional: seconds
+    int second = 0;
+    std::string fraction;
+    if (!eof() && peek() == ':') {
+        advance();  // consume ':'
+        second = scan_digits(2, "second");
+        if (second > 59) {
+            throw_error("Invalid second '" + std::to_string(second) + "' (must be 00-59)");
+        }
+
+        // Optional: fractional seconds
+        if (!eof() && peek() == '.') {
+            advance();  // consume '.'
+            if (eof() || !std::isdigit((unsigned char)peek())) {
+                throw_error("Expected digits after decimal point in fractional seconds");
+            }
+            while (!eof() && std::isdigit((unsigned char)peek())) {
+                fraction.push_back(peek());
+                advance();
+            }
+        }
+    }
+
+    // Mandatory timezone
+    if (eof()) {
+        throw_error("Incomplete datetime: missing required timezone (Z or ±HH:MM)");
+    }
+    int32_t tz_offset_total_seconds = 0;
+    char tz_char = peek();
+    if (tz_char == 'Z') {
+        advance();
+        tz_offset_total_seconds = 0;
+    } else if (tz_char == '+' || tz_char == '-') {
+        char sign = tz_char;
+        advance();
+
+        // Scan timezone offset hours
+        if (eof() || !std::isdigit((unsigned char)peek())) {
+            throw_error("Expected digits for timezone offset hours");
+        }
+        int tz_hour = scan_digits(2, "timezone hour");
+
+        int tz_minute = 0;
+
+        // Check for colon or 2 more digits (supports +HH:MM and +HHMM)
+        if (!eof() && peek() == ':') {
+            advance();  // consume ':'
+            tz_minute = scan_digits(2, "timezone minute");
+        } else if (!eof() && std::isdigit((unsigned char)peek())) {
+            // Compact form: +HHMM
+            tz_minute = scan_digits(2, "timezone minute");
+        }
+        // else: +HH format (tz_minute stays 0)
+
+        // Validate timezone offset range (-12:00 to +14:00)
+        int total_offset = tz_hour * 60 + tz_minute;
+        if (tz_hour > 14 || (tz_hour == 14 && tz_minute > 0)) {
+            throw_error("Timezone offset too large (max +14:00)");
+        }
+        if (tz_minute > 59) {
+            throw_error("Invalid timezone minute '" + std::to_string(tz_minute) + "' (must be 00-59)");
+        }
+        // Note: negative offsets are validated implicitly by the sign
+        tz_offset_total_seconds = (sign == '+' ? 1 : -1) * (tz_hour * 3600 + tz_minute * 60);
+    } else {
+        throw_error("Invalid or missing timezone (expected 'Z' or '±HH:MM')");
+    }
+
+    int tok_length = static_cast<int>(i - start_index);
+
+    auto days_since_epoch = [](int y, int m, int d) -> int64_t {
+        // Algorithm: compute days for Gregorian calendar
+        int64_t year_adj = y;
+        if (m <= 2) {
+            year_adj--;
+            m += 12;
+        }
+        int64_t era = (year_adj >= 0 ? year_adj : year_adj - 399) / 400;
+        int64_t yoe = year_adj - era * 400;
+        int64_t doy = (153 * (m - 3) + 2) / 5 + d - 1;
+        int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        return era * 146097 + doe - 719468;  // 719468 = days from 0000-03-01 to 1970-01-01
+    };
+
+    int64_t days = days_since_epoch(year, month, day);
+    int64_t seconds_in_day = (int64_t)hour * 3600 + minute * 60 + second;
+    int64_t total_seconds = days * 86400 + seconds_in_day - tz_offset_total_seconds;
+
+    // Parse fractional seconds
+    uint32_t frac_nanos = 0;
+    DateTimePrecision prec = DateTimePrecision::SECOND;
+    if (!fraction.empty()) {
+        // Pad or truncate to 9 digits
+        std::string frac_str = fraction;
+        if (frac_str.size() > 9) frac_str = frac_str.substr(0, 9);
+        while (frac_str.size() < 9) frac_str += '0';
+        frac_nanos = static_cast<uint32_t>(std::stoul(frac_str));
+
+        // Determine precision
+        if (fraction.size() <= 3)
+            prec = DateTimePrecision::MILLISECOND;
+        else if (fraction.size() <= 6)
+            prec = DateTimePrecision::MICROSECOND;
+        else
+            prec = DateTimePrecision::NANOSECOND;
+    }
+
+    uint64_t epoch_nanos = static_cast<uint64_t>(total_seconds) * 1000000000ULL + frac_nanos;
+
+    // Store metadata in token value as structured format (we'll parse in parser)
+    // Format: "ISO_STRING|EPOCH_NANOS|FRAC_NANOS|PRECISION|TZ_OFFSET|IS_UTC"
+    std::string datetime_value = src.substr(start_index, tok_length);
+    std::ostringstream meta;
+    meta << datetime_value << "|"
+         << epoch_nanos << "|"
+         << frac_nanos << "|"
+         << static_cast<int>(prec) << "|"
+         << tz_offset_total_seconds << "|"
+         << (tz_char == 'Z' ? "1" : "0");
+
+    add_token(out, TokenType::DATETIME_LITERAL, meta.str(), tok_line, tok_col, tok_length);
+
+    return true;
+}
+
 // Returns true when it recognized & emitted a prefixed non-decimal literal; false otherwise.
 // On malformed literals it throws std::runtime_error with a helpful message.
 bool Lexer::handle_non_decimal_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
@@ -1270,15 +1511,24 @@ void Lexer::scan_token(std::vector<Token>& out) {
             break;
     }
 
-    // number (decimal or prefixed non-decimal)
+    // number (decimal or prefixed non-decimal) or datetime literal
     if (std::isdigit((unsigned char)c)) {
         size_t start_index = i;
-        // Attempt 0b/0o/0x prefix handling (lexer-level). If handled, it already emitted a NUMBER.
-        if (c == '0' && handle_non_decimal_number(out, line, col, start_index)) {
+        int tok_line = line;
+        int tok_col = col;
+
+        // First, try datetime literal (must be 4-digit year starting pattern)
+        if (c >= '0' && c <= '9' && try_scan_datetime(out, tok_line, tok_col, start_index)) {
             return;
         }
-        // otherwise fall back to existing decimal/floating scanner
-        scan_number(out, line, col, start_index);
+
+        // Not datetime, try 0b/0o/0x prefix handling
+        if (c == '0' && handle_non_decimal_number(out, tok_line, tok_col, start_index)) {
+            return;
+        }
+
+        // Otherwise fall back to decimal/floating scanner
+        scan_number(out, tok_line, tok_col, start_index);
         return;
     }
 

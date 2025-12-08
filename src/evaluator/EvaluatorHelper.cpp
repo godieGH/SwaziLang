@@ -59,6 +59,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<BufferPtr>(v)) return "buffer";
     if (std::holds_alternative<FilePtr>(v)) return "file";
     if (std::holds_alternative<RangePtr>(v)) return "range";
+    if (std::holds_alternative<DateTimePtr>(v)) return "datetime";
     return "unknown";
 }
 
@@ -124,10 +125,19 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
         double d = std::get<double>(v);
-        if (std::fabs(d - std::round(d)) < 1e-12)
+
+        // Only pretty-print as integer if:
+        // 1. It's within safe integer range for doubles (2^53)
+        // 2. It's close enough to an integer value
+        // 3. It fits in long long
+        constexpr double MAX_SAFE_INTEGER = 9007199254740992.0;  // 2^53
+
+        if (std::fabs(d) <= MAX_SAFE_INTEGER &&
+            std::fabs(d - std::round(d)) < 1e-12) {
             ss << (long long)std::llround(d);
-        else
+        } else {
             ss << d;
+        }
         return use_color ? Color::yellow + ss.str() + Color::reset : ss.str();
     }
     if (std::holds_alternative<bool>(v)) {
@@ -319,6 +329,14 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         return print_value(v);
     }
 
+    if (std::holds_alternative<DateTimePtr>(v)) {
+        DateTimePtr dt = std::get<DateTimePtr>(v);
+        if (!dt) return "[nullDateTime]";
+
+        // Return literalText by default
+        return dt->literalText;
+    }
+
     return "";
 }
 
@@ -344,6 +362,7 @@ bool Evaluator::to_bool(const Value& v) {
     if (std::holds_alternative<BufferPtr>(v)) return true;
     if (std::holds_alternative<RangePtr>(v)) return true;
     if (std::holds_alternative<PromisePtr>(v)) return true;
+    if (std::holds_alternative<DateTimePtr>(v)) return true;
     return false;
 }
 
@@ -846,11 +865,20 @@ std::string Evaluator::print_value(
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
         double d = std::get<double>(v);
-        if (std::fabs(d - std::round(d)) < 1e-12)
+
+        // Only pretty-print as integer if:
+        // 1. It's within safe integer range for doubles (2^53)
+        // 2. It's close enough to an integer value
+        // 3. It fits in long long
+        constexpr double MAX_SAFE_INTEGER = 9007199254740992.0;  // 2^53
+
+        if (std::fabs(d) <= MAX_SAFE_INTEGER &&
+            std::fabs(d - std::round(d)) < 1e-12) {
             ss << (long long)std::llround(d);
-        else
+        } else {
             ss << d;
-        return use_color ? (Color::yellow + ss.str() + Color::reset) : ss.str();
+        }
+        return use_color ? Color::yellow + ss.str() + Color::reset : ss.str();
     }
 
     if (std::holds_alternative<bool>(v)) {
@@ -1143,6 +1171,15 @@ std::string Evaluator::print_value(
         ss << range_string;
         ss << ")";
         return ss.str();
+    }
+
+    if (std::holds_alternative<DateTimePtr>(v)) {
+        DateTimePtr dt = std::get<DateTimePtr>(v);
+        if (!dt) return "[nullDateTime]";
+
+        // Pretty print with color
+        std::string dtStr = dt->literalText;
+        return use_color ? (Color::bright_cyan + dtStr + Color::reset) : dtStr;
     }
 
     return "<?>";  // fallback

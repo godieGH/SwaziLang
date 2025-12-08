@@ -1,6 +1,9 @@
 #pragma once
 
+#include <chrono>
+#include <ctime>
 #include <functional>
+#include <iomanip>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -128,6 +131,9 @@ struct RangeValue {
 };
 using RangePtr = std::shared_ptr<RangeValue>;
 
+struct DateTimeValue;
+using DateTimePtr = std::shared_ptr<DateTimeValue>;
+
 using Value = std::variant<
     std::monostate,
     double,
@@ -142,7 +148,260 @@ using Value = std::variant<
     GeneratorPtr,
     BufferPtr,
     FilePtr,
-    RangePtr>;
+    RangePtr,
+    DateTimePtr>;
+
+struct DateTimeValue {
+    std::string literalText;
+    int year, month, day;
+    int hour, minute, second;
+    uint32_t fractionalNanoseconds;
+    DateTimePrecision precision;
+    int32_t tzOffsetSeconds;
+    bool isUTC;
+    uint64_t epochNanoseconds;
+
+    DateTimeValue() = default;
+
+    DateTimeValue(const DateTimeLiteralNode* node) {
+        literalText = node->literalText;
+        year = node->year;
+        month = node->month;
+        day = node->day;
+        hour = node->hour;
+        minute = node->minute;
+        second = node->second;
+        fractionalNanoseconds = node->fractionalNanoseconds;
+        precision = node->precision;
+        tzOffsetSeconds = node->tzOffsetSeconds;
+        isUTC = node->isUTC;
+        epochNanoseconds = node->epochNanoseconds;
+    }
+
+    // Recompute calendar fields from epochNanoseconds
+    void recompute_calendar_fields() {
+        using namespace std::chrono;
+
+        // Work directly with nanoseconds to preserve precision
+        // Convert to seconds for time_t, keep fractional part separate
+        int64_t total_nanos = static_cast<int64_t>(epochNanoseconds);
+
+        // Adjust for timezone offset (convert offset to nanoseconds)
+        int64_t tz_offset_nanos = static_cast<int64_t>(tzOffsetSeconds) * 1'000'000'000LL;
+        int64_t adjusted_nanos = total_nanos - tz_offset_nanos;
+
+        // Split into seconds and fractional nanoseconds
+        int64_t total_seconds = adjusted_nanos / 1'000'000'000LL;
+        int64_t frac_nanos = adjusted_nanos % 1'000'000'000LL;
+
+        // Handle negative fractional part
+        if (frac_nanos < 0) {
+            total_seconds -= 1;
+            frac_nanos += 1'000'000'000LL;
+        }
+
+        // Convert seconds to time_t for calendar decomposition
+        std::time_t tt = static_cast<std::time_t>(total_seconds);
+
+        // Get broken-down time (UTC)
+        std::tm* tm_ptr = std::gmtime(&tt);
+        if (!tm_ptr) {
+            throw std::runtime_error("Failed to convert epoch to calendar time");
+        }
+
+        year = tm_ptr->tm_year + 1900;
+        month = tm_ptr->tm_mon + 1;
+        day = tm_ptr->tm_mday;
+        hour = tm_ptr->tm_hour;
+        minute = tm_ptr->tm_min;
+        second = tm_ptr->tm_sec;
+
+        // Store the fractional nanoseconds (preserves full precision)
+        fractionalNanoseconds = static_cast<uint32_t>(frac_nanos);
+    }
+
+    // Update epochNanoseconds from calendar fields (useful for manual field edits)
+    void recompute_epoch_from_fields() {
+        std::tm timeStruct = {};
+        timeStruct.tm_year = year - 1900;
+        timeStruct.tm_mon = month - 1;
+        timeStruct.tm_mday = day;
+        timeStruct.tm_hour = hour;
+        timeStruct.tm_min = minute;
+        timeStruct.tm_sec = second;
+        timeStruct.tm_isdst = -1;
+
+        // Convert to time_t (UTC)
+        std::time_t tt = std::mktime(&timeStruct);
+        if (tt == -1) {
+            throw std::runtime_error("Invalid date/time fields");
+        }
+
+        // Adjust back to UTC by applying timezone offset
+        using namespace std::chrono;
+        auto tp = system_clock::from_time_t(tt);
+        tp += seconds(tzOffsetSeconds);
+
+        // Convert to nanoseconds
+        auto since_epoch = tp.time_since_epoch();
+        auto nanos = duration_cast<nanoseconds>(since_epoch).count();
+
+        epochNanoseconds = static_cast<uint64_t>(nanos) + fractionalNanoseconds;
+    }
+
+    // Add milliseconds (returns new DateTime)
+    std::shared_ptr<DateTimeValue> add_milliseconds(double millis) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+
+        // Convert milliseconds to nanoseconds
+        int64_t nanosToAdd = static_cast<int64_t>(millis * 1000000.0);
+
+        // Handle negative addition (which is subtraction)
+        if (nanosToAdd >= 0) {
+            newDt->epochNanoseconds += static_cast<uint64_t>(nanosToAdd);
+        } else {
+            uint64_t absNanos = static_cast<uint64_t>(-nanosToAdd);
+            if (newDt->epochNanoseconds >= absNanos) {
+                newDt->epochNanoseconds -= absNanos;
+            } else {
+                newDt->epochNanoseconds = 0;  // Clamp to epoch
+            }
+        }
+
+        // Recompute calendar fields
+        newDt->recompute_calendar_fields();
+
+        // Update literal text to reflect new time
+        newDt->update_literal_text();
+
+        return newDt;
+    }
+
+    // Subtract another datetime (returns milliseconds difference)
+    double subtract_datetime(const DateTimeValue& other) const {
+        int64_t diffNanos = static_cast<int64_t>(epochNanoseconds) -
+            static_cast<int64_t>(other.epochNanoseconds);
+        return static_cast<double>(diffNanos) / 1000000.0;
+    }
+
+    // Format using strftime-style format string
+    std::string format(const std::string& fmt) const {
+        std::tm timeStruct = {};
+        timeStruct.tm_year = year - 1900;
+        timeStruct.tm_mon = month - 1;
+        timeStruct.tm_mday = day;
+        timeStruct.tm_hour = hour;
+        timeStruct.tm_min = minute;
+        timeStruct.tm_sec = second;
+        timeStruct.tm_isdst = -1;
+
+        // Compute day of week (0=Sunday)
+        std::time_t tt = std::mktime(&timeStruct);
+        std::tm* tm_with_wday = std::localtime(&tt);
+        if (tm_with_wday) {
+            timeStruct.tm_wday = tm_with_wday->tm_wday;
+            timeStruct.tm_yday = tm_with_wday->tm_yday;
+        }
+
+        std::string processedFmt = fmt;
+
+        // Handle custom format codes not in standard strftime
+
+        // %f - microseconds (6 digits)
+        size_t pos = 0;
+        while ((pos = processedFmt.find("%f", pos)) != std::string::npos) {
+            uint32_t micros = fractionalNanoseconds / 1000;
+            char buf[7];
+            std::snprintf(buf, sizeof(buf), "%06u", micros);
+            processedFmt.replace(pos, 2, buf);
+            pos += 6;
+        }
+
+        // %z - timezone offset (+HHMM or -HHMM)
+        pos = 0;
+        while ((pos = processedFmt.find("%z", pos)) != std::string::npos) {
+            int offsetSec = tzOffsetSeconds;
+            char sign = (offsetSec >= 0) ? '+' : '-';
+            offsetSec = std::abs(offsetSec);
+            int hrs = offsetSec / 3600;
+            int mins = (offsetSec % 3600) / 60;
+            char buf[6];
+            std::snprintf(buf, sizeof(buf), "%c%02d%02d", sign, hrs, mins);
+            processedFmt.replace(pos, 2, buf);
+            pos += 5;
+        }
+
+        // %Z - timezone name (use "UTC" if isUTC, otherwise offset string)
+        pos = 0;
+        while ((pos = processedFmt.find("%Z", pos)) != std::string::npos) {
+            std::string tzName = isUTC ? "UTC" : "GMT";
+            if (!isUTC && tzOffsetSeconds != 0) {
+                int offsetSec = tzOffsetSeconds;
+                char sign = (offsetSec >= 0) ? '+' : '-';
+                offsetSec = std::abs(offsetSec);
+                int hrs = offsetSec / 3600;
+                int mins = (offsetSec % 3600) / 60;
+                char buf[10];
+                std::snprintf(buf, sizeof(buf), "GMT%c%02d:%02d", sign, hrs, mins);
+                tzName = buf;
+            }
+            processedFmt.replace(pos, 2, tzName);
+            pos += tzName.length();
+        }
+
+        // Standard strftime
+        char buffer[512];
+        size_t len = std::strftime(buffer, sizeof(buffer), processedFmt.c_str(), &timeStruct);
+
+        if (len == 0 && !processedFmt.empty()) {
+            // Buffer too small or invalid format
+            return fmt;  // Return original format as fallback
+        }
+
+        return std::string(buffer, len);
+    }
+
+    // Update literalText to reflect current calendar fields
+    void update_literal_text() {
+        std::ostringstream oss;
+        oss << std::setfill('0');
+        oss << std::setw(4) << year << "-"
+            << std::setw(2) << month << "-"
+            << std::setw(2) << day << "T"
+            << std::setw(2) << hour << ":"
+            << std::setw(2) << minute << ":"
+            << std::setw(2) << second;
+
+        // Add fractional seconds if non-zero
+        if (fractionalNanoseconds > 0) {
+            // Determine precision from original precision or compute from nanoseconds
+            uint32_t micros = fractionalNanoseconds / 1000;
+            uint32_t millis = micros / 1000;
+
+            if (precision == DateTimePrecision::MILLISECOND) {
+                oss << "." << std::setw(3) << millis;
+            } else if (precision == DateTimePrecision::MICROSECOND) {
+                oss << "." << std::setw(6) << micros;
+            } else if (precision == DateTimePrecision::NANOSECOND) {
+                oss << "." << std::setw(9) << fractionalNanoseconds;
+            }
+        }
+
+        // Add timezone
+        if (isUTC) {
+            oss << "Z";
+        } else if (tzOffsetSeconds != 0) {
+            int offsetSec = tzOffsetSeconds;
+            char sign = (offsetSec >= 0) ? '+' : '-';
+            offsetSec = std::abs(offsetSec);
+            int hrs = offsetSec / 3600;
+            int mins = (offsetSec % 3600) / 60;
+            oss << sign << std::setw(2) << hrs << ":" << std::setw(2) << mins;
+        }
+
+        literalText = oss.str();
+    }
+};
 
 struct PropertyDescriptor {
     Value value;

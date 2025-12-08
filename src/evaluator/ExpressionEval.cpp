@@ -69,6 +69,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         return Value(std::numeric_limits<double>::infinity());
     }
 
+    if (auto dt = dynamic_cast<DateTimeLiteralNode*>(expr)) {
+        auto dateTimeVal = std::make_shared<DateTimeValue>(dt);
+        return Value{dateTimeVal};
+    }
+
     // --- await expression (suspends current async frame) ---
     if (auto awaitNode = dynamic_cast<AwaitExpressionNode*>(expr)) {
         // Use stable await_id as the key (assigned by parser). Cloning AST will preserve await_id.
@@ -1151,6 +1156,155 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     };
                     return Value{std::make_shared<FunctionValue>(std::string("native:promise.finally"), native_impl, env, memTok)};
                 }
+            }
+        }
+
+        // DateTime methods and properties
+        {
+            if (std::holds_alternative<DateTimePtr>(objVal)) {
+                DateTimePtr dt = std::get<DateTimePtr>(objVal);
+                const std::string& prop = mem->property;
+
+                // Properties (direct access)
+                if (prop == "year") return Value{static_cast<double>(dt->year)};
+                if (prop == "month") return Value{static_cast<double>(dt->month)};
+                if (prop == "day") return Value{static_cast<double>(dt->day)};
+                if (prop == "hour") return Value{static_cast<double>(dt->hour)};
+                if (prop == "minute") return Value{static_cast<double>(dt->minute)};
+                if (prop == "second") return Value{static_cast<double>(dt->second)};
+                if (prop == "ms") {
+                    return Value{static_cast<double>(dt->fractionalNanoseconds / 1000000)};
+                }
+                if (prop == "microsecond" || prop == "us") {
+                    // Microseconds component (0-999999)
+                    return Value{static_cast<double>(dt->fractionalNanoseconds) / 1000.0};
+                }
+                if (prop == "nanosecond" || prop == "ns") {
+                    // Nanoseconds component (0-999999999)
+                    return Value{static_cast<double>(dt->fractionalNanoseconds)};
+                }
+                if (prop == "isUTC") return Value{dt->isUTC};
+                if (prop == "zone") {
+                    // Format timezone offset as string: "+HH:MM" or "-HH:MM" or "UTC"
+                    if (dt->isUTC) {
+                        return Value{std::string("UTC")};
+                    }
+                    int offsetSec = dt->tzOffsetSeconds;
+                    char sign = (offsetSec >= 0) ? '+' : '-';
+                    offsetSec = std::abs(offsetSec);
+                    int hrs = offsetSec / 3600;
+                    int mins = (offsetSec % 3600) / 60;
+                    std::ostringstream oss;
+                    oss << sign << std::setfill('0') << std::setw(2) << hrs
+                        << ":" << std::setw(2) << mins;
+                    return Value{oss.str()};
+                }
+                if (prop == "epochMillis") {
+                    // Total milliseconds since Unix epoch
+                    return Value{static_cast<double>(dt->epochNanoseconds) / 1000000.0};
+                }
+                if (prop == "epochSeconds") {
+                    // Total seconds since Unix epoch
+                    return Value{static_cast<double>(dt->epochNanoseconds) / 1000000000.0};
+                }
+
+                // Methods (return FunctionPtr)
+                if (prop == "toStr") {
+                    auto native_impl = [dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            // No format: return literalText
+                            return Value{dt->literalText};
+                        }
+
+                        if (!std::holds_alternative<std::string>(args[0])) {
+                            throw SwaziError("TypeError",
+                                "date.toStr() expects a format string",
+                                token.loc);
+                        }
+
+                        try {
+                            std::string fmt = std::get<std::string>(args[0]);
+                            return Value{dt->format(fmt)};
+                        } catch (const std::exception& e) {
+                            throw SwaziError("ValueError",
+                                std::string("Format error: ") + e.what(),
+                                token.loc);
+                        }
+                    };
+                    return Value{std::make_shared<FunctionValue>(
+                        "native:datetime.toStr", native_impl, env, mem->token)};
+                }
+
+                if (prop == "strftime") {
+                    // Alias for toStr but requires format argument
+                    auto native_impl = [dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError",
+                                "strftime() requires a format string argument",
+                                token.loc);
+                        }
+
+                        if (!std::holds_alternative<std::string>(args[0])) {
+                            throw SwaziError("TypeError",
+                                "strftime() expects a format string",
+                                token.loc);
+                        }
+
+                        try {
+                            std::string fmt = std::get<std::string>(args[0]);
+                            return Value{dt->format(fmt)};
+                        } catch (const std::exception& e) {
+                            throw SwaziError("ValueError",
+                                std::string("strftime error: ") + e.what(),
+                                token.loc);
+                        }
+                    };
+                    return Value{std::make_shared<FunctionValue>(
+                        "native:datetime.strftime", native_impl, env, mem->token)};
+                }
+
+                if (prop == "toISO") {
+                    // ISO 8601 format
+                    auto native_impl = [dt](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                        return Value{dt->literalText};
+                    };
+                    return Value{std::make_shared<FunctionValue>(
+                        "native:datetime.toISO", native_impl, env, mem->token)};
+                }
+
+                if (prop == "toUTC") {
+                    // Convert to UTC timezone
+                    auto native_impl = [dt](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+                        try {
+                            auto utcDt = std::make_shared<DateTimeValue>(*dt);
+
+                            // Adjust epoch by removing timezone offset
+                            if (!utcDt->isUTC && utcDt->tzOffsetSeconds != 0) {
+                                using namespace std::chrono;
+                                utcDt->epochNanoseconds += static_cast<uint64_t>(
+                                                               std::abs(utcDt->tzOffsetSeconds) * 1000000000LL) *
+                                    (utcDt->tzOffsetSeconds < 0 ? -1 : 1);
+
+                                utcDt->isUTC = true;
+                                utcDt->tzOffsetSeconds = 0;
+                                utcDt->recompute_calendar_fields();
+                                utcDt->update_literal_text();
+                            }
+
+                            return Value{utcDt};
+                        } catch (const std::exception& e) {
+                            throw SwaziError("ValueError",
+                                std::string("UTC conversion error: ") + e.what(),
+                                token.loc);
+                        }
+                    };
+                    return Value{std::make_shared<FunctionValue>(
+                        "native:datetime.toUTC", native_impl, env, mem->token)};
+                }
+
+                throw SwaziError("ReferenceError",
+                    "Unknown property '" + prop + "' on datetime",
+                    mem->token.loc);
             }
         }
 
@@ -4050,6 +4204,93 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         // For all other binary operators evaluate RHS now (both operands required)
         Value right = evaluate_expression(b->right.get(), env);
+
+        // DateTime binary operations (before regular arithmetic)
+        if (std::holds_alternative<DateTimePtr>(left) || std::holds_alternative<DateTimePtr>(right)) {
+            DateTimePtr dtLeft = std::holds_alternative<DateTimePtr>(left) ? std::get<DateTimePtr>(left) : nullptr;
+            DateTimePtr dtRight = std::holds_alternative<DateTimePtr>(right) ? std::get<DateTimePtr>(right) : nullptr;
+
+            // DateTime + number (milliseconds) -> DateTime
+            if (op == "+" && dtLeft && std::holds_alternative<double>(right)) {
+                double millisToAdd = std::get<double>(right);
+                try {
+                    return Value{dtLeft->add_milliseconds(millisToAdd)};
+                } catch (const std::exception& e) {
+                    throw SwaziError("ValueError",
+                        std::string("DateTime arithmetic error: ") + e.what(),
+                        b->token.loc);
+                }
+            }
+
+            // number + DateTime (milliseconds) -> DateTime (commutative)
+            if (op == "+" && dtRight && std::holds_alternative<double>(left)) {
+                double millisToAdd = std::get<double>(left);
+                try {
+                    return Value{dtRight->add_milliseconds(millisToAdd)};
+                } catch (const std::exception& e) {
+                    throw SwaziError("ValueError",
+                        std::string("DateTime arithmetic error: ") + e.what(),
+                        b->token.loc);
+                }
+            }
+
+            // DateTime - number (milliseconds) -> DateTime
+            if (op == "-" && dtLeft && std::holds_alternative<double>(right)) {
+                double millisToSubtract = std::get<double>(right);
+                try {
+                    return Value{dtLeft->add_milliseconds(-millisToSubtract)};
+                } catch (const std::exception& e) {
+                    throw SwaziError("ValueError",
+                        std::string("DateTime arithmetic error: ") + e.what(),
+                        b->token.loc);
+                }
+            }
+
+            // DateTime - DateTime -> number (milliseconds difference)
+            if (op == "-" && dtLeft && dtRight) {
+                try {
+                    double diff = dtLeft->subtract_datetime(*dtRight);
+                    return Value{diff};
+                } catch (const std::exception& e) {
+                    throw SwaziError("ValueError",
+                        std::string("DateTime subtraction error: ") + e.what(),
+                        b->token.loc);
+                }
+            }
+
+            // Comparison operators (use epochNanoseconds)
+            if (dtLeft && dtRight) {
+                if (op == "==" || op == "sawa") {
+                    return Value{dtLeft->epochNanoseconds == dtRight->epochNanoseconds};
+                }
+                if (op == "!=" || op == "sisawa") {
+                    return Value{dtLeft->epochNanoseconds != dtRight->epochNanoseconds};
+                }
+                if (op == "===") {
+                    // Strict equality: same instant in time
+                    return Value{dtLeft->epochNanoseconds == dtRight->epochNanoseconds};
+                }
+                if (op == "!==") {
+                    return Value{dtLeft->epochNanoseconds != dtRight->epochNanoseconds};
+                }
+                if (op == "<") {
+                    return Value{dtLeft->epochNanoseconds < dtRight->epochNanoseconds};
+                }
+                if (op == ">") {
+                    return Value{dtLeft->epochNanoseconds > dtRight->epochNanoseconds};
+                }
+                if (op == "<=") {
+                    return Value{dtLeft->epochNanoseconds <= dtRight->epochNanoseconds};
+                }
+                if (op == ">=") {
+                    return Value{dtLeft->epochNanoseconds >= dtRight->epochNanoseconds};
+                }
+            }
+
+            throw SwaziError("TypeError",
+                "Invalid operation '" + op + "' on datetime value",
+                b->token.loc);
+        }
 
         if (op == "+") {
             // --- string concatenation if either is string ---

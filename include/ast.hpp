@@ -30,6 +30,52 @@ struct ExpressionNode : public Node {
     virtual std::unique_ptr<ExpressionNode> clone() const = 0;
 };
 
+struct DateTimeLiteralNode : public ExpressionNode {
+    // Original literal text
+    std::string literalText;
+
+    // Parsed components
+    int year;
+    int month;                       // 1-12
+    int day;                         // 1-31
+    int hour;                        // 0-23
+    int minute;                      // 0-59
+    int second;                      // 0-59
+    uint32_t fractionalNanoseconds;  // 0-999,999,999
+
+    // Precision metadata
+    DateTimePrecision precision;
+
+    // Timezone info
+    int32_t tzOffsetSeconds;  // signed offset from UTC
+    bool isUTC;
+
+    // Epoch storage for arithmetic/comparisons
+    uint64_t epochNanoseconds;
+
+    std::string to_string() const override {
+        return literalText;
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<DateTimeLiteralNode>();
+        n->token = token;
+        n->literalText = literalText;
+        n->year = year;
+        n->month = month;
+        n->day = day;
+        n->hour = hour;
+        n->minute = minute;
+        n->second = second;
+        n->fractionalNanoseconds = fractionalNanoseconds;
+        n->precision = precision;
+        n->tzOffsetSeconds = tzOffsetSeconds;
+        n->isUTC = isUTC;
+        n->epochNanoseconds = epochNanoseconds;
+        return n;
+    }
+};
+
 struct NumericLiteralNode : public ExpressionNode {
     double value;
     std::string to_string() const override {

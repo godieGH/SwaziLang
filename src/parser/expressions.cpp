@@ -1163,6 +1163,39 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         return std::make_unique<InfNode>(consume());
     }
 
+    if (t.type == TokenType::DATETIME_LITERAL) {
+        Token dtTok = consume();
+        auto node = std::make_unique<DateTimeLiteralNode>();
+        node->token = dtTok;
+
+        // Parse structured token value: "ISO|EPOCH|FRAC|PREC|TZ|UTC"
+        std::istringstream ss(dtTok.value);
+        std::string part;
+        std::vector<std::string> parts;
+        while (std::getline(ss, part, '|')) {
+            parts.push_back(part);
+        }
+
+        if (parts.size() != 6) {
+            throw std::runtime_error("Malformed datetime token at " + dtTok.loc.to_string());
+        }
+
+        node->literalText = parts[0];
+        node->epochNanoseconds = std::stoull(parts[1]);
+        node->fractionalNanoseconds = static_cast<uint32_t>(std::stoul(parts[2]));
+        node->precision = static_cast<DateTimePrecision>(std::stoi(parts[3]));
+        node->tzOffsetSeconds = std::stoi(parts[4]);
+        node->isUTC = (parts[5] == "1");
+
+        // Parse components from literal for convenience
+        std::string iso = parts[0];
+        sscanf(iso.c_str(), "%d-%d-%dT%d:%d:%d",
+            &node->year, &node->month, &node->day,
+            &node->hour, &node->minute, &node->second);
+
+        return node;
+    }
+
     if (t.type == TokenType::BLOCK_DU) {
         return std::make_unique<NullNode>(consume());
     }

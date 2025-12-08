@@ -194,6 +194,11 @@ enum class TokenType {
     STEP,
 
     // -----------------------
+    // datetime
+    // -----------------------
+    DATETIME_LITERAL,
+
+    // -----------------------
     // Miscellaneous
     // -----------------------
     BLOCK_DU,
@@ -250,3 +255,10 @@ inline std::string TokenLocation::get_line_trace() const {
     }
     return src_mgr->format_error_context(line, col);
 }
+
+enum class DateTimePrecision {
+    SECOND,
+    MILLISECOND,
+    MICROSECOND,
+    NANOSECOND
+};
