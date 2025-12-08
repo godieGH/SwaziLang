@@ -6,6 +6,21 @@
 #include "SwaziError.hpp"
 #include "parser.hpp"
 
+static double safe_stod(const std::string& str, const TokenLocation& loc) {
+    char* endptr;
+    errno = 0;
+    double value = std::strtod(str.c_str(), &endptr);
+
+    if (endptr == str.c_str()) {
+        throw SwaziError("ValueError",
+            "Invalid number format: '" + str + "'",
+            loc);
+    }
+
+    // strtod returns ±HUGE_VAL (infinity) on overflow - this is fine
+    return value;
+}
+
 // ---------- expressions (precedence) ----------
 std::unique_ptr<ExpressionNode> Parser::parse_expression() {
     return parse_ternary();
@@ -386,7 +401,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
 
     // expect the first chunk (lexer should emit TEMPLATE_CHUNK even if empty)
     if (t.type != TokenType::TEMPLATE_CHUNK) {
-        throw std::runtime_error("Expected template chunk or template-string at " + t.loc.to_string() + "\n --> Traced at: \n" + t.loc.get_line_trace());
+        throw SwaziError("SyntaxError", "Expected template chunk or template-string", t.loc);
     }
 
     // first chunk
@@ -408,7 +423,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
             consume();
         } else {
             Token bad = peek();
-            throw std::runtime_error("Expected '}' to close template expression at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+            throw SwaziError("ParseError", "Expected '}' to close template expression", bad.loc);
         }
 
         // after closing the expression, the lexer should provide the next chunk (possibly empty),
@@ -423,7 +438,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
             break;
         } else {
             Token bad = peek();
-            throw std::runtime_error("Expected template chunk or end after interpolation at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+            throw SwaziError("SyntaxError", "Expected template chunk or end after interpolation", bad.loc);
         }
     }
 
@@ -516,7 +531,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                 if (peek().type == TokenType::ELLIPSIS) {
                     Token ellTok = consume();
                     if (rest_seen) {
-                        throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
+                        throw SwaziError("PerseError", "Only one rest parameter is allowed", ellTok.loc);
                     }
                     expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                     Token id = tokens[position - 1];
@@ -535,7 +550,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                         try {
                             p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                         } catch (...) {
-                            throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
+                            throw SwaziError("SyntaxError", "Invalid number in rest parameter", numTok.loc);
                         }
                         expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                     }
@@ -548,7 +563,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                         // if comma is followed by something other than ')' it's an error
                         if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
                             Token bad = tokens[position];
-                            throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+                            throw SwaziError("SyntaxError", "Rest parameter must be the last parameter", bad.loc);
                         }
                         // allow trailing comma then break
                     }
@@ -572,7 +587,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
-                        throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
+                        throw SwaziError("SyntaxError", "Expected expression after '=' for default parameter", tokens[position - 1].loc);
                     }
                 }
 
@@ -596,7 +611,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
             if (peek().type == TokenType::ELLIPSIS) {
                 Token ellTok = consume();
                 if (rest_seen) {
-                    throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
+                    throw SwaziError("SyntaxError", "Only one rest parameter is allowed", ellTok.loc);
                 }
                 expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                 Token id = tokens[position - 1];
@@ -614,7 +629,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                     try {
                         p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                     } catch (...) {
-                        throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
+                        throw SwaziError("SyntaxError", "Invalid number in rest parameter", numTok.loc);
                     }
                     expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                 }
@@ -625,7 +640,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                 // rest must be last in bare form
                 if (peek().type == TokenType::COMMA) {
                     Token c = tokens[position];  // lookahead
-                    throw std::runtime_error("Rest parameter must be the last parameter at " + c.loc.to_string() + "\n --> Traced at: \n" + c.loc.get_line_trace());
+                    throw SwaziError("SyntaxError", "Rest parameter must be the last parameter", c.loc);
                 }
                 break;
             }
@@ -633,7 +648,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
             // normal identifier
             Token idTok = consume();
             if (idTok.type != TokenType::IDENTIFIER) {
-                throw std::runtime_error("Expected parameter name at " + idTok.loc.to_string() + "\n --> Traced at: \n" + idTok.loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Expected parameter name", idTok.loc);
             }
             auto pnode = std::make_unique<ParameterNode>();
             pnode->token = idTok;
@@ -647,7 +662,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                 consume();  // consume '='
                 pnode->defaultValue = parse_expression();
                 if (!pnode->defaultValue) {
-                    throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
+                    throw SwaziError("SyntaxError", "Expected expression after '=' for default parameter at ", tokens[position - 1].loc);
                 }
             }
 
@@ -698,7 +713,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
     }
 
     if (is_getter && !params.empty()) {
-        throw std::runtime_error("'thabiti' method cannot take parameters at " + nameTok.loc.to_string() + "\n --> Traced at: \n" + nameTok.loc.get_line_trace());
+        throw SwaziError("SyntaxError", "getters/'thabiti' method cannot take parameters", nameTok.loc);
     }
 
     // Build the FunctionExpressionNode
@@ -787,7 +802,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
         // --- non-tabia property path (existing logic) ---
         if (peek().type == TokenType::ELLIPSIS) {
             if (is_private_flag) {
-                throw std::runtime_error("Private modifier '@' cannot be applied to spread at " + privateTok.loc.to_string() + "\n --> Traced at: \n" + privateTok.loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Private modifier '@' cannot be applied to spread", privateTok.loc);
             }
             Token ell = consume();
             auto spread = std::make_unique<SpreadElementNode>();
@@ -831,14 +846,13 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
             } else if (t.type == TokenType::NUMBER) {
                 Token n = consume();
                 auto keyNode = std::make_unique<NumericLiteralNode>();
-                keyNode->value = std::stod(n.value);
+                keyNode->value = safe_stod(n.value, n.loc);
                 keyNode->token = n;
                 prop->key = std::move(keyNode);
                 prop->token = n;
             } else {
                 Token bad = peek();
-                throw std::runtime_error("Unexpected token in object property key: '" + bad.value +
-                    "' at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Unexpected token in object property key: '" + bad.value + "'", bad.loc);
             }
         }
 
@@ -864,7 +878,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
             } else if (prop->key) {
                 prop->value = prop->key->clone();
             } else {
-                throw std::runtime_error("Invalid property shorthand without identifier at " + peek().loc.to_string() + "\n --> Traced at: \n" + peek().loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Invalid property shorthand without identifier", peek().loc);
             }
         } else {
             // shorthand property
@@ -880,7 +894,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
             } else if (prop->key) {
                 prop->value = prop->key->clone();
             } else {
-                throw std::runtime_error("Invalid property shorthand without identifier at " + peek().loc.to_string() + "\n --> Traced at: \n" + peek().loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Invalid property shorthand without identifier", peek().loc);
             }
         }
 
@@ -897,7 +911,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
         if (peek().type == TokenType::CLOSEBRACE) break;
 
         Token bad = peek();
-        throw std::runtime_error("Expected ',' or '}' in object literal at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+        throw SwaziError("PerseError", "Expected ',' or '}' in object literal.", bad.loc);
     }
     expect(TokenType::CLOSEBRACE, "Expected '}' to close object literal");
 
@@ -924,7 +938,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
             if (peek().type == TokenType::ELLIPSIS) {
                 Token ellTok = consume();
                 if (rest_seen) {
-                    throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
+                    throw SwaziError("ParseError", "Only one rest parameter is allowed", ellTok.loc);
                 }
                 expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
                 Token nameTok = tokens[position - 1];
@@ -943,7 +957,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
                     try {
                         p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                     } catch (...) {
-                        throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
+                        throw SwaziError("TypeError", "Invalid number in rest parameter", numTok.loc);
                     }
                     expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
                 }
@@ -955,7 +969,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
                 if (peek().type == TokenType::COMMA) {
                     if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
                         Token bad = tokens[position];
-                        throw std::runtime_error("Rest parameter must be the last parameter at " + bad.loc.to_string() + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+                        throw SwaziError("SyntaxError", "Rest parameter must be the last parameter.", bad.loc);
                     }
                     // consume the comma; the loop will then see CLOSEPARENTHESIS and exit normally
                 }
@@ -968,7 +982,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
             // normal identifier param (with optional default)
             Token id = consume();
             if (id.type != TokenType::IDENTIFIER) {
-                throw std::runtime_error("Expected parameter name at " + id.loc.to_string() + "\n --> Traced at: \n" + id.loc.get_line_trace());
+                throw SwaziError("SyntaxError", "Expected parameter name", id.loc);
             }
 
             auto pnode = std::make_unique<ParameterNode>();
@@ -983,7 +997,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
                 consume();  // consume '='
                 pnode->defaultValue = parse_expression();
                 if (!pnode->defaultValue) {
-                    throw std::runtime_error("Expected expression after '=' for default parameter at " + tokens[position - 1].loc.to_string() + "\n --> Traced at: \n" + tokens[position - 1].loc.get_line_trace());
+                    throw SwaziError("SyntaxError", "Expected expression after '=' for default parameter", tokens[position - 1].loc);
                 }
             }
 
@@ -1003,7 +1017,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
 
         Token close = consume();
         if (close.type != TokenType::CLOSEPARENTHESIS) {
-            throw std::runtime_error("Expected ')' after parameters at " + close.loc.to_string() + "\n --> Traced at: \n" + close.loc.get_line_trace());
+            throw SwaziError("PerseError", "Expected ')' after parameters", close.loc);
         }
 
     } else {
@@ -1011,7 +1025,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
         if (peek().type == TokenType::ELLIPSIS) {
             Token ellTok = consume();
             if (rest_seen) {
-                throw std::runtime_error("Parse error at " + ellTok.loc.to_string() + ": only one rest parameter is allowed" + "\n --> Traced at: \n" + ellTok.loc.get_line_trace());
+                throw SwaziError("ParseError", "Only one rest parameter is allowed", ellTok.loc);
             }
             expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
             Token nameTok = tokens[position - 1];
@@ -1029,7 +1043,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
                 try {
                     p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
                 } catch (...) {
-                    throw std::runtime_error("Invalid number in rest parameter at " + numTok.loc.to_string() + "\n --> Traced at: \n" + numTok.loc.get_line_trace());
+                    throw SwaziError("TypeError", "Invalid number in rest parameter", numTok.loc);
                 }
                 expect(TokenType::CLOSEBRACKET, "Expected ']' after rest count");
             }
@@ -1039,7 +1053,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
         } else {
             Token id = consume();
             if (id.type != TokenType::IDENTIFIER) {
-                throw std::runtime_error("Expected parameter name at " + id.loc.to_string() + "\n --> Traced at: \n" + id.loc.get_line_trace());
+                throw SwaziError("ParseError", "Expected parameter name", id.loc);
             }
             auto pnode = std::make_unique<ParameterNode>();
             pnode->token = id;
@@ -1137,7 +1151,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
     if (t.type == TokenType::NUMBER) {
         Token numTok = consume();
         auto n = std::make_unique<NumericLiteralNode>();
-        n->value = std::stod(numTok.value);
+        n->value = safe_stod(numTok.value, numTok.loc);
         n->token = numTok;
         return n;
     }
@@ -1177,7 +1191,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         }
 
         if (parts.size() != 6) {
-            throw std::runtime_error("Malformed datetime token at " + dtTok.loc.to_string());
+            throw SwaziError("ParseError", "Malformed datetime token", dtTok.loc);
         }
 
         node->literalText = parts[0];
@@ -1357,8 +1371,8 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
     }
 
     Token tok = peek();
-    throw std::runtime_error(
-        "Unexpected token '" + tok.value + "' at " + tok.loc.to_string() + "\n --> Traced at: \n" + tok.loc.get_line_trace());
+    throw SwaziError("PerseError",
+        "Unexpected token '" + tok.value + "'", tok.loc);
 }
 std::unique_ptr<ExpressionNode> Parser::parse_call(std::unique_ptr<ExpressionNode> callee) {
     expect(TokenType::OPENPARENTHESIS, "Expected '(' in call");
