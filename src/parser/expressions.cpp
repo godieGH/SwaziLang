@@ -662,7 +662,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                 consume();  // consume '='
                 pnode->defaultValue = parse_expression();
                 if (!pnode->defaultValue) {
-                    throw SwaziError("SyntaxError", "Expected expression after '=' for default parameter at ", tokens[position - 1].loc);
+                    throw SwaziError("SyntaxError", "Expected expression after '=' for default parameter", tokens[position - 1].loc);
                 }
             }
 
