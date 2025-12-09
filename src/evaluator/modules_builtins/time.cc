@@ -87,6 +87,167 @@ static DateTimePtr create_datetime_from_components(
     return dt;
 }
 
+// Helper: Parse ISO 8601 datetime string
+static DateTimePtr parse_iso_datetime(const std::string& iso_str, const Token& token) {
+    // Basic ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]
+
+    auto dt = std::make_shared<DateTimeValue>();
+    dt->literalText = iso_str;
+
+    // Use regex or manual parsing
+    // For simplicity, I'll show manual parsing approach
+
+    size_t pos = 0;
+
+    // Parse date: YYYY-MM-DD
+    if (iso_str.length() < 10) {
+        throw SwaziError("ValueError",
+            "Invalid ISO datetime string: too short", token.loc);
+    }
+
+    try {
+        dt->year = std::stoi(iso_str.substr(0, 4));
+        if (iso_str[4] != '-') throw std::invalid_argument("Expected '-'");
+        dt->month = std::stoi(iso_str.substr(5, 2));
+        if (iso_str[7] != '-') throw std::invalid_argument("Expected '-'");
+        dt->day = std::stoi(iso_str.substr(8, 2));
+        pos = 10;
+
+        // Optional time part
+        if (pos < iso_str.length() && (iso_str[pos] == 'T' || iso_str[pos] == ' ')) {
+            pos++;  // skip 'T' or space
+
+            if (pos + 8 > iso_str.length()) {
+                throw std::invalid_argument("Invalid time format");
+            }
+
+            // Parse time: HH:MM:SS
+            dt->hour = std::stoi(iso_str.substr(pos, 2));
+            if (iso_str[pos + 2] != ':') throw std::invalid_argument("Expected ':'");
+            dt->minute = std::stoi(iso_str.substr(pos + 3, 2));
+            if (iso_str[pos + 5] != ':') throw std::invalid_argument("Expected ':'");
+            dt->second = std::stoi(iso_str.substr(pos + 6, 2));
+            pos += 8;
+
+            // Optional fractional seconds
+            if (pos < iso_str.length() && iso_str[pos] == '.') {
+                pos++;  // skip '.'
+                size_t frac_start = pos;
+                while (pos < iso_str.length() && std::isdigit(iso_str[pos])) {
+                    pos++;
+                }
+
+                std::string frac_str = iso_str.substr(frac_start, pos - frac_start);
+                if (!frac_str.empty()) {
+                    // Pad or truncate to 9 digits (nanoseconds)
+                    frac_str.resize(9, '0');
+                    dt->fractionalNanoseconds = std::stoul(frac_str);
+
+                    // Determine precision
+                    size_t frac_len = pos - frac_start;
+                    if (frac_len <= 3) {
+                        dt->precision = DateTimePrecision::MILLISECOND;
+                    } else if (frac_len <= 6) {
+                        dt->precision = DateTimePrecision::MICROSECOND;
+                    } else {
+                        dt->precision = DateTimePrecision::NANOSECOND;
+                    }
+                }
+            } else {
+                dt->precision = DateTimePrecision::SECOND;
+            }
+
+            // Optional timezone
+            if (pos < iso_str.length()) {
+                if (iso_str[pos] == 'Z') {
+                    dt->isUTC = true;
+                    dt->tzOffsetSeconds = 0;
+                } else if (iso_str[pos] == '+' || iso_str[pos] == '-') {
+                    char sign = iso_str[pos];
+                    pos++;
+
+                    // Need at least 2 characters for hours
+                    if (pos + 2 > iso_str.length()) {
+                        throw std::invalid_argument("Invalid timezone format");
+                    }
+
+                    int tz_hours = std::stoi(iso_str.substr(pos, 2));
+                    pos += 2;
+
+                    int tz_mins = 0;
+
+                    // Check if there's a colon (e.g., +05:30) or more digits (e.g., +0530)
+                    if (pos < iso_str.length()) {
+                        if (iso_str[pos] == ':') {
+                            // Format: +HH:MM
+                            pos++;  // skip ':'
+                            if (pos + 2 > iso_str.length()) {
+                                throw std::invalid_argument("Invalid timezone format");
+                            }
+                            tz_mins = std::stoi(iso_str.substr(pos, 2));
+                            pos += 2;
+                        } else if (std::isdigit(iso_str[pos]) && pos + 2 <= iso_str.length()) {
+                            // Format: +HHMM
+                            tz_mins = std::stoi(iso_str.substr(pos, 2));
+                            pos += 2;
+                        }
+                        // else: just +HH format, minutes remain 0
+                    }
+
+                    dt->tzOffsetSeconds = (tz_hours * 3600 + tz_mins * 60);
+                    if (sign == '-') dt->tzOffsetSeconds = -dt->tzOffsetSeconds;
+                    dt->isUTC = (dt->tzOffsetSeconds == 0);
+                }
+            } else {
+                // No timezone specified - assume UTC
+                dt->isUTC = true;
+                dt->tzOffsetSeconds = 0;
+            }
+        } else {
+            // Date only, set time to midnight UTC
+            dt->hour = 0;
+            dt->minute = 0;
+            dt->second = 0;
+            dt->fractionalNanoseconds = 0;
+            dt->isUTC = true;
+            dt->tzOffsetSeconds = 0;
+            dt->precision = DateTimePrecision::SECOND;
+        }
+
+    } catch (const std::exception& e) {
+        throw SwaziError("ValueError",
+            "Failed to parse ISO datetime string '" + iso_str + "': " + e.what(),
+            token.loc);
+    }
+
+    // Validate ranges
+    if (dt->month < 1 || dt->month > 12) {
+        throw SwaziError("ValueError",
+            "Invalid month: " + std::to_string(dt->month), token.loc);
+    }
+    if (dt->day < 1 || dt->day > 31) {
+        throw SwaziError("ValueError",
+            "Invalid day: " + std::to_string(dt->day), token.loc);
+    }
+    if (dt->hour < 0 || dt->hour > 23) {
+        throw SwaziError("ValueError",
+            "Invalid hour: " + std::to_string(dt->hour), token.loc);
+    }
+    if (dt->minute < 0 || dt->minute > 59) {
+        throw SwaziError("ValueError",
+            "Invalid minute: " + std::to_string(dt->minute), token.loc);
+    }
+    if (dt->second < 0 || dt->second > 59) {
+        throw SwaziError("ValueError",
+            "Invalid second: " + std::to_string(dt->second), token.loc);
+    }
+
+    // Compute epoch from fields
+    dt->recompute_epoch_from_fields();
+
+    return dt;
+}
+
 // time.now() -> DateTimeValue
 static Value native_time_now(const std::vector<Value>&, EnvPtr, const Token&) {
     return Value{create_current_datetime()};
@@ -97,19 +258,25 @@ static Value native_time_date(const std::vector<Value>& args, EnvPtr, const Toke
     if (args.empty()) {
         throw SwaziError("TypeError",
             "time.date requires at least one argument. "
-            "Usage: time.date(year, month, day, [hour, minute, second, fractionalNanos, tzOffset]) "
+            "Usage: time.date(isoString) "
+            "or time.date(year, month, day, [hour, minute, second, fractionalNanos, tzOffset]) "
             "or time.date(ms/ns, [\"ms\"|\"ns\"])",
             token.loc);
     }
 
-    // Case 1: Single numeric argument - epoch time
+    // Case 1: Single string argument - ISO datetime string
+    if (args.size() == 1 && std::holds_alternative<std::string>(args[0])) {
+        std::string iso_str = std::get<std::string>(args[0]);
+        return Value{parse_iso_datetime(iso_str, token)};
+    }
+
+    // Case 2: Single numeric argument - epoch time (milliseconds)
     if (args.size() == 1 && std::holds_alternative<double>(args[0])) {
         double value = std::get<double>(args[0]);
-        // Default to milliseconds
         return Value{create_datetime_from_ms(value)};
     }
 
-    // Case 2: Two arguments with second being "ms" or "ns" - explicit epoch time
+    // Case 3: Two arguments with second being "ms" or "ns" - explicit epoch time
     if (args.size() == 2 &&
         std::holds_alternative<double>(args[0]) &&
         std::holds_alternative<std::string>(args[1])) {
@@ -128,7 +295,7 @@ static Value native_time_date(const std::vector<Value>& args, EnvPtr, const Toke
         }
     }
 
-    // Case 3: Component form - year, month, day are required
+    // Case 4: Component form - year, month, day are required
     if (args.size() < 3) {
         throw SwaziError("TypeError",
             "time.date requires at least 3 arguments (year, month, day) for component form",
