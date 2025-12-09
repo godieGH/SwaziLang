@@ -12,7 +12,7 @@
 std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
     bool is_constant = false;
 
-    if (peek().type == TokenType::CONSTANT) {
+    if (peek().type == TokenType::CONSTANT || peek().type == TokenType::AMPERSAND) {
         consume();
         is_constant = true;
     }

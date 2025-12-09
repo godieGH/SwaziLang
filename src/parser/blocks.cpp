@@ -226,7 +226,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
         node->token = tokens[position - 1];
     } else {
         // Detect getter form: lexer classifies 'thabiti' as CONSTANT in your lexer
-        if (peek().type == TokenType::CONSTANT && peek().value == "thabiti") {
+        if ((peek().type == TokenType::CONSTANT && peek().value == "thabiti") || peek().type == TokenType::AMPERSAND) {
             consume();  // consume 'thabiti'
             node->is_getter = true;
             expect(TokenType::IDENTIFIER, "Expected getter name after 'thabiti'");

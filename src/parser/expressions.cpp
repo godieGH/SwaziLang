@@ -505,8 +505,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
 
     // optional 'thabiti' keyword -> getter flag (allow either dedicated token or identifier)
     bool is_getter = false;
-    if (peek().type == TokenType::CONSTANT ||
-        (peek().type == TokenType::IDENTIFIER && peek().value == "thabiti")) {
+    if (peek().type == TokenType::CONSTANT || peek().type == TokenType::AMPERSAND) {
         consume();
         is_getter = true;
     }
