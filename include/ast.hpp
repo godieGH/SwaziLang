@@ -622,6 +622,23 @@ struct AssignmentNode : public StatementNode {
     }
 };
 
+struct AssignmentExpressionNode : public ExpressionNode {
+    std::string target_name;  // must be simple identifier
+    std::unique_ptr<ExpressionNode> value;
+
+    std::string to_string() const override {
+        return target_name + " ni " + (value ? value->to_string() : "<null>");
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<AssignmentExpressionNode>();
+        n->token = token;
+        n->target_name = target_name;
+        n->value = value ? value->clone() : nullptr;
+        return n;
+    }
+};
+
 struct PrintStatementNode : public StatementNode {
     // multiple args allowed for chapisha/andika
     std::vector<std::unique_ptr<ExpressionNode>> expressions;

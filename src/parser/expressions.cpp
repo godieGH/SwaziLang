@@ -23,9 +23,20 @@ static double safe_stod(const std::string& str, const TokenLocation& loc) {
 
 // ---------- expressions (precedence) ----------
 std::unique_ptr<ExpressionNode> Parser::parse_expression() {
+    // Check for walrus operator: IDENTIFIER ni <expression>
+    if (peek().type == TokenType::IDENTIFIER && peek_next().type == TokenType::NI) {
+        Token idTok = consume();  // consume identifier
+        Token niTok = consume();  // consume 'ni'
+
+        auto node = std::make_unique<AssignmentExpressionNode>();
+        node->token = niTok;
+        node->target_name = idTok.value;
+        node->value = parse_ternary();  // parse the right side
+        return node;
+    }
+
     return parse_ternary();
 }
-
 std::unique_ptr<ExpressionNode> Parser::parse_ternary() {
     auto cond = parse_range();
 

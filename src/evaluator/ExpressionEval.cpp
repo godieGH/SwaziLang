@@ -4899,6 +4899,20 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         return std::monostate{};
     }
 
+    // Walrus operator: x ni <expr>
+    if (auto ae = dynamic_cast<AssignmentExpressionNode*>(expr)) {
+        // Evaluate the right-hand side expression
+        Value result = evaluate_expression(ae->value.get(), env);
+
+        // Create/update the variable in the current environment
+        // Walrus always creates mutable variables (not constants)
+        Environment::Variable var{result, false};
+        env->set(ae->target_name, var);
+
+        // Return the assigned value (so it can be used in conditions)
+        return result;
+    }
+
     throw SwaziError(
         "InternalError",
         "Unhandled expression node encountered in evaluator — this is likely a bug in the interpreter.",

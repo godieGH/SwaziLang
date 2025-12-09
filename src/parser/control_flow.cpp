@@ -5,13 +5,6 @@
 #include "parser.hpp"
 
 std::unique_ptr<ExpressionNode> Parser::parse_condition() {
-    if (peek().type == TokenType::IDENTIFIER && peek_next().type == TokenType::NI) {
-        // consume identifier and 'ni' token
-        consume();  // identifier
-        consume();  // 'ni'
-        // parse the expression after 'ni' as the real condition
-        return parse_expression();
-    }
     return parse_expression();
 }
 

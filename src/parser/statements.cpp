@@ -749,6 +749,15 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
 
     // fallback: expression statement
     auto expr = parse_expression();
+
+    // Reject bare walrus expressions (they must be in expression context, not statement context)
+    if (dynamic_cast<AssignmentExpressionNode*>(expr.get())) {
+        throw SwaziError(
+            "SyntaxError",
+            "Assignment expression ('ni') cannot be used as a statement. Use 'data' for variable declarations.",
+            expr->token.loc);
+    }
+
     if (peek().type == TokenType::SEMICOLON) consume();
     auto stmt = std::make_unique<ExpressionStatementNode>();
     stmt->expression = std::move(expr);
