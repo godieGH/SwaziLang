@@ -28,6 +28,25 @@ using BufferPtr = std::shared_ptr<BufferValue>;
 struct FileValue;
 using FilePtr = std::shared_ptr<FileValue>;
 
+// Helper function for date validation
+inline bool is_valid_date(int year, int month, int day) {
+    if (month < 1 || month > 12) return false;
+    if (day < 1) return false;
+
+    static const int days_in_month[] =
+        {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+    int max_day = days_in_month[month - 1];
+
+    // Leap year check for February
+    if (month == 2) {
+        bool is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        if (is_leap) max_day = 29;
+    }
+
+    return day <= max_day;
+}
+
 struct BufferValue {
     std::vector<uint8_t> data;  // Raw bytes
 
@@ -188,7 +207,9 @@ struct DateTimeValue {
 
         // Adjust for timezone offset (convert offset to nanoseconds)
         int64_t tz_offset_nanos = static_cast<int64_t>(tzOffsetSeconds) * 1'000'000'000LL;
-        int64_t adjusted_nanos = total_nanos - tz_offset_nanos;
+
+        // FIX: local wall-clock = UTC instant + tz offset (not minus)
+        int64_t adjusted_nanos = total_nanos + tz_offset_nanos;
 
         // Split into seconds and fractional nanoseconds
         int64_t total_seconds = adjusted_nanos / 1'000'000'000LL;
@@ -231,50 +252,29 @@ struct DateTimeValue {
         timeStruct.tm_sec = second;
         timeStruct.tm_isdst = -1;
 
-        // Convert to time_t (UTC)
-        std::time_t tt = std::mktime(&timeStruct);
+// Convert to time_t interpreting as UTC
+#ifdef _WIN32
+        std::time_t tt = _mkgmtime(&timeStruct);
+#else
+        std::time_t tt = timegm(&timeStruct);
+#endif
+
         if (tt == -1) {
             throw std::runtime_error("Invalid date/time fields");
         }
 
-        // Adjust back to UTC by applying timezone offset
+        // tt is now UTC epoch seconds
+        // Subtract timezone offset to get the actual UTC instant
+        // (fields are in local timezone, we need UTC epoch)
         using namespace std::chrono;
         auto tp = system_clock::from_time_t(tt);
-        tp += seconds(tzOffsetSeconds);
+        tp -= seconds(tzOffsetSeconds);
 
         // Convert to nanoseconds
         auto since_epoch = tp.time_since_epoch();
         auto nanos = duration_cast<nanoseconds>(since_epoch).count();
 
         epochNanoseconds = static_cast<uint64_t>(nanos) + fractionalNanoseconds;
-    }
-
-    // Add milliseconds (returns new DateTime)
-    std::shared_ptr<DateTimeValue> add_milliseconds(double millis) const {
-        auto newDt = std::make_shared<DateTimeValue>(*this);
-
-        // Convert milliseconds to nanoseconds
-        int64_t nanosToAdd = static_cast<int64_t>(millis * 1000000.0);
-
-        // Handle negative addition (which is subtraction)
-        if (nanosToAdd >= 0) {
-            newDt->epochNanoseconds += static_cast<uint64_t>(nanosToAdd);
-        } else {
-            uint64_t absNanos = static_cast<uint64_t>(-nanosToAdd);
-            if (newDt->epochNanoseconds >= absNanos) {
-                newDt->epochNanoseconds -= absNanos;
-            } else {
-                newDt->epochNanoseconds = 0;  // Clamp to epoch
-            }
-        }
-
-        // Recompute calendar fields
-        newDt->recompute_calendar_fields();
-
-        // Update literal text to reflect new time
-        newDt->update_literal_text();
-
-        return newDt;
     }
 
     // Subtract another datetime (returns milliseconds difference)
@@ -400,6 +400,217 @@ struct DateTimeValue {
         }
 
         literalText = oss.str();
+    }
+
+    // Add days (calendar arithmetic - handles month/year boundaries)
+    std::shared_ptr<DateTimeValue> addDays(int days) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+
+        // Simple approach: convert days to seconds and add to epoch
+        int64_t secondsToAdd = static_cast<int64_t>(days) * 86400LL;
+        int64_t nanosToAdd = secondsToAdd * 1'000'000'000LL;
+
+        if (nanosToAdd >= 0) {
+            newDt->epochNanoseconds += static_cast<uint64_t>(nanosToAdd);
+        } else {
+            uint64_t absNanos = static_cast<uint64_t>(-nanosToAdd);
+            if (newDt->epochNanoseconds >= absNanos) {
+                newDt->epochNanoseconds -= absNanos;
+            } else {
+                newDt->epochNanoseconds = 0;
+            }
+        }
+
+        newDt->recompute_calendar_fields();
+        newDt->update_literal_text();
+        return newDt;
+    }
+
+    // Add months (calendar arithmetic - handles year boundaries and varying month lengths)
+    std::shared_ptr<DateTimeValue> addMonths(int months) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+
+        int totalMonths = newDt->month + months;
+        int yearAdjust = 0;
+
+        // Handle positive overflow
+        while (totalMonths > 12) {
+            totalMonths -= 12;
+            yearAdjust++;
+        }
+
+        // Handle negative overflow
+        while (totalMonths < 1) {
+            totalMonths += 12;
+            yearAdjust--;
+        }
+
+        newDt->year += yearAdjust;
+        newDt->month = totalMonths;
+
+        // Clamp day to valid range for new month (e.g., Jan 31 + 1 month = Feb 28/29)
+        while (!is_valid_date(newDt->year, newDt->month, newDt->day)) {
+            newDt->day--;
+            if (newDt->day < 1) {
+                throw std::runtime_error("Date calculation error in addMonths");
+            }
+        }
+
+        newDt->recompute_epoch_from_fields();
+        newDt->update_literal_text();
+        return newDt;
+    }
+
+    // Add years (calendar arithmetic)
+    std::shared_ptr<DateTimeValue> addYears(int years) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+        newDt->year += years;
+
+        // Handle Feb 29 on leap year -> non-leap year
+        if (newDt->month == 2 && newDt->day == 29) {
+            bool is_leap = (newDt->year % 4 == 0 && newDt->year % 100 != 0) ||
+                (newDt->year % 400 == 0);
+            if (!is_leap) {
+                newDt->day = 28;  // Clamp to Feb 28
+            }
+        }
+
+        newDt->recompute_epoch_from_fields();
+        newDt->update_literal_text();
+        return newDt;
+    }
+
+    // Add hours (instant arithmetic)
+    std::shared_ptr<DateTimeValue> addHours(double hours) const {
+        return addSeconds(hours * 3600.0);
+    }
+
+    // Add minutes (instant arithmetic)
+    std::shared_ptr<DateTimeValue> addMinutes(double minutes) const {
+        return addSeconds(minutes * 60.0);
+    }
+
+    // Add seconds (instant arithmetic)
+    std::shared_ptr<DateTimeValue> addSeconds(double seconds) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+
+        int64_t nanosToAdd = static_cast<int64_t>(seconds * 1'000'000'000.0);
+
+        if (nanosToAdd >= 0) {
+            newDt->epochNanoseconds += static_cast<uint64_t>(nanosToAdd);
+        } else {
+            uint64_t absNanos = static_cast<uint64_t>(-nanosToAdd);
+            if (newDt->epochNanoseconds >= absNanos) {
+                newDt->epochNanoseconds -= absNanos;
+            } else {
+                newDt->epochNanoseconds = 0;
+            }
+        }
+
+        newDt->recompute_calendar_fields();
+        newDt->update_literal_text();
+        return newDt;
+    }
+
+    // Add milliseconds (instant arithmetic)
+    std::shared_ptr<DateTimeValue> addMillis(double millis) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+
+        int64_t nanosToAdd = static_cast<int64_t>(millis * 1'000'000.0);
+
+        if (nanosToAdd >= 0) {
+            newDt->epochNanoseconds += static_cast<uint64_t>(nanosToAdd);
+        } else {
+            uint64_t absNanos = static_cast<uint64_t>(-nanosToAdd);
+            if (newDt->epochNanoseconds >= absNanos) {
+                newDt->epochNanoseconds -= absNanos;
+            } else {
+                newDt->epochNanoseconds = 0;
+            }
+        }
+
+        newDt->recompute_calendar_fields();
+        newDt->update_literal_text();
+        return newDt;
+    }
+
+    // Subtract methods (just negate and add)
+    std::shared_ptr<DateTimeValue> subtractDays(int days) const {
+        return addDays(-days);
+    }
+
+    std::shared_ptr<DateTimeValue> subtractMonths(int months) const {
+        return addMonths(-months);
+    }
+
+    std::shared_ptr<DateTimeValue> subtractYears(int years) const {
+        return addYears(-years);
+    }
+
+    std::shared_ptr<DateTimeValue> subtractHours(double hours) const {
+        return addHours(-hours);
+    }
+
+    std::shared_ptr<DateTimeValue> subtractMinutes(double minutes) const {
+        return addMinutes(-minutes);
+    }
+
+    std::shared_ptr<DateTimeValue> subtractSeconds(double seconds) const {
+        return addSeconds(-seconds);
+    }
+
+    std::shared_ptr<DateTimeValue> subtractMillis(double millis) const {
+        return addMillis(-millis);
+    }
+
+    // Set timezone (returns new DateTime with same instant, different zone)
+    std::shared_ptr<DateTimeValue> setZone(const std::string& zone) const {
+        auto newDt = std::make_shared<DateTimeValue>(*this);
+
+        // Parse zone string
+        if (zone == "UTC" || zone == "Z") {
+            newDt->isUTC = true;
+            newDt->tzOffsetSeconds = 0;
+        } else if (zone.length() >= 3 && (zone[0] == '+' || zone[0] == '-')) {
+            // Parse offset: +HH:MM, +HHMM, or +HH
+            char sign = zone[0];
+            std::string offset_str = zone.substr(1);
+
+            int hours = 0;
+            int minutes = 0;
+
+            // Remove colons
+            size_t colon_pos = offset_str.find(':');
+            if (colon_pos != std::string::npos) {
+                offset_str.erase(colon_pos, 1);
+            }
+
+            // Parse hours and minutes
+            if (offset_str.length() >= 2) {
+                hours = std::stoi(offset_str.substr(0, 2));
+            }
+            if (offset_str.length() >= 4) {
+                minutes = std::stoi(offset_str.substr(2, 2));
+            }
+
+            // Validate
+            if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+                throw std::runtime_error("Invalid timezone offset: hours must be 0-23, minutes 0-59");
+            }
+
+            newDt->tzOffsetSeconds = (hours * 3600 + minutes * 60);
+            if (sign == '-') {
+                newDt->tzOffsetSeconds = -newDt->tzOffsetSeconds;
+            }
+            newDt->isUTC = (newDt->tzOffsetSeconds == 0);
+        } else {
+            throw std::runtime_error("Invalid timezone format. Use 'UTC', '+HH:MM', '+HHMM', or '+HH'");
+        }
+
+        // Recompute calendar fields for new timezone
+        newDt->recompute_calendar_fields();
+        newDt->update_literal_text();
+        return newDt;
     }
 };
 

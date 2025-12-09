@@ -2064,12 +2064,12 @@ static Value apply_reviver_recursive(
         auto new_obj = std::make_shared<ObjectValue>();
 
         for (auto& kv : obj->properties) {
+            // Recursively process child first
             Value child_result = apply_reviver_recursive(
                 kv.second.value, kv.first, reviver_fn, evaluator, callEnv, token, depth + 1);
 
             // Only add if not undefined (monostate returned from reviver means delete)
-            if (!std::holds_alternative<std::monostate>(child_result) ||
-                std::holds_alternative<std::monostate>(kv.second.value)) {
+            if (!std::holds_alternative<std::monostate>(child_result)) {
                 new_obj->properties[kv.first] = PropertyDescriptor{
                     child_result, false, false, false, Token()};
             }
@@ -2083,18 +2083,21 @@ static Value apply_reviver_recursive(
             Value child_result = apply_reviver_recursive(
                 arr->elements[i], std::to_string(i), reviver_fn,
                 evaluator, callEnv, token, depth + 1);
+
+            // Arrays keep undefined values (unlike objects)
             new_arr->elements.push_back(child_result);
         }
         processed_value = Value{new_arr};
     }
 
-    // Now call reviver on this value
+    // Now call reviver on this value (after processing children)
     std::vector<Value> reviver_args = {
         Value{key},
         processed_value};
 
     try {
-        return evaluator->invoke_function(reviver_fn, reviver_args, callEnv, token);
+        Value result = evaluator->invoke_function(reviver_fn, reviver_args, callEnv, token);
+        return result;  // Use the transformed value
     } catch (...) {
         return processed_value;  // On error, return unmodified
     }

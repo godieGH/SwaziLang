@@ -194,6 +194,18 @@ static DateTimePtr parse_iso_datetime(const std::string& iso_str, const Token& t
                         // else: just +HH format, minutes remain 0
                     }
 
+                    // Validate timezone offset
+                    if (tz_hours < 0 || tz_hours > 23) {
+                        throw SwaziError("ValueError",
+                            "Invalid timezone hour: " + std::to_string(tz_hours) + " (must be 0-23)",
+                            token.loc);
+                    }
+                    if (tz_mins < 0 || tz_mins > 59) {
+                        throw SwaziError("ValueError",
+                            "Invalid timezone minute: " + std::to_string(tz_mins) + " (must be 0-59)",
+                            token.loc);
+                    }
+
                     dt->tzOffsetSeconds = (tz_hours * 3600 + tz_mins * 60);
                     if (sign == '-') dt->tzOffsetSeconds = -dt->tzOffsetSeconds;
                     dt->isUTC = (dt->tzOffsetSeconds == 0);
@@ -240,6 +252,14 @@ static DateTimePtr parse_iso_datetime(const std::string& iso_str, const Token& t
     if (dt->second < 0 || dt->second > 59) {
         throw SwaziError("ValueError",
             "Invalid second: " + std::to_string(dt->second), token.loc);
+    }
+
+    // Validate date (after parsing year, month, day)
+    if (!is_valid_date(dt->year, dt->month, dt->day)) {
+        throw SwaziError("ValueError",
+            "Invalid date: " + std::to_string(dt->year) + "-" +
+                std::to_string(dt->month) + "-" + std::to_string(dt->day),
+            token.loc);
     }
 
     // Compute epoch from fields
@@ -390,6 +410,15 @@ static Value native_time_date(const std::vector<Value>& args, EnvPtr, const Toke
         throw SwaziError("ValueError",
             "fractionalNanoseconds must be less than 1,000,000,000 (1 second), got: " +
                 std::to_string(fractional_nanos),
+            token.loc);
+    }
+
+    // Validate date components together
+    if (!is_valid_date(year, month, day)) {
+        throw SwaziError("ValueError",
+            "Invalid date: " + std::to_string(year) + "-" +
+                std::to_string(month) + "-" + std::to_string(day) +
+                " (e.g., Feb 30 doesn't exist)",
             token.loc);
     }
 

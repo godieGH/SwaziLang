@@ -1175,17 +1175,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 if (prop == "ms") {
                     return Value{static_cast<double>(dt->fractionalNanoseconds / 1000000)};
                 }
-                if (prop == "microsecond" || prop == "us") {
-                    // Microseconds component (0-999999)
-                    return Value{static_cast<double>(dt->fractionalNanoseconds) / 1000.0};
-                }
-                if (prop == "nanosecond" || prop == "ns") {
-                    // Nanoseconds component (0-999999999)
-                    return Value{static_cast<double>(dt->fractionalNanoseconds)};
-                }
                 if (prop == "isUTC") return Value{dt->isUTC};
                 if (prop == "zone") {
-                    // Format timezone offset as string: "+HH:MM" or "-HH:MM" or "UTC"
                     if (dt->isUTC) {
                         return Value{std::string("UTC")};
                     }
@@ -1200,106 +1191,265 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     return Value{oss.str()};
                 }
                 if (prop == "epochMillis") {
-                    // Total milliseconds since Unix epoch
                     return Value{static_cast<double>(dt->epochNanoseconds) / 1000000.0};
                 }
                 if (prop == "epochSeconds") {
-                    // Total seconds since Unix epoch
                     return Value{static_cast<double>(dt->epochNanoseconds) / 1000000000.0};
                 }
 
                 // Methods (return FunctionPtr)
-                if (prop == "toStr") {
-                    auto native_impl = [dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                        if (args.empty()) {
-                            // No format: return literalText
-                            return Value{dt->literalText};
-                        }
-
-                        if (!std::holds_alternative<std::string>(args[0])) {
-                            throw SwaziError("TypeError",
-                                "date.toStr() expects a format string",
-                                token.loc);
-                        }
-
-                        try {
-                            std::string fmt = std::get<std::string>(args[0]);
-                            return Value{dt->format(fmt)};
-                        } catch (const std::exception& e) {
-                            throw SwaziError("ValueError",
-                                std::string("Format error: ") + e.what(),
-                                token.loc);
-                        }
+                auto make_dt_fn = [this, dt, env, mem](auto impl) -> Value {
+                    auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                        return impl(args, callEnv, token);
                     };
                     return Value{std::make_shared<FunctionValue>(
-                        "native:datetime.toStr", native_impl, env, mem->token)};
+                        "native:datetime." + mem->property, native_impl, env, mem->token)};
+                };
+
+                if (prop == "toStr") {
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            return Value{dt->literalText};
+                        }
+                        if (!std::holds_alternative<std::string>(args[0])) {
+                            throw SwaziError("TypeError", "toStr() expects a format string", token.loc);
+                        }
+                        try {
+                            return Value{dt->format(std::get<std::string>(args[0]))};
+                        } catch (const std::exception& e) {
+                            throw SwaziError("ValueError", std::string("Format error: ") + e.what(), token.loc);
+                        }
+                    });
                 }
 
                 if (prop == "strftime") {
-                    // Alias for toStr but requires format argument
-                    auto native_impl = [dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                         if (args.empty()) {
-                            throw SwaziError("TypeError",
-                                "strftime() requires a format string argument",
-                                token.loc);
+                            throw SwaziError("TypeError", "strftime() requires a format string", token.loc);
                         }
-
                         if (!std::holds_alternative<std::string>(args[0])) {
-                            throw SwaziError("TypeError",
-                                "strftime() expects a format string",
-                                token.loc);
+                            throw SwaziError("TypeError", "strftime() expects a format string", token.loc);
                         }
-
                         try {
-                            std::string fmt = std::get<std::string>(args[0]);
-                            return Value{dt->format(fmt)};
+                            return Value{dt->format(std::get<std::string>(args[0]))};
                         } catch (const std::exception& e) {
-                            throw SwaziError("ValueError",
-                                std::string("strftime error: ") + e.what(),
-                                token.loc);
+                            throw SwaziError("ValueError", std::string("strftime error: ") + e.what(), token.loc);
                         }
-                    };
-                    return Value{std::make_shared<FunctionValue>(
-                        "native:datetime.strftime", native_impl, env, mem->token)};
+                    });
                 }
 
                 if (prop == "toISO") {
-                    // ISO 8601 format
-                    auto native_impl = [dt](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return make_dt_fn([dt](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
                         return Value{dt->literalText};
-                    };
-                    return Value{std::make_shared<FunctionValue>(
-                        "native:datetime.toISO", native_impl, env, mem->token)};
+                    });
                 }
 
                 if (prop == "toUTC") {
-                    // Convert to UTC timezone
-                    auto native_impl = [dt](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+                    return make_dt_fn([dt](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
                         try {
-                            auto utcDt = std::make_shared<DateTimeValue>(*dt);
-
-                            // Adjust epoch by removing timezone offset
-                            if (!utcDt->isUTC && utcDt->tzOffsetSeconds != 0) {
-                                using namespace std::chrono;
-                                utcDt->epochNanoseconds += static_cast<uint64_t>(
-                                                               std::abs(utcDt->tzOffsetSeconds) * 1000000000LL) *
-                                    (utcDt->tzOffsetSeconds < 0 ? -1 : 1);
-
-                                utcDt->isUTC = true;
-                                utcDt->tzOffsetSeconds = 0;
-                                utcDt->recompute_calendar_fields();
-                                utcDt->update_literal_text();
-                            }
-
-                            return Value{utcDt};
+                            return Value{dt->setZone("UTC")};
                         } catch (const std::exception& e) {
-                            throw SwaziError("ValueError",
-                                std::string("UTC conversion error: ") + e.what(),
-                                token.loc);
+                            throw SwaziError("ValueError", std::string("UTC conversion error: ") + e.what(), token.loc);
                         }
-                    };
-                    return Value{std::make_shared<FunctionValue>(
-                        "native:datetime.toUTC", native_impl, env, mem->token)};
+                    });
+                }
+
+                // Arithmetic methods
+                if (prop == "addDays") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addDays() requires a numeric argument", token.loc);
+                        int days = static_cast<int>(to_number(args[0], token));
+                        return Value{dt->addDays(days)};
+                    });
+                }
+
+                if (prop == "addMonths") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addMonths() requires a numeric argument", token.loc);
+                        int months = static_cast<int>(to_number(args[0], token));
+                        return Value{dt->addMonths(months)};
+                    });
+                }
+
+                if (prop == "addYears") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addYears() requires a numeric argument", token.loc);
+                        int years = static_cast<int>(to_number(args[0], token));
+                        return Value{dt->addYears(years)};
+                    });
+                }
+
+                if (prop == "addHours") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addHours() requires a numeric argument", token.loc);
+                        double hours = to_number(args[0], token);
+                        return Value{dt->addHours(hours)};
+                    });
+                }
+
+                if (prop == "addMinutes") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addMinutes() requires a numeric argument", token.loc);
+                        double minutes = to_number(args[0], token);
+                        return Value{dt->addMinutes(minutes)};
+                    });
+                }
+
+                if (prop == "addSeconds") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addSeconds() requires a numeric argument", token.loc);
+                        double seconds = to_number(args[0], token);
+                        return Value{dt->addSeconds(seconds)};
+                    });
+                }
+
+                if (prop == "addMillis") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "addMillis() requires a numeric argument", token.loc);
+                        double millis = to_number(args[0], token);
+                        return Value{dt->addMillis(millis)};
+                    });
+                }
+
+                // Subtract methods
+                if (prop == "subtractDays") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractDays() requires a numeric argument", token.loc);
+                        int days = static_cast<int>(to_number(args[0], token));
+                        return Value{dt->subtractDays(days)};
+                    });
+                }
+
+                if (prop == "subtractMonths") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractMonths() requires a numeric argument", token.loc);
+                        int months = static_cast<int>(to_number(args[0], token));
+                        return Value{dt->subtractMonths(months)};
+                    });
+                }
+
+                if (prop == "subtractYears") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractYears() requires a numeric argument", token.loc);
+                        int years = static_cast<int>(to_number(args[0], token));
+                        return Value{dt->subtractYears(years)};
+                    });
+                }
+
+                if (prop == "subtractHours") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractHours() requires a numeric argument", token.loc);
+                        double hours = to_number(args[0], token);
+                        return Value{dt->subtractHours(hours)};
+                    });
+                }
+
+                if (prop == "subtractMinutes") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractMinutes() requires a numeric argument", token.loc);
+                        double minutes = to_number(args[0], token);
+                        return Value{dt->subtractMinutes(minutes)};
+                    });
+                }
+
+                if (prop == "subtractSeconds") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractSeconds() requires a numeric argument", token.loc);
+                        double seconds = to_number(args[0], token);
+                        return Value{dt->subtractSeconds(seconds)};
+                    });
+                }
+
+                if (prop == "subtractMillis") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "subtractMillis() requires a numeric argument", token.loc);
+                        double millis = to_number(args[0], token);
+                        return Value{dt->subtractMillis(millis)};
+                    });
+                }
+
+                if (prop == "setZone") {
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) throw SwaziError("TypeError", "setZone() requires a timezone string", token.loc);
+                        if (!std::holds_alternative<std::string>(args[0])) {
+                            throw SwaziError("TypeError", "setZone() expects a string (e.g., 'UTC', '+05:30')", token.loc);
+                        }
+                        try {
+                            return Value{dt->setZone(std::get<std::string>(args[0]))};
+                        } catch (const std::exception& e) {
+                            throw SwaziError("ValueError", std::string("setZone error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                if (prop == "getLocale" || prop == "toLocale") {
+                    return make_dt_fn([this, dt](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                        // Helper: compute local offset (seconds) for a given epoch seconds.
+                        auto local_tz_offset_for_seconds = [](std::time_t tt) -> int32_t {
+                            std::tm local_tm{};
+#ifdef _WIN32
+                            localtime_s(&local_tm, &tt);
+#else
+                            localtime_r(&tt, &local_tm);
+#endif
+
+                            // If the platform provides tm_gmtoff (most BSDs, macOS, modern glibc), use it directly.
+#if defined(__APPLE__) || defined(__FreeBSD__) || (defined(__GLIBC__) && defined(_BSD_SOURCE)) || defined(__linux__)
+// tm_gmtoff is seconds east of UTC (positive east). Use it if present.
+#if defined(__USE_MISC) || defined(__USE_BSD) || defined(__GLIBC__)
+                            // The field may be present as local_tm.tm_gmtoff on many Unix-like systems
+                            // Use a cast to int32_t to match tzOffsetSeconds semantics
+                            return static_cast<int32_t>(local_tm.tm_gmtoff);
+#endif
+#endif
+
+                            // Portable fallback:
+                            // Build a GMT broken-down time for the same epoch and compute the difference:
+                            std::tm gmt_tm{};
+#ifdef _WIN32
+                            gmtime_s(&gmt_tm, &tt);
+#else
+                            gmtime_r(&tt, &gmt_tm);
+#endif
+
+                            // Use copies because mktime/timegm may modify the tm struct
+                            std::tm local_copy = local_tm;
+                            std::tm gmt_copy = gmt_tm;
+
+                            // Convert local broken-down time to epoch assuming local interpretation
+                            std::time_t local_epoch = mktime(&local_copy);
+
+                            // Convert GMT broken-down time to epoch (interpreting gmt_copy as UTC)
+#ifdef _WIN32
+                            std::time_t utc_epoch = _mkgmtime(&gmt_copy);
+#else
+                            std::time_t utc_epoch = timegm(&gmt_copy);
+#endif
+
+                            // local_epoch - utc_epoch == seconds east of UTC (positive if local is ahead of UTC)
+                            double diff = std::difftime(local_epoch, utc_epoch);
+                            return static_cast<int32_t>(diff);
+                        };
+                        // Compute epoch seconds from dt->epochNanoseconds (int64)
+                        int64_t nanos = static_cast<int64_t>(dt->epochNanoseconds);
+                        std::time_t seconds = static_cast<std::time_t>(nanos / 1'000'000'000LL);
+
+                        int32_t local_offset = 0;
+                        try {
+                            local_offset = local_tz_offset_for_seconds(seconds);
+                        } catch (...) {
+                            // on error, default to UTC (offset 0)
+                            local_offset = 0;
+                        }
+
+                        // Create a copy of the DateTimeValue preserving the instant but with local tz applied
+                        auto newDt = std::make_shared<DateTimeValue>(*dt);
+                        newDt->tzOffsetSeconds = local_offset;
+                        newDt->isUTC = (local_offset == 0);
+                        newDt->recompute_calendar_fields();
+                        newDt->update_literal_text();
+                        return Value{newDt};
+                    });
                 }
 
                 throw SwaziError("ReferenceError",
@@ -4205,60 +4355,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // For all other binary operators evaluate RHS now (both operands required)
         Value right = evaluate_expression(b->right.get(), env);
 
-        // DateTime binary operations (before regular arithmetic)
+        // DateTime binary operations - ONLY comparisons allowed
         if (std::holds_alternative<DateTimePtr>(left) || std::holds_alternative<DateTimePtr>(right)) {
             DateTimePtr dtLeft = std::holds_alternative<DateTimePtr>(left) ? std::get<DateTimePtr>(left) : nullptr;
             DateTimePtr dtRight = std::holds_alternative<DateTimePtr>(right) ? std::get<DateTimePtr>(right) : nullptr;
 
-            // DateTime + number (milliseconds) -> DateTime
-            if (op == "+" && dtLeft && std::holds_alternative<double>(right)) {
-                double millisToAdd = std::get<double>(right);
-                try {
-                    return Value{dtLeft->add_milliseconds(millisToAdd)};
-                } catch (const std::exception& e) {
-                    throw SwaziError("ValueError",
-                        std::string("DateTime arithmetic error: ") + e.what(),
-                        b->token.loc);
-                }
-            }
-
-            // number + DateTime (milliseconds) -> DateTime (commutative)
-            if (op == "+" && dtRight && std::holds_alternative<double>(left)) {
-                double millisToAdd = std::get<double>(left);
-                try {
-                    return Value{dtRight->add_milliseconds(millisToAdd)};
-                } catch (const std::exception& e) {
-                    throw SwaziError("ValueError",
-                        std::string("DateTime arithmetic error: ") + e.what(),
-                        b->token.loc);
-                }
-            }
-
-            // DateTime - number (milliseconds) -> DateTime
-            if (op == "-" && dtLeft && std::holds_alternative<double>(right)) {
-                double millisToSubtract = std::get<double>(right);
-                try {
-                    return Value{dtLeft->add_milliseconds(-millisToSubtract)};
-                } catch (const std::exception& e) {
-                    throw SwaziError("ValueError",
-                        std::string("DateTime arithmetic error: ") + e.what(),
-                        b->token.loc);
-                }
-            }
-
-            // DateTime - DateTime -> number (milliseconds difference)
-            if (op == "-" && dtLeft && dtRight) {
-                try {
-                    double diff = dtLeft->subtract_datetime(*dtRight);
-                    return Value{diff};
-                } catch (const std::exception& e) {
-                    throw SwaziError("ValueError",
-                        std::string("DateTime subtraction error: ") + e.what(),
-                        b->token.loc);
-                }
-            }
-
-            // Comparison operators (use epochNanoseconds)
+            // Comparison operators (both operands must be DateTime)
             if (dtLeft && dtRight) {
                 if (op == "==" || op == "sawa") {
                     return Value{dtLeft->epochNanoseconds == dtRight->epochNanoseconds};
@@ -4267,7 +4369,6 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     return Value{dtLeft->epochNanoseconds != dtRight->epochNanoseconds};
                 }
                 if (op == "===") {
-                    // Strict equality: same instant in time
                     return Value{dtLeft->epochNanoseconds == dtRight->epochNanoseconds};
                 }
                 if (op == "!==") {
@@ -4287,8 +4388,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 }
             }
 
+            // Any other operator with DateTime is an error
             throw SwaziError("TypeError",
-                "Invalid operation '" + op + "' on datetime value",
+                "DateTime values only support comparison operators (==, !=, <, >, <=, >=). "
+                "Use instance methods like .addDays(), .addMillis() for arithmetic.",
                 b->token.loc);
         }
 
