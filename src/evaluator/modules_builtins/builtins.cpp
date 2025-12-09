@@ -1814,6 +1814,13 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
 }
 
 // ----------------- JSON module (parse & stringify) -----------------
+// Exception for signaling property removal in JSON stringify replacer
+class RemovePropertyException : public std::exception {
+   public:
+    const char* what() const noexcept override {
+        return "Property should be removed";
+    }
+};
 namespace {
 // Minimal JSON parser / stringify routines
 struct JsonParser {
@@ -2006,6 +2013,93 @@ static std::string json_stringify_string(const std::string& s) {
     return out.str();
 }
 
+// Helper to apply replacer with remove() function and depth
+static std::pair<bool, Value> apply_replacer_with_context(
+    const std::string& key,
+    const Value& value,
+    int depth,
+    FunctionPtr replacer_fn,
+    Evaluator* evaluator,
+    EnvPtr callEnv,
+    const Token& token) {
+    if (!replacer_fn || !evaluator) {
+        return {true, value};
+    }
+
+    // Create the remove() function
+    auto remove_fn = make_native_fn("remove", [](const std::vector<Value>&, EnvPtr, const Token&) -> Value { throw RemovePropertyException(); }, callEnv);
+
+    std::vector<Value> replacer_args = {
+        Value{key},                        // key
+        value,                             // value
+        Value{remove_fn},                  // remove function
+        Value{static_cast<double>(depth)}  // depth
+    };
+
+    try {
+        Value result = evaluator->invoke_function(
+            replacer_fn, replacer_args, callEnv, token);
+        return {true, result};
+    } catch (const RemovePropertyException&) {
+        return {false, Value{}};  // Signal removal
+    } catch (...) {
+        return {false, Value{}};  // Error also removes
+    }
+}
+
+// Helper to apply reviver recursively
+static Value apply_reviver_recursive(
+    const Value& value,
+    const std::string& key,
+    FunctionPtr reviver_fn,
+    Evaluator* evaluator,
+    EnvPtr callEnv,
+    const Token& token,
+    int depth) {
+    // Process children first (bottom-up)
+    Value processed_value = value;
+
+    if (std::holds_alternative<ObjectPtr>(value)) {
+        ObjectPtr obj = std::get<ObjectPtr>(value);
+        auto new_obj = std::make_shared<ObjectValue>();
+
+        for (auto& kv : obj->properties) {
+            Value child_result = apply_reviver_recursive(
+                kv.second.value, kv.first, reviver_fn, evaluator, callEnv, token, depth + 1);
+
+            // Only add if not undefined (monostate returned from reviver means delete)
+            if (!std::holds_alternative<std::monostate>(child_result) ||
+                std::holds_alternative<std::monostate>(kv.second.value)) {
+                new_obj->properties[kv.first] = PropertyDescriptor{
+                    child_result, false, false, false, Token()};
+            }
+        }
+        processed_value = Value{new_obj};
+    } else if (std::holds_alternative<ArrayPtr>(value)) {
+        ArrayPtr arr = std::get<ArrayPtr>(value);
+        auto new_arr = std::make_shared<ArrayValue>();
+
+        for (size_t i = 0; i < arr->elements.size(); ++i) {
+            Value child_result = apply_reviver_recursive(
+                arr->elements[i], std::to_string(i), reviver_fn,
+                evaluator, callEnv, token, depth + 1);
+            new_arr->elements.push_back(child_result);
+        }
+        processed_value = Value{new_arr};
+    }
+
+    // Now call reviver on this value
+    std::vector<Value> reviver_args = {
+        Value{key},
+        processed_value};
+
+    try {
+        return evaluator->invoke_function(reviver_fn, reviver_args, callEnv, token);
+    } catch (...) {
+        return processed_value;  // On error, return unmodified
+    }
+}
+
 static std::string json_stringify_value_enhanced(
     const Value& v,
     Evaluator* evaluator,
@@ -2046,25 +2140,22 @@ static std::string json_stringify_value_enhanced(
         ss << '[';
 
         bool first = true;
-        // REMOVE THE DUPLICATE LOOP - KEEP ONLY THIS ONE:
         for (size_t i = 0; i < a->elements.size(); ++i) {
             Value element = a->elements[i];
 
             // Apply replacer if provided
             if (replacer_fn && evaluator) {
-                std::vector<Value> replacer_args = {
-                    Value{std::to_string(i)},
-                    element};
-                try {
-                    element = evaluator->invoke_function(
-                        replacer_fn, replacer_args, callEnv, token);
-                } catch (...) {
-                    // Skip this element if replacer throws
-                    continue;
+                auto result = apply_replacer_with_context(
+                    std::to_string(i), element, depth,
+                    replacer_fn, evaluator, callEnv, token);
+
+                if (!result.first) {
+                    continue;  // Skip removed element
                 }
+                element = result.second;
             }
 
-            // Add separator
+            // Add separator and indentation
             if (!first) {
                 ss << ',';
                 if (!indent.empty()) {
@@ -2080,8 +2171,7 @@ static std::string json_stringify_value_enhanced(
             }
 
             ss << json_stringify_value_enhanced(element, evaluator, objvisited,
-                arrvisited, token, whitelist,
-                replacer_fn, callEnv, indent, depth + 1);
+                arrvisited, token, whitelist, replacer_fn, callEnv, indent, depth + 1);
         }
 
         if (!indent.empty() && !a->elements.empty()) {
@@ -2118,18 +2208,16 @@ static std::string json_stringify_value_enhanced(
 
             Value prop_value = kv.second.value;
 
+            // Apply replacer if provided
             if (replacer_fn && evaluator) {
-                std::vector<Value> replacer_args = {
-                    Value{kv.first},  // key
-                    prop_value        // value
-                };
-                try {
-                    prop_value = evaluator->invoke_function(
-                        replacer_fn, replacer_args, callEnv, token);
-                } catch (...) {
-                    // If replacer throws, skip this property
-                    continue;
+                auto result = apply_replacer_with_context(
+                    kv.first, prop_value, depth,
+                    replacer_fn, evaluator, callEnv, token);
+
+                if (!result.first) {
+                    continue;  // Skip removed property
                 }
+                prop_value = result.second;
             }
 
             if (!first) {
@@ -2148,7 +2236,8 @@ static std::string json_stringify_value_enhanced(
 
             ss << json_stringify_string(kv.first) << ':';
             if (!indent.empty()) ss << ' ';
-            ss << json_stringify_value_enhanced(prop_value, evaluator, objvisited, arrvisited, token, whitelist, replacer_fn, callEnv, indent, depth + 1);
+            ss << json_stringify_value_enhanced(prop_value, evaluator, objvisited,
+                arrvisited, token, whitelist, replacer_fn, callEnv, indent, depth + 1);
         }
 
         if (!indent.empty() && !o->properties.empty()) {
@@ -2166,20 +2255,32 @@ static std::string json_stringify_value_enhanced(
 }
 
 }  // namespace
-
 std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
 
-    // json.parse(str) -> Value
+    // json.parse(str, reviver?) -> Value
     {
-        auto fn = make_native_fn("json.parse", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.empty()) return Value{ std::monostate{} };
+        auto fn = make_native_fn("json.parse", [evaluator](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+            if (args.empty()) return Value{std::monostate{}};
             std::string txt = value_to_string_simple(args[0]);
+            
+            // Parse reviver function (second parameter)
+            FunctionPtr reviver_fn = nullptr;
+            if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
+                reviver_fn = std::get<FunctionPtr>(args[1]);
+            }
+            
             try {
                 JsonParser p(txt);
                 Value v = p.parseValue();
+                
+                // Apply reviver if provided
+                if (reviver_fn && evaluator) {
+                    v = apply_reviver_recursive(v, "", reviver_fn, evaluator, callEnv, token, 0);
+                }
+                
                 return v;
-            } catch (const std::exception &e) {
+            } catch (const std::exception& e) {
                 throw SwaziError("JsonError", std::string("json.parse failed: ") + e.what(), token.loc);
             } }, env);
         obj->properties["parse"] = PropertyDescriptor{fn, false, false, false, Token()};
@@ -2188,54 +2289,69 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator)
     // json.stringify(val, replacer?, spaces?) -> string
     {
         auto fn = make_native_fn("json.stringify", [evaluator](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
-        if (args.empty()) return Value();
-        
-        // Parse replacer parameter (can be array or function)
-        std::vector<std::string> whitelist;
-        FunctionPtr replacer_fn = nullptr;
-        
-        if (args.size() >= 2 && !std::holds_alternative<std::monostate>(args[1])) {
-            if (std::holds_alternative<ArrayPtr>(args[1])) {
-                // Whitelist mode: only include keys in the array
-                ArrayPtr arr = std::get<ArrayPtr>(args[1]);
-                for (const auto& el : arr->elements) {
-                    whitelist.push_back(value_to_string_simple(el));
+            if (args.empty()) return Value{std::string("")};
+            
+            // Parse replacer parameter (can be array or function)
+            std::vector<std::string> whitelist;
+            FunctionPtr replacer_fn = nullptr;
+            
+            if (args.size() >= 2 && !std::holds_alternative<std::monostate>(args[1])) {
+                if (std::holds_alternative<ArrayPtr>(args[1])) {
+                    // Whitelist mode: only include keys in the array
+                    ArrayPtr arr = std::get<ArrayPtr>(args[1]);
+                    for (const auto& el : arr->elements) {
+                        whitelist.push_back(value_to_string_simple(el));
+                    }
+                } else if (std::holds_alternative<FunctionPtr>(args[1])) {
+                    // Function replacer mode
+                    replacer_fn = std::get<FunctionPtr>(args[1]);
                 }
-            } else if (std::holds_alternative<FunctionPtr>(args[1])) {
-                // Function replacer mode
-                replacer_fn = std::get<FunctionPtr>(args[1]);
             }
-        }
-        
-        // Parse spaces parameter
-        std::string indent;
-        if (args.size() >= 3 && std::holds_alternative<double>(args[2])) {
-            int spaces = static_cast<int>(std::get<double>(args[2]));
-            spaces = std::max(0, std::min(10, spaces)); // clamp to 0-10
-            if (spaces > 0) {
-                indent = std::string(spaces, ' ');
+            
+            // Parse spaces parameter
+            std::string indent;
+            if (args.size() >= 3 && std::holds_alternative<double>(args[2])) {
+                int spaces = static_cast<int>(std::get<double>(args[2]));
+                spaces = std::max(0, std::min(10, spaces)); // clamp to 0-10
+                if (spaces > 0) {
+                    indent = std::string(spaces, ' ');
+                }
+            } else if (args.size() >= 3 && std::holds_alternative<std::string>(args[2])) {
+                indent = std::get<std::string>(args[2]);
+                if (indent.length() > 10) indent = indent.substr(0, 10);
             }
-        } else if (args.size() >= 3 && std::holds_alternative<std::string>(args[2])) {
-            // Can also be a string (like "\t")
-            indent = std::get<std::string>(args[2]);
-            if (indent.length() > 10) indent = indent.substr(0, 10);
-        }
-        
-        std::unordered_set<const ObjectValue*> objvisited;
-        std::unordered_set<const ArrayValue*> arrvisited;
-        
-        return Value{ json_stringify_value_enhanced(
-            args[0], 
-            evaluator,
-            objvisited, 
-            arrvisited, 
-            token,
-            whitelist,
-            replacer_fn,
-            callEnv,
-            indent,
-            0  
-        )}; }, env);
+            
+            std::unordered_set<const ObjectValue*> objvisited;
+            std::unordered_set<const ArrayValue*> arrvisited;
+            
+            // Call root with empty key first if replacer exists
+            Value root_value = args[0];
+            if (replacer_fn && evaluator) {
+                try {
+                    auto remove_result = apply_replacer_with_context(
+                        "", root_value, 0, replacer_fn, evaluator, callEnv, token);
+                    if (!remove_result.first) {
+                        // Root was removed
+                        return Value{std::string("undefined")};
+                    }
+                    root_value = remove_result.second;
+                } catch (...) {
+                    return Value{std::string("undefined")};
+                }
+            }
+            
+            return Value{json_stringify_value_enhanced(
+                root_value, 
+                evaluator,
+                objvisited, 
+                arrvisited, 
+                token,
+                whitelist,
+                replacer_fn,
+                callEnv,
+                indent,
+                0  
+            )}; }, env);
         obj->properties["stringify"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
