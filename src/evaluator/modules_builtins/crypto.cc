@@ -11,6 +11,44 @@
 #include <algorithm>
 #include <cstring>
 
+// ============= STATEFUL CRYPTO STATE HOLDERS =============
+
+struct HashState {
+    std::string algorithm;
+    crypto_hash_sha256_state sha256_state;
+    crypto_hash_sha512_state sha512_state;
+    bool finalized = false;
+};
+
+struct HmacState {
+    std::string algorithm;
+    crypto_auth_hmacsha256_state sha256_state;
+    crypto_auth_hmacsha512_state sha512_state;
+    bool finalized = false;
+};
+
+struct SecretBoxEncryptState {
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> nonce;
+    crypto_secretstream_xchacha20poly1305_state state;
+    bool initialized = false;
+    bool finalized = false;
+};
+
+struct SecretBoxDecryptState {
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> nonce;
+    crypto_secretstream_xchacha20poly1305_state state;
+    bool initialized = false;
+    bool finalized = false;
+};
+
+struct SignState {
+    std::vector<uint8_t> secret_key;
+    crypto_hash_sha512_state hash_state;  // We'll hash then sign
+    bool finalized = false;
+};
+
 // Helper: convert Value to string
 static std::string value_to_string_simple_crypto(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
@@ -121,6 +159,100 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         obj->properties["hash"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
 
+    // crypto.createHash(algorithm) -> HashState object
+    {
+        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "crypto.createHash requires algorithm", token.loc);
+            }
+
+            std::string algo = value_to_string_simple_crypto(args[0]);
+
+            auto state = std::make_shared<HashState>();
+            state->algorithm = algo;
+
+            if (algo == "sha256") {
+                crypto_hash_sha256_init(&state->sha256_state);
+            } else if (algo == "sha512") {
+                crypto_hash_sha512_init(&state->sha512_state);
+            } else {
+                throw SwaziError("CryptoError",
+                    "Unknown algorithm: " + algo + ". Supported: sha256, sha512", token.loc);
+            }
+
+            // Create object with methods
+            auto obj = std::make_shared<ObjectValue>();
+
+            // update(data) method
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Hash already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                std::vector<uint8_t> data;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    data = std::get<BufferPtr>(args[0])->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    data.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
+                }
+
+                if (state->algorithm == "sha256") {
+                    crypto_hash_sha256_update(&state->sha256_state, data.data(), data.size());
+                } else {
+                    crypto_hash_sha512_update(&state->sha512_state, data.data(), data.size());
+                }
+
+                return std::monostate{};
+            };
+
+            // finalize() method
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Hash already finalized", token.loc);
+                }
+
+                auto result = std::make_shared<BufferValue>();
+
+                if (state->algorithm == "sha256") {
+                    result->data.resize(crypto_hash_sha256_BYTES);
+                    crypto_hash_sha256_final(&state->sha256_state, result->data.data());
+                } else {
+                    result->data.resize(crypto_hash_sha512_BYTES);
+                    crypto_hash_sha512_final(&state->sha512_state, result->data.data());
+                }
+
+                state->finalized = true;
+                result->encoding = "binary";
+                return Value{result};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.createHash", fn, env, tok);
+        obj->properties["createHash"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+
     // ============= HMAC =============
 
     // crypto.hmac(algorithm, key, data) -> Buffer
@@ -176,6 +308,109 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         tok.loc = TokenLocation("<crypto>", 0, 0, 0);
         auto fn_value = std::make_shared<FunctionValue>("crypto.hmac", fn, env, tok);
         obj->properties["hmac"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+
+    // crypto.createHmac(algorithm, key) -> HmacState object
+    {
+        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("TypeError", "crypto.createHmac requires (algorithm, key)", token.loc);
+            }
+
+            std::string algo = value_to_string_simple_crypto(args[0]);
+
+            std::vector<uint8_t> key;
+            if (std::holds_alternative<BufferPtr>(args[1])) {
+                key = std::get<BufferPtr>(args[1])->data;
+            } else if (std::holds_alternative<std::string>(args[1])) {
+                std::string str = std::get<std::string>(args[1]);
+                key.assign(str.begin(), str.end());
+            } else {
+                throw SwaziError("TypeError", "key must be Buffer or string", token.loc);
+            }
+
+            auto state = std::make_shared<HmacState>();
+            state->algorithm = algo;
+
+            if (algo == "sha256") {
+                crypto_auth_hmacsha256_init(&state->sha256_state, key.data(), key.size());
+            } else if (algo == "sha512") {
+                crypto_auth_hmacsha512_init(&state->sha512_state, key.data(), key.size());
+            } else {
+                throw SwaziError("CryptoError",
+                    "Unknown algorithm: " + algo + ". Supported: sha256, sha512", token.loc);
+            }
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // update(data) method
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "HMAC already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                std::vector<uint8_t> data;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    data = std::get<BufferPtr>(args[0])->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    data.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
+                }
+
+                if (state->algorithm == "sha256") {
+                    crypto_auth_hmacsha256_update(&state->sha256_state, data.data(), data.size());
+                } else {
+                    crypto_auth_hmacsha512_update(&state->sha512_state, data.data(), data.size());
+                }
+
+                return std::monostate{};
+            };
+
+            // finalize() method
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "HMAC already finalized", token.loc);
+                }
+
+                auto result = std::make_shared<BufferValue>();
+
+                if (state->algorithm == "sha256") {
+                    result->data.resize(crypto_auth_hmacsha256_BYTES);
+                    crypto_auth_hmacsha256_final(&state->sha256_state, result->data.data());
+                } else {
+                    result->data.resize(crypto_auth_hmacsha512_BYTES);
+                    crypto_auth_hmacsha512_final(&state->sha512_state, result->data.data());
+                }
+
+                state->finalized = true;
+                result->encoding = "binary";
+                return Value{result};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.createHmac", fn, env, tok);
+        obj->properties["createHmac"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
 
     // ============= RANDOM =============
@@ -381,6 +616,241 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             fn_decrypt, env, tok);
         secretbox_obj->properties["decrypt"] = PropertyDescriptor{fn_decrypt_value, false, false, false, tok};
 
+        // crypto.secretbox.createEncryptor(key) -> Encryptor object
+        auto fn_create_encryptor = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "createEncryptor requires key", token.loc);
+            }
+
+            BufferPtr key_buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                key_buf = std::get<BufferPtr>(args[0]);
+            } else {
+                throw SwaziError("TypeError", "key must be Buffer", token.loc);
+            }
+
+            if (key_buf->data.size() != crypto_secretstream_xchacha20poly1305_KEYBYTES) {
+                throw SwaziError("CryptoError",
+                    "key must be exactly " + std::to_string(crypto_secretstream_xchacha20poly1305_KEYBYTES) + " bytes",
+                    token.loc);
+            }
+
+            auto state = std::make_shared<SecretBoxEncryptState>();
+            state->key = key_buf->data;
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // init() -> header (must be called first, returns header to prepend to ciphertext)
+            auto init_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->initialized) {
+                    throw SwaziError("CryptoError", "Encryptor already initialized", token.loc);
+                }
+
+                auto header = std::make_shared<BufferValue>();
+                header->data.resize(crypto_secretstream_xchacha20poly1305_HEADERBYTES);
+
+                crypto_secretstream_xchacha20poly1305_init_push(
+                    &state->state,
+                    header->data.data(),
+                    state->key.data());
+
+                state->initialized = true;
+                header->encoding = "binary";
+                return Value{header};
+            };
+
+            // update(chunk) -> encrypted chunk
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (!state->initialized) {
+                    throw SwaziError("CryptoError", "Encryptor not initialized (call init() first)", token.loc);
+                }
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Encryptor already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                std::vector<uint8_t> plaintext;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    plaintext = std::get<BufferPtr>(args[0])->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    plaintext.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
+                }
+
+                auto result = std::make_shared<BufferValue>();
+                result->data.resize(plaintext.size() + crypto_secretstream_xchacha20poly1305_ABYTES);
+
+                unsigned long long ciphertext_len;
+                crypto_secretstream_xchacha20poly1305_push(
+                    &state->state,
+                    result->data.data(),
+                    &ciphertext_len,
+                    plaintext.data(),
+                    plaintext.size(),
+                    nullptr, 0,
+                    0);  // tag = 0 (message continues)
+
+                result->data.resize(ciphertext_len);
+                result->encoding = "binary";
+                return Value{result};
+            };
+
+            // finalize() -> final encrypted chunk with tag
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (!state->initialized) {
+                    throw SwaziError("CryptoError", "Encryptor not initialized", token.loc);
+                }
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Encryptor already finalized", token.loc);
+                }
+
+                auto result = std::make_shared<BufferValue>();
+                result->data.resize(crypto_secretstream_xchacha20poly1305_ABYTES);
+
+                unsigned long long ciphertext_len;
+                crypto_secretstream_xchacha20poly1305_push(
+                    &state->state,
+                    result->data.data(),
+                    &ciphertext_len,
+                    nullptr, 0,
+                    nullptr, 0,
+                    crypto_secretstream_xchacha20poly1305_TAG_FINAL);
+
+                result->data.resize(ciphertext_len);
+                state->finalized = true;
+                result->encoding = "binary";
+                return Value{result};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+            obj->properties["init"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("init", init_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+        auto fn_create_encryptor_value = std::make_shared<FunctionValue>(
+            "crypto.secretbox.createEncryptor", fn_create_encryptor, env, tok);
+        secretbox_obj->properties["createEncryptor"] = PropertyDescriptor{
+            fn_create_encryptor_value, false, false, false, tok};
+
+        // crypto.secretbox.createDecryptor(key, header) -> Decryptor object
+        auto fn_create_decryptor = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("TypeError", "createDecryptor requires (key, header)", token.loc);
+            }
+
+            BufferPtr key_buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                key_buf = std::get<BufferPtr>(args[0]);
+            } else {
+                throw SwaziError("TypeError", "key must be Buffer", token.loc);
+            }
+
+            if (key_buf->data.size() != crypto_secretstream_xchacha20poly1305_KEYBYTES) {
+                throw SwaziError("CryptoError",
+                    "key must be exactly " + std::to_string(crypto_secretstream_xchacha20poly1305_KEYBYTES) + " bytes",
+                    token.loc);
+            }
+
+            BufferPtr header_buf;
+            if (std::holds_alternative<BufferPtr>(args[1])) {
+                header_buf = std::get<BufferPtr>(args[1]);
+            } else {
+                throw SwaziError("TypeError", "header must be Buffer", token.loc);
+            }
+
+            if (header_buf->data.size() != crypto_secretstream_xchacha20poly1305_HEADERBYTES) {
+                throw SwaziError("CryptoError",
+                    "header must be exactly " + std::to_string(crypto_secretstream_xchacha20poly1305_HEADERBYTES) + " bytes",
+                    token.loc);
+            }
+
+            auto state = std::make_shared<SecretBoxDecryptState>();
+            state->key = key_buf->data;
+
+            if (crypto_secretstream_xchacha20poly1305_init_pull(
+                    &state->state,
+                    header_buf->data.data(),
+                    state->key.data()) != 0) {
+                throw SwaziError("CryptoError", "Invalid header", token.loc);
+            }
+
+            state->initialized = true;
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // update(chunk) -> decrypted chunk
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Decryptor already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                BufferPtr cipher_buf;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    cipher_buf = std::get<BufferPtr>(args[0]);
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer", token.loc);
+                }
+
+                auto result = std::make_shared<BufferValue>();
+                result->data.resize(cipher_buf->data.size());
+
+                unsigned long long plaintext_len;
+                unsigned char tag;
+
+                if (crypto_secretstream_xchacha20poly1305_pull(
+                        &state->state,
+                        result->data.data(),
+                        &plaintext_len,
+                        &tag,
+                        cipher_buf->data.data(),
+                        cipher_buf->data.size(),
+                        nullptr, 0) != 0) {
+                    throw SwaziError("CryptoError", "Decryption failed (authentication error)", token.loc);
+                }
+
+                result->data.resize(plaintext_len);
+
+                if (tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL) {
+                    state->finalized = true;
+                }
+
+                result->encoding = "binary";
+                return Value{result};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+
+        auto fn_create_decryptor_value = std::make_shared<FunctionValue>(
+            "crypto.secretbox.createDecryptor", fn_create_decryptor, env, tok);
+        secretbox_obj->properties["createDecryptor"] = PropertyDescriptor{
+            fn_create_decryptor_value, false, false, false, tok};
         obj->properties["secretbox"] = PropertyDescriptor{Value{secretbox_obj}, false, false, true, tok};
     }
 
@@ -658,6 +1128,200 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
 
         auto fn_verify_value = std::make_shared<FunctionValue>("crypto.sign.verify", fn_verify, env, tok);
         sign_obj->properties["verify"] = PropertyDescriptor{fn_verify_value, false, false, false, tok};
+
+        // crypto.sign.createSigner(secretKey) -> Signer object (hash-then-sign pattern)
+        auto fn_create_signer = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "createSigner requires secretKey", token.loc);
+            }
+
+            BufferPtr sk_buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                sk_buf = std::get<BufferPtr>(args[0]);
+                if (sk_buf->data.size() != crypto_sign_SECRETKEYBYTES) {
+                    throw SwaziError("CryptoError", "secretKey must be 64 bytes", token.loc);
+                }
+            } else {
+                throw SwaziError("TypeError", "secretKey must be Buffer", token.loc);
+            }
+
+            auto state = std::make_shared<SignState>();
+            state->secret_key = sk_buf->data;
+            crypto_hash_sha512_init(&state->hash_state);
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // update(data) method
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Signer already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                std::vector<uint8_t> data;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    data = std::get<BufferPtr>(args[0])->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    data.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
+                }
+
+                crypto_hash_sha512_update(&state->hash_state, data.data(), data.size());
+                return std::monostate{};
+            };
+
+            // finalize() method - returns signature
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Signer already finalized", token.loc);
+                }
+
+                // Finalize hash
+                std::vector<uint8_t> hash(crypto_hash_sha512_BYTES);
+                crypto_hash_sha512_final(&state->hash_state, hash.data());
+
+                // Sign the hash
+                auto result = std::make_shared<BufferValue>();
+                result->data.resize(crypto_sign_BYTES);
+
+                crypto_sign_detached(
+                    result->data.data(),
+                    nullptr,
+                    hash.data(),
+                    hash.size(),
+                    state->secret_key.data());
+
+                state->finalized = true;
+                result->encoding = "binary";
+                return Value{result};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+
+        auto fn_create_signer_value = std::make_shared<FunctionValue>(
+            "crypto.sign.createSigner", fn_create_signer, env, tok);
+        sign_obj->properties["createSigner"] = PropertyDescriptor{
+            fn_create_signer_value, false, false, false, tok};
+
+        // crypto.sign.createVerifier(publicKey, signature) -> Verifier object
+        auto fn_create_verifier = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("TypeError", "createVerifier requires (publicKey, signature)", token.loc);
+            }
+
+            BufferPtr pk_buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                pk_buf = std::get<BufferPtr>(args[0]);
+                if (pk_buf->data.size() != crypto_sign_PUBLICKEYBYTES) {
+                    throw SwaziError("CryptoError", "publicKey must be 32 bytes", token.loc);
+                }
+            } else {
+                throw SwaziError("TypeError", "publicKey must be Buffer", token.loc);
+            }
+
+            BufferPtr sig_buf;
+            if (std::holds_alternative<BufferPtr>(args[1])) {
+                sig_buf = std::get<BufferPtr>(args[1]);
+                if (sig_buf->data.size() != crypto_sign_BYTES) {
+                    throw SwaziError("CryptoError", "signature must be 64 bytes", token.loc);
+                }
+            } else {
+                throw SwaziError("TypeError", "signature must be Buffer", token.loc);
+            }
+
+            // Create state that holds public key, signature, and hash state
+            struct VerifyState {
+                std::vector<uint8_t> public_key;
+                std::vector<uint8_t> signature;
+                crypto_hash_sha512_state hash_state;
+                bool finalized = false;
+            };
+
+            auto state = std::make_shared<VerifyState>();
+            state->public_key = pk_buf->data;
+            state->signature = sig_buf->data;
+            crypto_hash_sha512_init(&state->hash_state);
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // update(data) method
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Verifier already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                std::vector<uint8_t> data;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    data = std::get<BufferPtr>(args[0])->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    data.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
+                }
+
+                crypto_hash_sha512_update(&state->hash_state, data.data(), data.size());
+                return std::monostate{};
+            };
+
+            // finalize() method - returns true/false
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("CryptoError", "Verifier already finalized", token.loc);
+                }
+
+                // Finalize hash
+                std::vector<uint8_t> hash(crypto_hash_sha512_BYTES);
+                crypto_hash_sha512_final(&state->hash_state, hash.data());
+
+                // Verify signature against hash
+                int ret = crypto_sign_verify_detached(
+                    state->signature.data(),
+                    hash.data(),
+                    hash.size(),
+                    state->public_key.data());
+
+                state->finalized = true;
+                return Value{ret == 0};  // 0 = valid, -1 = invalid
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+
+        auto fn_create_verifier_value = std::make_shared<FunctionValue>(
+            "crypto.sign.createVerifier", fn_create_verifier, env, tok);
+        sign_obj->properties["createVerifier"] = PropertyDescriptor{
+            fn_create_verifier_value, false, false, false, tok};
 
         obj->properties["sign"] = PropertyDescriptor{Value{sign_obj}, false, false, true, tok};
     }

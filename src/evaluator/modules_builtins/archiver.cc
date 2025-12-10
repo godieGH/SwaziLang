@@ -203,6 +203,14 @@ struct Header {
     char pad[12];
 };
 
+struct FileMetadata {
+    std::string name;
+    uint32_t mode = 0644;
+    uint32_t uid = 0;
+    uint32_t gid = 0;
+    time_t mtime = 0;
+};
+
 static_assert(sizeof(Header) == 512, "TAR header must be 512 bytes");
 
 static void write_octal(char* dest, size_t len, uint64_t value) {
@@ -296,6 +304,33 @@ static std::vector<std::pair<std::string, std::vector<uint8_t>>> extract(const s
 
     return files;
 }
+
+static void write_header(std::ostream& out, const FileMetadata& meta, size_t size) {
+    Header hdr{};
+    std::memset(&hdr, 0, sizeof(hdr));
+
+    std::strncpy(hdr.name, meta.name.c_str(), 99);
+    write_octal(hdr.mode, 7, meta.mode);
+    write_octal(hdr.uid, 7, meta.uid);
+    write_octal(hdr.gid, 7, meta.gid);
+    write_octal(hdr.size, 11, size);
+    write_octal(hdr.mtime, 11, meta.mtime > 0 ? meta.mtime : std::time(nullptr));
+    hdr.typeflag = '0';
+    std::strcpy(hdr.magic, "ustar");
+    std::strcpy(hdr.version, "00");
+
+    calculate_checksum(hdr);
+
+    out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+}
+
+static void write_padding(std::ostream& out, size_t size) {
+    size_t padding = (512 - (size % 512)) % 512;
+    std::vector<uint8_t> zeros(padding, 0);
+    if (padding > 0) {
+        out.write(reinterpret_cast<const char*>(zeros.data()), padding);
+    }
+}
 }  // namespace tar
 
 std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
@@ -347,6 +382,257 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
         };
         auto fn_val = std::make_shared<FunctionValue>("archiver.gunzip", fn, env, tok);
         obj->properties["gunzip"] = {Value{fn_val}, false, false, false, tok};
+    }
+
+    // archiver.createGzipCompressor(output_path, level=6) -> Compressor object
+    {
+        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "createGzipCompressor requires output path", token.loc);
+            }
+
+            std::string output_path = value_to_string_simple(args[0]);
+            int level = 6;
+            if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                level = static_cast<int>(std::get<double>(args[1]));
+                level = std::clamp(level, 1, 9);
+            }
+
+            // Create state holder
+            struct GzipCompressorState {
+                z_stream stream;
+                std::ofstream output;
+                std::vector<uint8_t> temp_buffer;
+                bool initialized = false;
+                bool finalized = false;
+
+                ~GzipCompressorState() {
+                    if (initialized && !finalized) {
+                        deflateEnd(&stream);
+                    }
+                }
+            };
+
+            auto state = std::make_shared<GzipCompressorState>();
+            state->temp_buffer.resize(32768);
+            state->output.open(output_path, std::ios::binary);
+
+            if (!state->output.is_open()) {
+                throw SwaziError("IOError", "Failed to open output file: " + output_path, token.loc);
+            }
+
+            // Initialize zlib stream
+            state->stream = z_stream{};
+            state->stream.zalloc = Z_NULL;
+            state->stream.zfree = Z_NULL;
+            state->stream.opaque = Z_NULL;
+
+            if (deflateInit2(&state->stream, level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+                throw SwaziError("CryptoError", "deflateInit2 failed", token.loc);
+            }
+            state->initialized = true;
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // update(chunk) method - compresses and writes chunk
+            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("IOError", "Compressor already finalized", token.loc);
+                }
+                if (args.empty()) {
+                    throw SwaziError("TypeError", "update requires data argument", token.loc);
+                }
+
+                std::vector<uint8_t> chunk;
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    chunk = std::get<BufferPtr>(args[0])->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    chunk.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
+                }
+
+                state->stream.avail_in = chunk.size();
+                state->stream.next_in = chunk.data();
+
+                do {
+                    state->stream.avail_out = state->temp_buffer.size();
+                    state->stream.next_out = state->temp_buffer.data();
+
+                    deflate(&state->stream, Z_NO_FLUSH);
+
+                    size_t have = state->temp_buffer.size() - state->stream.avail_out;
+                    if (have > 0) {
+                        state->output.write(reinterpret_cast<const char*>(state->temp_buffer.data()), have);
+                    }
+                } while (state->stream.avail_out == 0);
+
+                return std::monostate{};
+            };
+
+            // finalize() method - flushes and closes stream
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("IOError", "Compressor already finalized", token.loc);
+                }
+
+                // Flush remaining data
+                state->stream.avail_in = 0;
+                state->stream.next_in = nullptr;
+
+                int ret;
+                do {
+                    state->stream.avail_out = state->temp_buffer.size();
+                    state->stream.next_out = state->temp_buffer.data();
+
+                    ret = deflate(&state->stream, Z_FINISH);
+
+                    size_t have = state->temp_buffer.size() - state->stream.avail_out;
+                    if (have > 0) {
+                        state->output.write(reinterpret_cast<const char*>(state->temp_buffer.data()), have);
+                    }
+                } while (ret != Z_STREAM_END);
+
+                deflateEnd(&state->stream);
+                state->output.close();
+                state->finalized = true;
+
+                return std::monostate{};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<archiver>", 0, 0, 0);
+
+            obj->properties["update"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("update", update_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+        auto fn_val = std::make_shared<FunctionValue>("archiver.createGzipCompressor", fn, env, tok);
+        obj->properties["createGzipCompressor"] = {Value{fn_val}, false, false, false, tok};
+    }
+
+    // archiver.createGzipDecompressor(input_path, output_path) -> Decompressor object
+    {
+        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("TypeError", "createGzipDecompressor requires input and output paths", token.loc);
+            }
+
+            std::string input_path = value_to_string_simple(args[0]);
+            std::string output_path = value_to_string_simple(args[1]);
+
+            struct GzipDecompressorState {
+                z_stream stream;
+                std::ifstream input;
+                std::ofstream output;
+                std::vector<uint8_t> in_buffer;
+                std::vector<uint8_t> out_buffer;
+                bool initialized = false;
+                bool finalized = false;
+
+                ~GzipDecompressorState() {
+                    if (initialized && !finalized) {
+                        inflateEnd(&stream);
+                    }
+                }
+            };
+
+            auto state = std::make_shared<GzipDecompressorState>();
+            state->in_buffer.resize(32768);
+            state->out_buffer.resize(32768);
+
+            state->input.open(input_path, std::ios::binary);
+            state->output.open(output_path, std::ios::binary);
+
+            if (!state->input.is_open()) {
+                throw SwaziError("IOError", "Failed to open input file: " + input_path, token.loc);
+            }
+            if (!state->output.is_open()) {
+                throw SwaziError("IOError", "Failed to open output file: " + output_path, token.loc);
+            }
+
+            // Initialize zlib stream
+            state->stream = z_stream{};
+            state->stream.zalloc = Z_NULL;
+            state->stream.zfree = Z_NULL;
+            state->stream.opaque = Z_NULL;
+
+            if (inflateInit2(&state->stream, 15 + 16) != Z_OK) {
+                throw SwaziError("CryptoError", "inflateInit2 failed", token.loc);
+            }
+            state->initialized = true;
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // process() method - reads input, decompresses, writes output
+            auto process_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    return Value{false};
+                }
+
+                // Read chunk from input
+                state->input.read(reinterpret_cast<char*>(state->in_buffer.data()), state->in_buffer.size());
+                std::streamsize bytes_read = state->input.gcount();
+
+                if (bytes_read == 0) {
+                    // End of input
+                    inflateEnd(&state->stream);
+                    state->input.close();
+                    state->output.close();
+                    state->finalized = true;
+                    return Value{false};
+                }
+
+                state->stream.avail_in = bytes_read;
+                state->stream.next_in = state->in_buffer.data();
+
+                int ret;
+                do {
+                    state->stream.avail_out = state->out_buffer.size();
+                    state->stream.next_out = state->out_buffer.data();
+
+                    ret = inflate(&state->stream, Z_NO_FLUSH);
+
+                    if (ret != Z_OK && ret != Z_STREAM_END) {
+                        throw SwaziError("CryptoError", "Decompression failed", token.loc);
+                    }
+
+                    size_t have = state->out_buffer.size() - state->stream.avail_out;
+                    if (have > 0) {
+                        state->output.write(reinterpret_cast<const char*>(state->out_buffer.data()), have);
+                    }
+
+                    if (ret == Z_STREAM_END) {
+                        inflateEnd(&state->stream);
+                        state->input.close();
+                        state->output.close();
+                        state->finalized = true;
+                        return Value{false};
+                    }
+                } while (state->stream.avail_out == 0);
+
+                return Value{true};  // More data to process
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<archiver>", 0, 0, 0);
+
+            obj->properties["process"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("process", process_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+        auto fn_val = std::make_shared<FunctionValue>("archiver.createGzipDecompressor", fn, env, tok);
+        obj->properties["createGzipDecompressor"] = {Value{fn_val}, false, false, false, tok};
     }
 
     // archiver.gzipBuffer(buffer, level=6) -> Buffer
@@ -649,6 +935,192 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
         };
         auto fn_val = std::make_shared<FunctionValue>("archiver.untarBuffer", fn, env, tok);
         obj->properties["untarBuffer"] = {Value{fn_val}, false, false, false, tok};
+    }
+
+    // archiver.createTar(output_path) -> TarWriter object
+    {
+        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("TypeError", "createTar requires output path", token.loc);
+            }
+
+            std::string output_path = value_to_string_simple(args[0]);
+
+            struct TarWriterState {
+                std::ofstream output;
+                bool finalized = false;
+            };
+
+            auto state = std::make_shared<TarWriterState>();
+            state->output.open(output_path, std::ios::binary);
+
+            if (!state->output.is_open()) {
+                throw SwaziError("IOError", "Failed to open output file: " + output_path, token.loc);
+            }
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // addFile(name, file_path, options?) method
+            auto add_file_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("IOError", "TarWriter already finalized", token.loc);
+                }
+                if (args.size() < 2) {
+                    throw SwaziError("TypeError", "addFile requires name and file path", token.loc);
+                }
+
+                std::string name = value_to_string_simple(args[0]);
+                std::string file_path = value_to_string_simple(args[1]);
+
+                tar::FileMetadata meta;
+                meta.name = name;
+
+                // Parse options if provided
+                if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
+                    ObjectPtr opts = std::get<ObjectPtr>(args[2]);
+
+                    auto mode_it = opts->properties.find("mode");
+                    if (mode_it != opts->properties.end() && std::holds_alternative<double>(mode_it->second.value)) {
+                        meta.mode = static_cast<uint32_t>(std::get<double>(mode_it->second.value));
+                    }
+
+                    auto uid_it = opts->properties.find("uid");
+                    if (uid_it != opts->properties.end() && std::holds_alternative<double>(uid_it->second.value)) {
+                        meta.uid = static_cast<uint32_t>(std::get<double>(uid_it->second.value));
+                    }
+
+                    auto gid_it = opts->properties.find("gid");
+                    if (gid_it != opts->properties.end() && std::holds_alternative<double>(gid_it->second.value)) {
+                        meta.gid = static_cast<uint32_t>(std::get<double>(gid_it->second.value));
+                    }
+
+                    auto mtime_it = opts->properties.find("mtime");
+                    if (mtime_it != opts->properties.end() && std::holds_alternative<double>(mtime_it->second.value)) {
+                        meta.mtime = static_cast<time_t>(std::get<double>(mtime_it->second.value));
+                    }
+                }
+
+                // Get file size
+                std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+                if (!file.is_open()) {
+                    throw SwaziError("IOError", "Failed to open file: " + file_path, token.loc);
+                }
+                std::streamsize file_size = file.tellg();
+                file.seekg(0, std::ios::beg);
+
+                // Write header
+                tar::write_header(state->output, meta, file_size);
+
+                // Stream file content
+                std::vector<char> buffer(32768);
+                while (file) {
+                    file.read(buffer.data(), buffer.size());
+                    std::streamsize bytes_read = file.gcount();
+                    if (bytes_read > 0) {
+                        state->output.write(buffer.data(), bytes_read);
+                    }
+                }
+
+                // Write padding
+                tar::write_padding(state->output, file_size);
+
+                return std::monostate{};
+            };
+
+            // addBuffer(name, buffer, options?) method
+            auto add_buffer_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("IOError", "TarWriter already finalized", token.loc);
+                }
+                if (args.size() < 2) {
+                    throw SwaziError("TypeError", "addBuffer requires name and buffer", token.loc);
+                }
+
+                std::string name = value_to_string_simple(args[0]);
+
+                std::vector<uint8_t> data;
+                if (std::holds_alternative<BufferPtr>(args[1])) {
+                    data = std::get<BufferPtr>(args[1])->data;
+                } else if (std::holds_alternative<std::string>(args[1])) {
+                    std::string str = std::get<std::string>(args[1]);
+                    data.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "buffer must be Buffer or string", token.loc);
+                }
+
+                tar::FileMetadata meta;
+                meta.name = name;
+
+                // Parse options if provided
+                if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
+                    ObjectPtr opts = std::get<ObjectPtr>(args[2]);
+
+                    auto mode_it = opts->properties.find("mode");
+                    if (mode_it != opts->properties.end() && std::holds_alternative<double>(mode_it->second.value)) {
+                        meta.mode = static_cast<uint32_t>(std::get<double>(mode_it->second.value));
+                    }
+
+                    auto uid_it = opts->properties.find("uid");
+                    if (uid_it != opts->properties.end() && std::holds_alternative<double>(uid_it->second.value)) {
+                        meta.uid = static_cast<uint32_t>(std::get<double>(uid_it->second.value));
+                    }
+
+                    auto gid_it = opts->properties.find("gid");
+                    if (gid_it != opts->properties.end() && std::holds_alternative<double>(gid_it->second.value)) {
+                        meta.gid = static_cast<uint32_t>(std::get<double>(gid_it->second.value));
+                    }
+
+                    auto mtime_it = opts->properties.find("mtime");
+                    if (mtime_it != opts->properties.end() && std::holds_alternative<double>(mtime_it->second.value)) {
+                        meta.mtime = static_cast<time_t>(std::get<double>(mtime_it->second.value));
+                    }
+                }
+
+                // Write header
+                tar::write_header(state->output, meta, data.size());
+
+                // Write data
+                state->output.write(reinterpret_cast<const char*>(data.data()), data.size());
+
+                // Write padding
+                tar::write_padding(state->output, data.size());
+
+                return std::monostate{};
+            };
+
+            // finalize() method
+            auto finalize_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("IOError", "TarWriter already finalized", token.loc);
+                }
+
+                // Write end-of-archive marker (two zero blocks)
+                std::vector<uint8_t> zeros(1024, 0);
+                state->output.write(reinterpret_cast<const char*>(zeros.data()), 1024);
+                state->output.close();
+                state->finalized = true;
+
+                return std::monostate{};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<archiver>", 0, 0, 0);
+
+            obj->properties["addFile"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("addFile", add_file_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["addBuffer"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("addBuffer", add_buffer_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["finalize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
+        };
+        auto fn_val = std::make_shared<FunctionValue>("archiver.createTar", fn, env, tok);
+        obj->properties["createTar"] = {Value{fn_val}, false, false, false, tok};
     }
 
 #ifdef HAVE_ZLIB
