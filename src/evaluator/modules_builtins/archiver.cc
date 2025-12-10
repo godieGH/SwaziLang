@@ -406,6 +406,12 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 bool initialized = false;
                 bool finalized = false;
 
+                // Progress tracking
+                size_t bytes_read = 0;     // Total uncompressed bytes input
+                size_t bytes_written = 0;  // Total compressed bytes output
+                size_t chunks_processed = 0;
+                int compression_level = 6;
+
                 ~GzipCompressorState() {
                     if (initialized && !finalized) {
                         deflateEnd(&stream);
@@ -415,6 +421,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 
             auto state = std::make_shared<GzipCompressorState>();
             state->temp_buffer.resize(32768);
+            state->compression_level = level;
             state->output.open(output_path, std::ios::binary);
 
             if (!state->output.is_open()) {
@@ -453,6 +460,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
                 }
 
+                state->bytes_read += chunk.size();
                 state->stream.avail_in = chunk.size();
                 state->stream.next_in = chunk.data();
 
@@ -465,9 +473,11 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     size_t have = state->temp_buffer.size() - state->stream.avail_out;
                     if (have > 0) {
                         state->output.write(reinterpret_cast<const char*>(state->temp_buffer.data()), have);
+                        state->bytes_written += have;
                     }
                 } while (state->stream.avail_out == 0);
 
+                state->chunks_processed++;
                 return std::monostate{};
             };
 
@@ -491,6 +501,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     size_t have = state->temp_buffer.size() - state->stream.avail_out;
                     if (have > 0) {
                         state->output.write(reinterpret_cast<const char*>(state->temp_buffer.data()), have);
+                        state->bytes_written += have;
                     }
                 } while (ret != Z_STREAM_END);
 
@@ -499,6 +510,38 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 state->finalized = true;
 
                 return std::monostate{};
+            };
+
+            // getBytesRead() -> number (uncompressed input)
+            auto bytes_read_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_read)};
+            };
+
+            // getBytesWritten() -> number (compressed output)
+            auto bytes_written_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_written)};
+            };
+
+            // getCompressionRatio() -> number (percentage saved)
+            auto ratio_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->bytes_read == 0) return Value{0.0};
+                double ratio = 1.0 - (static_cast<double>(state->bytes_written) / static_cast<double>(state->bytes_read));
+                return Value{ratio * 100.0};
+            };
+
+            // getChunksProcessed() -> number
+            auto chunks_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->chunks_processed)};
+            };
+
+            // isFinalized() -> bool
+            auto finalized_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->finalized};
+            };
+
+            // getCompressionLevel() -> number
+            auto level_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->compression_level)};
             };
 
             Token tok;
@@ -510,6 +553,24 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 false, false, false, tok};
             obj->properties["finalize"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesRead"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesRead", bytes_read_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesWritten"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesWritten", bytes_written_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCompressionRatio"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCompressionRatio", ratio_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getChunksProcessed"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getChunksProcessed", chunks_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["isFinalized"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("isFinalized", finalized_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCompressionLevel"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCompressionLevel", level_fn, env, tok),
                 false, false, false, tok};
 
             return Value{obj};
@@ -537,6 +598,12 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 bool initialized = false;
                 bool finalized = false;
 
+                // Progress tracking
+                size_t bytes_read = 0;
+                size_t bytes_written = 0;
+                size_t total_input_size = 0;
+                size_t chunks_processed = 0;
+
                 ~GzipDecompressorState() {
                     if (initialized && !finalized) {
                         inflateEnd(&stream);
@@ -558,6 +625,11 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 throw SwaziError("IOError", "Failed to open output file: " + output_path, token.loc);
             }
 
+            // Get total input size
+            state->input.seekg(0, std::ios::end);
+            state->total_input_size = state->input.tellg();
+            state->input.seekg(0, std::ios::beg);
+
             // Initialize zlib stream
             state->stream = z_stream{};
             state->stream.zalloc = Z_NULL;
@@ -565,7 +637,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
             state->stream.opaque = Z_NULL;
 
             if (inflateInit2(&state->stream, 15 + 16) != Z_OK) {
-                throw SwaziError("CryptoError", "inflateInit2 failed", token.loc);
+                throw SwaziError("ArchiverError", "inflateInit2 failed", token.loc);
             }
             state->initialized = true;
 
@@ -590,6 +662,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     return Value{false};
                 }
 
+                state->bytes_read += bytes_read;
                 state->stream.avail_in = bytes_read;
                 state->stream.next_in = state->in_buffer.data();
 
@@ -601,12 +674,13 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     ret = inflate(&state->stream, Z_NO_FLUSH);
 
                     if (ret != Z_OK && ret != Z_STREAM_END) {
-                        throw SwaziError("CryptoError", "Decompression failed", token.loc);
+                        throw SwaziError("ArchiverError", "Decompression failed", token.loc);
                     }
 
                     size_t have = state->out_buffer.size() - state->stream.avail_out;
                     if (have > 0) {
                         state->output.write(reinterpret_cast<const char*>(state->out_buffer.data()), have);
+                        state->bytes_written += have;
                     }
 
                     if (ret == Z_STREAM_END) {
@@ -618,7 +692,39 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     }
                 } while (state->stream.avail_out == 0);
 
+                state->chunks_processed++;
                 return Value{true};  // More data to process
+            };
+
+            // getBytesRead() -> number
+            auto bytes_read_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_read)};
+            };
+
+            // getBytesWritten() -> number
+            auto bytes_written_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_written)};
+            };
+
+            // getTotalSize() -> number
+            auto total_size_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->total_input_size)};
+            };
+
+            // getProgress() -> number (0.0 to 1.0)
+            auto progress_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->total_input_size == 0) return Value{0.0};
+                return Value{static_cast<double>(state->bytes_read) / static_cast<double>(state->total_input_size)};
+            };
+
+            // getChunksProcessed() -> number
+            auto chunks_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->chunks_processed)};
+            };
+
+            // isFinalized() -> bool
+            auto finalized_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->finalized};
             };
 
             Token tok;
@@ -627,6 +733,24 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 
             obj->properties["process"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("process", process_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesRead"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesRead", bytes_read_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesWritten"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesWritten", bytes_written_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getTotalSize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getTotalSize", total_size_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getProgress"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getProgress", progress_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getChunksProcessed"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getChunksProcessed", chunks_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["isFinalized"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("isFinalized", finalized_fn, env, tok),
                 false, false, false, tok};
 
             return Value{obj};
@@ -1315,36 +1439,258 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
         obj->properties["listTar"] = {Value{fn_val}, false, false, false, tok};
     }
 
-    // archiver.extractTarFile(tar_path, file_name) -> Buffer
-    // Extract single file from tar
+    // archiver.extractTarFile(tar_path, file_name, output_path?, options?) -> Buffer or Extractor object
     {
-        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "extractTarFile requires tar path and file name", token.loc);
             }
 
-            std::vector<uint8_t> archive;
+            std::string tar_path;
+            std::vector<uint8_t> tar_data;
+            bool from_buffer = false;
+
             if (std::holds_alternative<std::string>(args[0])) {
-                archive = read_file_bytes(value_to_string_simple(args[0]));
+                tar_path = value_to_string_simple(args[0]);
             } else if (std::holds_alternative<BufferPtr>(args[0])) {
-                archive = std::get<BufferPtr>(args[0])->data;
+                tar_data = std::get<BufferPtr>(args[0])->data;
+                from_buffer = true;
             } else {
                 throw SwaziError("TypeError", "extractTarFile requires path string or Buffer", token.loc);
             }
 
             std::string target_name = value_to_string_simple(args[1]);
-            auto files = tar::extract(archive);
 
-            for (const auto& [name, data] : files) {
-                if (name == target_name) {
-                    auto buf = std::make_shared<BufferValue>();
-                    buf->data = data;
-                    buf->encoding = "binary";
-                    return Value{buf};
+            // Check if output path provided (3rd argument)
+            bool has_output_path = args.size() >= 3 && std::holds_alternative<std::string>(args[2]);
+            std::string output_path = has_output_path ? value_to_string_simple(args[2]) : "";
+
+            // Check for streaming option (4th argument)
+            bool streaming = false;
+            if (args.size() >= 4 && std::holds_alternative<ObjectPtr>(args[3])) {
+                ObjectPtr opts = std::get<ObjectPtr>(args[3]);
+                auto stream_it = opts->properties.find("streaming");
+                if (stream_it != opts->properties.end() && std::holds_alternative<bool>(stream_it->second.value)) {
+                    streaming = std::get<bool>(stream_it->second.value);
                 }
             }
 
-            return Value{std::monostate{}};
+            // If no output path, use old behavior (return buffer)
+            if (!has_output_path) {
+                if (from_buffer) {
+                    auto files = tar::extract(tar_data);
+                    for (const auto& [name, data] : files) {
+                        if (name == target_name) {
+                            auto buf = std::make_shared<BufferValue>();
+                            buf->data = data;
+                            buf->encoding = "binary";
+                            return Value{buf};
+                        }
+                    }
+                } else {
+                    auto archive = read_file_bytes(tar_path);
+                    auto files = tar::extract(archive);
+                    for (const auto& [name, data] : files) {
+                        if (name == target_name) {
+                            auto buf = std::make_shared<BufferValue>();
+                            buf->data = data;
+                            buf->encoding = "binary";
+                            return Value{buf};
+                        }
+                    }
+                }
+                return Value{std::monostate{}};
+            }
+
+            // If streaming not requested, extract directly to file
+            if (!streaming) {
+                if (from_buffer) {
+                    auto files = tar::extract(tar_data);
+                    for (const auto& [name, data] : files) {
+                        if (name == target_name) {
+                            write_file_bytes(output_path, data);
+                            return Value{true};
+                        }
+                    }
+                } else {
+                    auto archive = read_file_bytes(tar_path);
+                    auto files = tar::extract(archive);
+                    for (const auto& [name, data] : files) {
+                        if (name == target_name) {
+                            write_file_bytes(output_path, data);
+                            return Value{true};
+                        }
+                    }
+                }
+                return Value{false};
+            }
+
+            // Streaming extraction - create extractor object
+            struct TarExtractorState {
+                std::ifstream tar_file;
+                std::ofstream output_file;
+                std::string target_name;
+                bool file_found = false;
+                bool finalized = false;
+                bool from_buffer = false;
+
+                // File info
+                size_t file_size = 0;
+                size_t bytes_extracted = 0;
+                size_t current_pos = 0;
+
+                // Streaming state
+                std::vector<uint8_t> buffer;
+                size_t bytes_remaining = 0;
+            };
+
+            auto state = std::make_shared<TarExtractorState>();
+            state->target_name = target_name;
+            state->from_buffer = from_buffer;
+            state->buffer.resize(32768);
+
+            if (!from_buffer) {
+                state->tar_file.open(tar_path, std::ios::binary);
+                if (!state->tar_file.is_open()) {
+                    throw SwaziError("IOError", "Failed to open TAR file: " + tar_path, token.loc);
+                }
+            } else {
+                throw SwaziError("NotImplementedError",
+                    "Streaming extraction from buffer not yet supported (use file path)", token.loc);
+            }
+
+            state->output_file.open(output_path, std::ios::binary);
+            if (!state->output_file.is_open()) {
+                throw SwaziError("IOError", "Failed to open output file: " + output_path, token.loc);
+            }
+
+            // Find the target file in TAR
+            bool found = false;
+            while (state->tar_file) {
+                tar::Header hdr{};
+                state->tar_file.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+
+                if (state->tar_file.gcount() < sizeof(hdr) || hdr.name[0] == '\0') {
+                    break;
+                }
+
+                std::string name(hdr.name);
+                uint64_t size = tar::read_octal(hdr.size, 11);
+
+                if (name == target_name) {
+                    state->file_found = true;
+                    state->file_size = size;
+                    state->bytes_remaining = size;
+                    found = true;
+                    break;
+                }
+
+                // Skip this file
+                size_t skip = size;
+                size_t padding = (512 - (size % 512)) % 512;
+                skip += padding;
+                state->tar_file.seekg(skip, std::ios::cur);
+            }
+
+            if (!found) {
+                state->tar_file.close();
+                state->output_file.close();
+                throw SwaziError("ValueError", "File not found in TAR: " + target_name, token.loc);
+            }
+
+            auto obj = std::make_shared<ObjectValue>();
+
+            // process() method - extract chunk by chunk
+            auto process_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    return Value{false};
+                }
+
+                if (state->bytes_remaining == 0) {
+                    state->output_file.close();
+                    state->tar_file.close();
+                    state->finalized = true;
+                    return Value{false};
+                }
+
+                // Read chunk
+                size_t to_read = std::min(state->buffer.size(), state->bytes_remaining);
+                state->tar_file.read(reinterpret_cast<char*>(state->buffer.data()), to_read);
+                std::streamsize bytes_read = state->tar_file.gcount();
+
+                if (bytes_read <= 0) {
+                    state->output_file.close();
+                    state->tar_file.close();
+                    state->finalized = true;
+                    return Value{false};
+                }
+
+                // Write to output
+                state->output_file.write(reinterpret_cast<const char*>(state->buffer.data()), bytes_read);
+                state->bytes_extracted += bytes_read;
+                state->bytes_remaining -= bytes_read;
+
+                return Value{state->bytes_remaining > 0};
+            };
+
+            // getFileSize() -> number
+            auto file_size_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->file_size)};
+            };
+
+            // getBytesExtracted() -> number
+            auto bytes_extracted_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_extracted)};
+            };
+
+            // getBytesRemaining() -> number
+            auto bytes_remaining_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_remaining)};
+            };
+
+            // getProgress() -> number (0.0 to 1.0)
+            auto progress_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->file_size == 0) return Value{1.0};
+                return Value{static_cast<double>(state->bytes_extracted) / static_cast<double>(state->file_size)};
+            };
+
+            // isFinalized() -> bool
+            auto finalized_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->finalized};
+            };
+
+            // getFileName() -> string
+            auto filename_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->target_name};
+            };
+
+            Token tok;
+            tok.type = TokenType::IDENTIFIER;
+            tok.loc = TokenLocation("<archiver>", 0, 0, 0);
+
+            obj->properties["process"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("process", process_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getFileSize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getFileSize", file_size_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesExtracted"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesExtracted", bytes_extracted_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesRemaining"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesRemaining", bytes_remaining_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getProgress"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getProgress", progress_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["isFinalized"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("isFinalized", finalized_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getFileName"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getFileName", filename_fn, env, tok),
+                false, false, false, tok};
+
+            return Value{obj};
         };
         auto fn_val = std::make_shared<FunctionValue>("archiver.extractTarFile", fn, env, tok);
         obj->properties["extractTarFile"] = {Value{fn_val}, false, false, false, tok};
