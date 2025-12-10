@@ -142,7 +142,6 @@ static void emit_readable_event_sync(ReadableStreamStatePtr state,
     const std::vector<FunctionPtr>& listeners,
     const std::vector<Value>& args) {
     if (!state || !state->env || !state->evaluator) {
-        // Fallback to async if no env/evaluator
         for (const auto& cb : listeners) {
             if (cb) {
                 schedule_listener_call(cb, args);
@@ -151,26 +150,35 @@ static void emit_readable_event_sync(ReadableStreamStatePtr state,
         return;
     }
 
-    Token tok{};
-    tok.loc = TokenLocation("<stream-event>", 0, 0, 0);
-
-    // Call each listener SYNCHRONOUSLY using invoke_function
     for (const auto& cb : listeners) {
         if (cb) {
             try {
-                // USE invoke_function to call the callback synchronously
-                state->evaluator->invoke_function(cb, args, state->env, tok);
+                // ✅ Use the callback's own token - it has the real location info
+                state->evaluator->invoke_function(cb, args, state->env, cb->token);
             } catch (const SwaziError& e) {
-                // If callback throws, could emit error event
-                // But do it async to avoid recursion
-                schedule_listener_call(nullptr, {Value{std::string(e.what())}});
+                std::cerr << "Unhandled error in stream '"
+                          << state->path << "' listener: "
+                          << e.what() << std::endl;
+
+                if (&listeners != &state->error_listeners && !state->error_listeners.empty()) {
+                    try {
+                        emit_readable_event_sync(state, state->error_listeners,
+                            {Value{std::string(e.what())}});
+                    } catch (...) {
+                        std::cerr << "Error listener also threw an exception" << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Unhandled error in stream '"
+                          << state->path << "' listener: "
+                          << e.what() << std::endl;
             } catch (...) {
-                // Ignore other errors
+                std::cerr << "Unknown error in stream '"
+                          << state->path << "' listener" << std::endl;
             }
         }
     }
 }
-
 // ============================================================================
 // ASYNC READ OPERATIONS
 // ============================================================================

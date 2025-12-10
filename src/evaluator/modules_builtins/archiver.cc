@@ -1073,6 +1073,14 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
             struct TarWriterState {
                 std::ofstream output;
                 bool finalized = false;
+
+                // Progress tracking
+                size_t files_added = 0;
+                size_t bytes_written = 0;
+                std::string current_file;
+                size_t current_file_size = 0;
+                size_t current_file_bytes_written = 0;
+                bool writing_file = false;
             };
 
             auto state = std::make_shared<TarWriterState>();
@@ -1132,8 +1140,15 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 std::streamsize file_size = file.tellg();
                 file.seekg(0, std::ios::beg);
 
+                // Update progress state
+                state->current_file = name;
+                state->current_file_size = file_size;
+                state->current_file_bytes_written = 0;
+                state->writing_file = true;
+
                 // Write header
                 tar::write_header(state->output, meta, file_size);
+                state->bytes_written += 512;  // TAR header is 512 bytes
 
                 // Stream file content
                 std::vector<char> buffer(32768);
@@ -1142,11 +1157,22 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     std::streamsize bytes_read = file.gcount();
                     if (bytes_read > 0) {
                         state->output.write(buffer.data(), bytes_read);
+                        state->bytes_written += bytes_read;
+                        state->current_file_bytes_written += bytes_read;
                     }
                 }
 
                 // Write padding
-                tar::write_padding(state->output, file_size);
+                size_t padding = (512 - (file_size % 512)) % 512;
+                if (padding > 0) {
+                    std::vector<uint8_t> zeros(padding, 0);
+                    state->output.write(reinterpret_cast<const char*>(zeros.data()), padding);
+                    state->bytes_written += padding;
+                }
+
+                state->files_added++;
+                state->writing_file = false;
+                state->current_file.clear();
 
                 return std::monostate{};
             };
@@ -1200,16 +1226,180 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     }
                 }
 
+                // Update progress state
+                state->current_file = name;
+                state->current_file_size = data.size();
+                state->current_file_bytes_written = data.size();
+                state->writing_file = true;
+
                 // Write header
                 tar::write_header(state->output, meta, data.size());
+                state->bytes_written += 512;
 
                 // Write data
                 state->output.write(reinterpret_cast<const char*>(data.data()), data.size());
+                state->bytes_written += data.size();
 
                 // Write padding
-                tar::write_padding(state->output, data.size());
+                size_t padding = (512 - (data.size() % 512)) % 512;
+                if (padding > 0) {
+                    std::vector<uint8_t> zeros(padding, 0);
+                    state->output.write(reinterpret_cast<const char*>(zeros.data()), padding);
+                    state->bytes_written += padding;
+                }
+
+                state->files_added++;
+                state->writing_file = false;
+                state->current_file.clear();
 
                 return std::monostate{};
+            };
+
+            // addFileChunked(name, file_path, options?) -> FileAdder object
+            // For monitoring progress while adding large files
+            auto add_file_chunked_fn = [state, env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->finalized) {
+                    throw SwaziError("IOError", "TarWriter already finalized", token.loc);
+                }
+                if (args.size() < 2) {
+                    throw SwaziError("TypeError", "addFileChunked requires name and file path", token.loc);
+                }
+
+                std::string name = value_to_string_simple(args[0]);
+                std::string file_path = value_to_string_simple(args[1]);
+
+                tar::FileMetadata meta;
+                meta.name = name;
+
+                // Parse options
+                if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
+                    ObjectPtr opts = std::get<ObjectPtr>(args[2]);
+
+                    auto mode_it = opts->properties.find("mode");
+                    if (mode_it != opts->properties.end() && std::holds_alternative<double>(mode_it->second.value)) {
+                        meta.mode = static_cast<uint32_t>(std::get<double>(mode_it->second.value));
+                    }
+
+                    auto uid_it = opts->properties.find("uid");
+                    if (uid_it != opts->properties.end() && std::holds_alternative<double>(uid_it->second.value)) {
+                        meta.uid = static_cast<uint32_t>(std::get<double>(uid_it->second.value));
+                    }
+
+                    auto gid_it = opts->properties.find("gid");
+                    if (gid_it != opts->properties.end() && std::holds_alternative<double>(gid_it->second.value)) {
+                        meta.gid = static_cast<uint32_t>(std::get<double>(gid_it->second.value));
+                    }
+
+                    auto mtime_it = opts->properties.find("mtime");
+                    if (mtime_it != opts->properties.end() && std::holds_alternative<double>(mtime_it->second.value)) {
+                        meta.mtime = static_cast<time_t>(std::get<double>(mtime_it->second.value));
+                    }
+                }
+
+                // Open file and get size
+                auto file = std::make_shared<std::ifstream>(file_path, std::ios::binary | std::ios::ate);
+                if (!file->is_open()) {
+                    throw SwaziError("IOError", "Failed to open file: " + file_path, token.loc);
+                }
+                std::streamsize file_size = file->tellg();
+                file->seekg(0, std::ios::beg);
+
+                // Update state
+                state->current_file = name;
+                state->current_file_size = file_size;
+                state->current_file_bytes_written = 0;
+                state->writing_file = true;
+
+                // Write header
+                tar::write_header(state->output, meta, file_size);
+                state->bytes_written += 512;
+
+                // Create chunked adder state
+                struct FileAdderState {
+                    std::shared_ptr<std::ifstream> file;
+                    std::shared_ptr<TarWriterState> tar_state;
+                    size_t file_size;
+                    size_t bytes_written = 0;
+                    std::vector<char> buffer;
+                    bool done = false;
+                };
+
+                auto adder_state = std::make_shared<FileAdderState>();
+                adder_state->file = file;
+                adder_state->tar_state = state;
+                adder_state->file_size = file_size;
+                adder_state->buffer.resize(32768);
+
+                auto adder_obj = std::make_shared<ObjectValue>();
+
+                // writeChunk() -> bool (true if more chunks, false if done)
+                auto write_chunk_fn = [adder_state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (adder_state->done) {
+                        return Value{false};
+                    }
+
+                    adder_state->file->read(adder_state->buffer.data(), adder_state->buffer.size());
+                    std::streamsize bytes_read = adder_state->file->gcount();
+
+                    if (bytes_read <= 0) {
+                        // Write padding
+                        size_t padding = (512 - (adder_state->file_size % 512)) % 512;
+                        if (padding > 0) {
+                            std::vector<uint8_t> zeros(padding, 0);
+                            adder_state->tar_state->output.write(reinterpret_cast<const char*>(zeros.data()), padding);
+                            adder_state->tar_state->bytes_written += padding;
+                        }
+
+                        adder_state->tar_state->files_added++;
+                        adder_state->tar_state->writing_file = false;
+                        adder_state->tar_state->current_file.clear();
+                        adder_state->file->close();
+                        adder_state->done = true;
+                        return Value{false};
+                    }
+
+                    adder_state->tar_state->output.write(adder_state->buffer.data(), bytes_read);
+                    adder_state->tar_state->bytes_written += bytes_read;
+                    adder_state->tar_state->current_file_bytes_written += bytes_read;
+                    adder_state->bytes_written += bytes_read;
+
+                    return Value{true};
+                };
+
+                // getBytesWritten() -> number
+                auto adder_bytes_fn = [adder_state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    return Value{static_cast<double>(adder_state->bytes_written)};
+                };
+
+                // getProgress() -> number (0.0 to 1.0)
+                auto adder_progress_fn = [adder_state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    if (adder_state->file_size == 0) return Value{1.0};
+                    return Value{static_cast<double>(adder_state->bytes_written) / static_cast<double>(adder_state->file_size)};
+                };
+
+                // isDone() -> bool
+                auto adder_done_fn = [adder_state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    return Value{adder_state->done};
+                };
+
+                Token tok;
+                tok.type = TokenType::IDENTIFIER;
+                tok.loc = TokenLocation("<archiver>", 0, 0, 0);
+
+                adder_obj->properties["writeChunk"] = PropertyDescriptor{
+                    std::make_shared<FunctionValue>("writeChunk", write_chunk_fn, env, tok),
+                    false, false, false, tok};
+                adder_obj->properties["getBytesWritten"] = PropertyDescriptor{
+                    std::make_shared<FunctionValue>("getBytesWritten", adder_bytes_fn, env, tok),
+                    false, false, false, tok};
+                adder_obj->properties["getProgress"] = PropertyDescriptor{
+                    std::make_shared<FunctionValue>("getProgress", adder_progress_fn, env, tok),
+                    false, false, false, tok};
+                adder_obj->properties["isDone"] = PropertyDescriptor{
+                    std::make_shared<FunctionValue>("isDone", adder_done_fn, env, tok),
+                    false, false, false, tok};
+
+                return Value{adder_obj};
             };
 
             // finalize() method
@@ -1221,10 +1411,52 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 // Write end-of-archive marker (two zero blocks)
                 std::vector<uint8_t> zeros(1024, 0);
                 state->output.write(reinterpret_cast<const char*>(zeros.data()), 1024);
+                state->bytes_written += 1024;
                 state->output.close();
                 state->finalized = true;
 
                 return std::monostate{};
+            };
+
+            // getFilesAdded() -> number
+            auto files_added_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->files_added)};
+            };
+
+            // getBytesWritten() -> number
+            auto bytes_written_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->bytes_written)};
+            };
+
+            // getCurrentFile() -> string
+            auto current_file_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->current_file};
+            };
+
+            // getCurrentFileSize() -> number
+            auto current_file_size_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->current_file_size)};
+            };
+
+            // getCurrentFileBytesWritten() -> number
+            auto current_file_bytes_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{static_cast<double>(state->current_file_bytes_written)};
+            };
+
+            // getCurrentFileProgress() -> number (0.0 to 1.0)
+            auto current_progress_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (!state->writing_file || state->current_file_size == 0) return Value{0.0};
+                return Value{static_cast<double>(state->current_file_bytes_written) / static_cast<double>(state->current_file_size)};
+            };
+
+            // isWritingFile() -> bool
+            auto is_writing_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->writing_file};
+            };
+
+            // isFinalized() -> bool
+            auto finalized_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                return Value{state->finalized};
             };
 
             Token tok;
@@ -1237,8 +1469,35 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
             obj->properties["addBuffer"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("addBuffer", add_buffer_fn, env, tok),
                 false, false, false, tok};
+            obj->properties["addFileChunked"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("addFileChunked", add_file_chunked_fn, env, tok),
+                false, false, false, tok};
             obj->properties["finalize"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("finalize", finalize_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getFilesAdded"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getFilesAdded", files_added_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getBytesWritten"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getBytesWritten", bytes_written_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCurrentFile"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCurrentFile", current_file_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCurrentFileSize"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCurrentFileSize", current_file_size_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCurrentFileBytesWritten"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCurrentFileBytesWritten", current_file_bytes_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCurrentFileProgress"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCurrentFileProgress", current_progress_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["isWritingFile"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("isWritingFile", is_writing_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["isFinalized"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("isFinalized", finalized_fn, env, tok),
                 false, false, false, tok};
 
             return Value{obj};
