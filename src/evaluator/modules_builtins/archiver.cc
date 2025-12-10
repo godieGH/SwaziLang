@@ -660,7 +660,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
                 std::streamsize bytes_read = state->input.gcount();
 
                 if (bytes_read == 0) {
-                    // End of input
+                    // End of input - finalize
                     inflateEnd(&state->stream);
                     state->input.close();
                     state->output.close();
@@ -688,19 +688,21 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
                         state->output.write(reinterpret_cast<const char*>(state->out_buffer.data()), have);
                         state->bytes_written += have;
 
-                        // NEW: Accumulate decompressed data for getCurrentDecompressedChunk()
+                        // Accumulate decompressed data for getCurrentDecompressedChunk()
                         state->current_decompressed_chunk.insert(
                             state->current_decompressed_chunk.end(),
                             state->out_buffer.begin(),
                             state->out_buffer.begin() + have);
                     }
 
+                    // Check for stream end AFTER accumulating the data
                     if (ret == Z_STREAM_END) {
                         inflateEnd(&state->stream);
                         state->input.close();
                         state->output.close();
+                        state->chunks_processed++;
                         state->finalized = true;
-                        return Value{false};
+                        return Value{false};  // Signal completion after storing final chunk
                     }
                 } while (state->stream.avail_out == 0);
 
@@ -1727,7 +1729,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
 
     // archiver.extractTarFile(tar_path, file_name, output_path?, options?) -> Buffer or Extractor object
     {
-        auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto fn = [env, evaluator](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "extractTarFile requires tar path and file name", token.loc);
             }
@@ -1921,12 +1923,54 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
                     return Value{false};
                 }
 
+                // Read chunk FIRST (even if it might be the last one)
+                size_t to_read = std::min(state->buffer.size(), state->bytes_remaining);
+                state->tar_file.read(reinterpret_cast<char*>(state->buffer.data()), to_read);
+                std::streamsize bytes_read = state->tar_file.gcount();
+
+                if (bytes_read <= 0) {
+                    // No data actually read - truly done
+                    state->output_file.close();
+                    state->tar_file.close();
+                    state->finalized = true;
+
+                    return Value{false};
+                }
+
+                // Store current chunk for getCurrentChunk()
+                state->current_chunk.assign(
+                    state->buffer.begin(),
+                    state->buffer.begin() + bytes_read);
+
+                // Write to output
+                state->output_file.write(reinterpret_cast<const char*>(state->buffer.data()), bytes_read);
+                state->bytes_extracted += bytes_read;
+                state->bytes_remaining -= bytes_read;
+
+                // Fire onData callback BEFORE checking if done
+                if (state->onData_callback && state->evaluator) {
+                    auto chunk_buf = std::make_shared<BufferValue>();
+                    chunk_buf->data = state->current_chunk;
+                    chunk_buf->encoding = "binary";
+
+                    try {
+                        state->evaluator->invoke_function(
+                            state->onData_callback,
+                            {Value{chunk_buf}},
+                            state->env,
+                            token);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error in onData callback: " << e.what() << std::endl;
+                    }
+                }
+
+                // NOW check if this was the last chunk
                 if (state->bytes_remaining == 0) {
                     state->output_file.close();
                     state->tar_file.close();
                     state->finalized = true;
 
-                    // NEW: Fire onEnd callback synchronously
+                    // Fire onEnd callback
                     if (state->onEnd_callback && state->evaluator) {
                         auto end_info = std::make_shared<ObjectValue>();
                         end_info->properties["bytesExtracted"] = PropertyDescriptor{
@@ -1947,49 +1991,10 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
                         }
                     }
 
-                    return Value{false};
+                    return Value{false};  // Signal completion AFTER firing onData
                 }
 
-                // Read chunk
-                size_t to_read = std::min(state->buffer.size(), state->bytes_remaining);
-                state->tar_file.read(reinterpret_cast<char*>(state->buffer.data()), to_read);
-                std::streamsize bytes_read = state->tar_file.gcount();
-
-                if (bytes_read <= 0) {
-                    state->output_file.close();
-                    state->tar_file.close();
-                    state->finalized = true;
-                    return Value{false};
-                }
-
-                // NEW: Store current chunk for getCurrentChunk()
-                state->current_chunk.assign(
-                    state->buffer.begin(),
-                    state->buffer.begin() + bytes_read);
-
-                // Write to output
-                state->output_file.write(reinterpret_cast<const char*>(state->buffer.data()), bytes_read);
-                state->bytes_extracted += bytes_read;
-                state->bytes_remaining -= bytes_read;
-
-                // NEW: Fire onData callback synchronously AFTER write completes
-                if (state->onData_callback && state->evaluator) {
-                    auto chunk_buf = std::make_shared<BufferValue>();
-                    chunk_buf->data = state->current_chunk;
-                    chunk_buf->encoding = "binary";
-
-                    try {
-                        state->evaluator->invoke_function(
-                            state->onData_callback,
-                            {Value{chunk_buf}},
-                            state->env,
-                            token);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error in onData callback: " << e.what() << std::endl;
-                    }
-                }
-
-                return Value{state->bytes_remaining > 0};
+                return Value{true};  // More data to process
             };
 
             // getFileSize() -> number
