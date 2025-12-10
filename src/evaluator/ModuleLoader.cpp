@@ -720,7 +720,7 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             module_cache[key] = rec;
             populate_module_metadata(rec->module_env, rec->path, "archiver", false);
 
-            rec->exports = make_archiver_exports(rec->module_env);
+            rec->exports = make_archiver_exports(rec->module_env, this);
 
             rec->state = ModuleRecord::State::Loaded;
             return rec->exports;

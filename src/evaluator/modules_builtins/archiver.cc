@@ -42,7 +42,7 @@ static std::vector<uint8_t> read_file_bytes(const std::string& path, Token token
 // Helper to write buffer to file
 static void write_file_bytes(const std::string& path, const std::vector<uint8_t>& data, Token token) {
     std::ofstream out(path, std::ios::binary);
-    if (!out.is_open()) throw SwaziError("IOError", "Failed to write file: " + path,  token.loc);
+    if (!out.is_open()) throw SwaziError("IOError", "Failed to write file: " + path, token.loc);
     out.write(reinterpret_cast<const char*>(data.data()), data.size());
 }
 
@@ -333,7 +333,7 @@ static void write_padding(std::ostream& out, size_t size) {
 }
 }  // namespace tar
 
-std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
+std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
     Token tok{};
     tok.loc = TokenLocation("<archiver>", 0, 0, 0);
@@ -604,6 +604,9 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 size_t total_input_size = 0;
                 size_t chunks_processed = 0;
 
+                // Current decompressed chunk tracking
+                std::vector<uint8_t> current_decompressed_chunk;
+
                 ~GzipDecompressorState() {
                     if (initialized && !finalized) {
                         inflateEnd(&stream);
@@ -649,6 +652,9 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     return Value{false};
                 }
 
+                // Clear previous chunk
+                state->current_decompressed_chunk.clear();
+
                 // Read chunk from input
                 state->input.read(reinterpret_cast<char*>(state->in_buffer.data()), state->in_buffer.size());
                 std::streamsize bytes_read = state->input.gcount();
@@ -681,6 +687,12 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     if (have > 0) {
                         state->output.write(reinterpret_cast<const char*>(state->out_buffer.data()), have);
                         state->bytes_written += have;
+
+                        // NEW: Accumulate decompressed data for getCurrentDecompressedChunk()
+                        state->current_decompressed_chunk.insert(
+                            state->current_decompressed_chunk.end(),
+                            state->out_buffer.begin(),
+                            state->out_buffer.begin() + have);
                     }
 
                     if (ret == Z_STREAM_END) {
@@ -727,6 +739,18 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 return Value{state->finalized};
             };
 
+            // NEW: getCurrentDecompressedChunk() -> Buffer
+            auto get_decompressed_chunk_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->current_decompressed_chunk.empty()) {
+                    return Value{std::monostate{}};
+                }
+
+                auto buf = std::make_shared<BufferValue>();
+                buf->data = state->current_decompressed_chunk;
+                buf->encoding = "binary";
+                return Value{buf};
+            };
+
             Token tok;
             tok.type = TokenType::IDENTIFIER;
             tok.loc = TokenLocation("<archiver>", 0, 0, 0);
@@ -748,6 +772,9 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 false, false, false, tok};
             obj->properties["getChunksProcessed"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("getChunksProcessed", chunks_fn, env, tok),
+                false, false, false, tok};
+            obj->properties["getCurrentDecompressedChunk"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCurrentDecompressedChunk", get_decompressed_chunk_fn, env, tok),
                 false, false, false, tok};
             obj->properties["isFinalized"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("isFinalized", finalized_fn, env, tok),
@@ -1726,11 +1753,27 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 
             // Check for streaming option (4th argument)
             bool streaming = false;
+            FunctionPtr onData_callback = nullptr;
+            FunctionPtr onEnd_callback = nullptr;
+
             if (args.size() >= 4 && std::holds_alternative<ObjectPtr>(args[3])) {
                 ObjectPtr opts = std::get<ObjectPtr>(args[3]);
+
                 auto stream_it = opts->properties.find("streaming");
                 if (stream_it != opts->properties.end() && std::holds_alternative<bool>(stream_it->second.value)) {
                     streaming = std::get<bool>(stream_it->second.value);
+                }
+
+                // NEW: Parse onData callback
+                auto onData_it = opts->properties.find("onData");
+                if (onData_it != opts->properties.end() && std::holds_alternative<FunctionPtr>(onData_it->second.value)) {
+                    onData_callback = std::get<FunctionPtr>(onData_it->second.value);
+                }
+
+                // NEW: Parse onEnd callback
+                auto onEnd_it = opts->properties.find("onEnd");
+                if (onEnd_it != opts->properties.end() && std::holds_alternative<FunctionPtr>(onEnd_it->second.value)) {
+                    onEnd_callback = std::get<FunctionPtr>(onEnd_it->second.value);
                 }
             }
 
@@ -1784,7 +1827,6 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 return Value{false};
             }
 
-            // Streaming extraction - create extractor object
             struct TarExtractorState {
                 std::ifstream tar_file;
                 std::ofstream output_file;
@@ -1801,12 +1843,26 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 // Streaming state
                 std::vector<uint8_t> buffer;
                 size_t bytes_remaining = 0;
+
+                // NEW: Callback support
+                FunctionPtr onData_callback = nullptr;
+                FunctionPtr onEnd_callback = nullptr;
+                Evaluator* evaluator = nullptr;
+                EnvPtr env = nullptr;
+
+                // NEW: Current chunk tracking
+                std::vector<uint8_t> current_chunk;
             };
 
             auto state = std::make_shared<TarExtractorState>();
             state->target_name = target_name;
             state->from_buffer = from_buffer;
             state->buffer.resize(32768);
+
+            state->onData_callback = onData_callback;
+            state->onEnd_callback = onEnd_callback;
+            state->evaluator = evaluator;
+            state->env = env;
 
             if (!from_buffer) {
                 state->tar_file.open(tar_path, std::ios::binary);
@@ -1869,6 +1925,28 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     state->output_file.close();
                     state->tar_file.close();
                     state->finalized = true;
+
+                    // NEW: Fire onEnd callback synchronously
+                    if (state->onEnd_callback && state->evaluator) {
+                        auto end_info = std::make_shared<ObjectValue>();
+                        end_info->properties["bytesExtracted"] = PropertyDescriptor{
+                            Value{static_cast<double>(state->bytes_extracted)},
+                            false, false, true, Token{}};
+                        end_info->properties["fileName"] = PropertyDescriptor{
+                            Value{state->target_name},
+                            false, false, true, Token{}};
+
+                        try {
+                            state->evaluator->invoke_function(
+                                state->onEnd_callback,
+                                {Value{end_info}},
+                                state->env,
+                                token);
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error in onEnd callback: " << e.what() << std::endl;
+                        }
+                    }
+
                     return Value{false};
                 }
 
@@ -1884,10 +1962,32 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     return Value{false};
                 }
 
+                // NEW: Store current chunk for getCurrentChunk()
+                state->current_chunk.assign(
+                    state->buffer.begin(),
+                    state->buffer.begin() + bytes_read);
+
                 // Write to output
                 state->output_file.write(reinterpret_cast<const char*>(state->buffer.data()), bytes_read);
                 state->bytes_extracted += bytes_read;
                 state->bytes_remaining -= bytes_read;
+
+                // NEW: Fire onData callback synchronously AFTER write completes
+                if (state->onData_callback && state->evaluator) {
+                    auto chunk_buf = std::make_shared<BufferValue>();
+                    chunk_buf->data = state->current_chunk;
+                    chunk_buf->encoding = "binary";
+
+                    try {
+                        state->evaluator->invoke_function(
+                            state->onData_callback,
+                            {Value{chunk_buf}},
+                            state->env,
+                            token);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error in onData callback: " << e.what() << std::endl;
+                    }
+                }
 
                 return Value{state->bytes_remaining > 0};
             };
@@ -1923,6 +2023,18 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 return Value{state->target_name};
             };
 
+            // NEW: getCurrentChunk() -> Buffer
+            auto get_chunk_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (state->current_chunk.empty()) {
+                    return Value{std::monostate{}};
+                }
+
+                auto buf = std::make_shared<BufferValue>();
+                buf->data = state->current_chunk;
+                buf->encoding = "binary";
+                return Value{buf};
+            };
+
             Token tok;
             tok.type = TokenType::IDENTIFIER;
             tok.loc = TokenLocation("<archiver>", 0, 0, 0);
@@ -1947,6 +2059,10 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 false, false, false, tok};
             obj->properties["getFileName"] = PropertyDescriptor{
                 std::make_shared<FunctionValue>("getFileName", filename_fn, env, tok),
+                false, false, false, tok};
+
+            obj->properties["getCurrentChunk"] = PropertyDescriptor{
+                std::make_shared<FunctionValue>("getCurrentChunk", get_chunk_fn, env, tok),
                 false, false, false, tok};
 
             return Value{obj};
