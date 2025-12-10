@@ -40,9 +40,9 @@ static std::vector<uint8_t> read_file_bytes(const std::string& path, Token token
 }
 
 // Helper to write buffer to file
-static void write_file_bytes(const std::string& path, const std::vector<uint8_t>& data) {
+static void write_file_bytes(const std::string& path, const std::vector<uint8_t>& data, Token token) {
     std::ofstream out(path, std::ios::binary);
-    if (!out.is_open()) throw std::runtime_error("Failed to write file: " + path);
+    if (!out.is_open()) throw SwaziError("IOError", "Failed to write file: " + path,  token.loc);
     out.write(reinterpret_cast<const char*>(data.data()), data.size());
 }
 
@@ -356,7 +356,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 
             auto data = read_file_bytes(input, token);
             auto compressed = gzip_compress(data, level);
-            write_file_bytes(output, compressed);
+            write_file_bytes(output, compressed, token);
 
             return Value{true};
         };
@@ -376,7 +376,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 
             auto compressed = read_file_bytes(input, token);
             auto decompressed = gzip_decompress(compressed);
-            write_file_bytes(output, decompressed);
+            write_file_bytes(output, decompressed, token);
 
             return Value{true};
         };
@@ -944,7 +944,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
             }
 
             auto archive = tar::create(files);
-            write_file_bytes(output, archive);
+            write_file_bytes(output, archive, token);
 
             return Value{true};
         };
@@ -1767,7 +1767,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     auto files = tar::extract(tar_data);
                     for (const auto& [name, data] : files) {
                         if (name == target_name) {
-                            write_file_bytes(output_path, data);
+                            write_file_bytes(output_path, data, token);
                             return Value{true};
                         }
                     }
@@ -1776,7 +1776,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                     auto files = tar::extract(archive);
                     for (const auto& [name, data] : files) {
                         if (name == target_name) {
-                            write_file_bytes(output_path, data);
+                            write_file_bytes(output_path, data, token);
                             return Value{true};
                         }
                     }
