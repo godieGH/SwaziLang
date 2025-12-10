@@ -358,8 +358,11 @@ bool Evaluator::to_bool(const Value& v) {
     if (std::holds_alternative<HoleValue>(v)) return false;
 
     // complex objects
+    if (std::holds_alternative<BufferPtr>(v)) {
+        auto buf = std::get<BufferPtr>(v);
+        return buf && !buf->data.empty();
+    }
     if (std::holds_alternative<FilePtr>(v)) return true;
-    if (std::holds_alternative<BufferPtr>(v)) return true;
     if (std::holds_alternative<RangePtr>(v)) return true;
     if (std::holds_alternative<PromisePtr>(v)) return true;
     if (std::holds_alternative<DateTimePtr>(v)) return true;
