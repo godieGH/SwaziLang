@@ -952,7 +952,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
         obj->properties["tar"] = {Value{fn_val}, false, false, false, tok};
     }
 
-    // archiver.untar(input_path) -> array of {name, data}
+    // archiver.untar(input_path) -> array of {name, content}
     {
         auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.empty()) {
@@ -1024,7 +1024,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
         obj->properties["tarBuffer"] = {Value{fn_val}, false, false, false, tok};
     }
 
-    // archiver.untarBuffer(buffer) -> array of {name, data}
+    // archiver.untarBuffer(buffer) -> array of {name, content}
     {
         auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.empty()) {
