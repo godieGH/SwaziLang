@@ -17,6 +17,8 @@ struct HashState {
     std::string algorithm;
     crypto_hash_sha256_state sha256_state;
     crypto_hash_sha512_state sha512_state;
+    crypto_generichash_state blake2b_state;
+    std::vector<uint8_t> key;
     bool finalized = false;
 };
 
@@ -85,6 +87,9 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
     obj->properties["HASH_SHA512_BYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_hash_sha512_BYTES)},
         false, false, true, Token()};
+    obj->properties["HASH_BLAKE2B_BYTES"] = PropertyDescriptor{
+        Value{static_cast<double>(crypto_generichash_BYTES)},
+        false, false, true, Token()};
     obj->properties["SECRETBOX_KEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_secretbox_KEYBYTES)},
         false, false, true, Token()};
@@ -143,9 +148,14 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             } else if (algo == "sha512") {
                 result->data.resize(crypto_hash_sha512_BYTES);
                 crypto_hash_sha512(result->data.data(), data.data(), data.size());
+            } else if (algo == "blake2b") {
+                result->data.resize(crypto_generichash_BYTES);  // 32 bytes
+                crypto_generichash(result->data.data(), crypto_generichash_BYTES,
+                    data.data(), data.size(),
+                    nullptr, 0);  // no key
             } else {
                 throw SwaziError("CryptoError",
-                    "Unknown algorithm: " + algo + ". Supported: sha256, sha512", token.loc);
+                    "Unknown algorithm: " + algo + ". Supported: sha256, sha512 and blake2b only", token.loc);
             }
 
             result->encoding = "binary";
@@ -159,7 +169,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         obj->properties["hash"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
 
-    // crypto.createHash(algorithm) -> HashState object
+    // crypto.createHash(algorithm, optionalKey) -> HashState object
     {
         auto fn = [env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.empty()) {
@@ -171,13 +181,38 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             auto state = std::make_shared<HashState>();
             state->algorithm = algo;
 
+            // Check for optional key (second argument)
+            std::vector<uint8_t> key;
+            if (args.size() >= 2) {
+                if (std::holds_alternative<BufferPtr>(args[1])) {
+                    key = std::get<BufferPtr>(args[1])->data;
+                } else if (std::holds_alternative<std::string>(args[1])) {
+                    std::string str = std::get<std::string>(args[1]);
+                    key.assign(str.begin(), str.end());
+                } else if (!std::holds_alternative<std::monostate>(args[1])) {
+                    throw SwaziError("TypeError", "key must be Buffer or string", token.loc);
+                }
+            }
+
             if (algo == "sha256") {
+                if (!key.empty()) {
+                    throw SwaziError("CryptoError", "sha256 does not support keyed hashing", token.loc);
+                }
                 crypto_hash_sha256_init(&state->sha256_state);
             } else if (algo == "sha512") {
+                if (!key.empty()) {
+                    throw SwaziError("CryptoError", "sha512 does not support keyed hashing", token.loc);
+                }
                 crypto_hash_sha512_init(&state->sha512_state);
+            } else if (algo == "blake2b") {
+                state->key = key;  // Store key for streaming operations
+                crypto_generichash_init(&state->blake2b_state,
+                    key.empty() ? nullptr : key.data(),
+                    key.empty() ? 0 : key.size(),
+                    crypto_generichash_BYTES);
             } else {
                 throw SwaziError("CryptoError",
-                    "Unknown algorithm: " + algo + ". Supported: sha256, sha512", token.loc);
+                    "Unknown algorithm: " + algo + ". Supported: sha256, sha512, blake2b", token.loc);
             }
 
             // Create object with methods
@@ -204,8 +239,10 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
 
                 if (state->algorithm == "sha256") {
                     crypto_hash_sha256_update(&state->sha256_state, data.data(), data.size());
-                } else {
+                } else if (state->algorithm == "sha512") {
                     crypto_hash_sha512_update(&state->sha512_state, data.data(), data.size());
+                } else if (state->algorithm == "blake2b") {
+                    crypto_generichash_update(&state->blake2b_state, data.data(), data.size());
                 }
 
                 return std::monostate{};
@@ -222,9 +259,13 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                 if (state->algorithm == "sha256") {
                     result->data.resize(crypto_hash_sha256_BYTES);
                     crypto_hash_sha256_final(&state->sha256_state, result->data.data());
-                } else {
+                } else if (state->algorithm == "sha512") {
                     result->data.resize(crypto_hash_sha512_BYTES);
                     crypto_hash_sha512_final(&state->sha512_state, result->data.data());
+                } else if (state->algorithm == "blake2b") {
+                    result->data.resize(crypto_generichash_BYTES);
+                    crypto_generichash_final(&state->blake2b_state, result->data.data(),
+                        crypto_generichash_BYTES);
                 }
 
                 state->finalized = true;
@@ -252,7 +293,6 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         auto fn_value = std::make_shared<FunctionValue>("crypto.createHash", fn, env, tok);
         obj->properties["createHash"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
-
     // ============= HMAC =============
 
     // crypto.hmac(algorithm, key, data) -> Buffer
