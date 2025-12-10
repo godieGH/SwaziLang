@@ -32,9 +32,9 @@ static std::string value_to_string_simple(const Value& v) {
 }
 
 // Helper to read entire file into buffer
-static std::vector<uint8_t> read_file_bytes(const std::string& path) {
+static std::vector<uint8_t> read_file_bytes(const std::string& path, Token token) {
     std::ifstream in(path, std::ios::binary);
-    if (!in.is_open()) throw std::runtime_error("Failed to open file: " + path);
+    if (!in.is_open()) throw SwaziError("IOError", "Failed to open file: " + path, token.loc);
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
         std::istreambuf_iterator<char>());
 }
@@ -354,7 +354,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                 level = std::clamp(level, 1, 9);
             }
 
-            auto data = read_file_bytes(input);
+            auto data = read_file_bytes(input, token);
             auto compressed = gzip_compress(data, level);
             write_file_bytes(output, compressed);
 
@@ -374,7 +374,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
             std::string input = value_to_string_simple(args[0]);
             std::string output = value_to_string_simple(args[1]);
 
-            auto compressed = read_file_bytes(input);
+            auto compressed = read_file_bytes(input, token);
             auto decompressed = gzip_decompress(compressed);
             write_file_bytes(output, decompressed);
 
@@ -960,7 +960,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
             }
 
             std::string input = value_to_string_simple(args[0]);
-            auto archive = read_file_bytes(input);
+            auto archive = read_file_bytes(input, token);
             auto files = tar::extract(archive);
 
             auto result = std::make_shared<ArrayValue>();
@@ -1664,7 +1664,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
 
             std::vector<uint8_t> archive;
             if (std::holds_alternative<std::string>(args[0])) {
-                archive = read_file_bytes(value_to_string_simple(args[0]));
+                archive = read_file_bytes(value_to_string_simple(args[0]), token);
             } else if (std::holds_alternative<BufferPtr>(args[0])) {
                 archive = std::get<BufferPtr>(args[0])->data;
             } else {
@@ -1747,7 +1747,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                         }
                     }
                 } else {
-                    auto archive = read_file_bytes(tar_path);
+                    auto archive = read_file_bytes(tar_path, token);
                     auto files = tar::extract(archive);
                     for (const auto& [name, data] : files) {
                         if (name == target_name) {
@@ -1772,7 +1772,7 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env) {
                         }
                     }
                 } else {
-                    auto archive = read_file_bytes(tar_path);
+                    auto archive = read_file_bytes(tar_path, token);
                     auto files = tar::extract(archive);
                     for (const auto& [name, data] : files) {
                         if (name == target_name) {
