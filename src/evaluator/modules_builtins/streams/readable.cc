@@ -153,28 +153,48 @@ static void emit_readable_event_sync(ReadableStreamStatePtr state,
     for (const auto& cb : listeners) {
         if (cb) {
             try {
-                // ✅ Use the callback's own token - it has the real location info
                 state->evaluator->invoke_function(cb, args, state->env, cb->token);
             } catch (const SwaziError& e) {
-                std::cerr << "Unhandled error in stream '"
-                          << state->path << "' listener: "
+                std::cerr << "Unhandled error in stream listener: "
                           << e.what() << std::endl;
 
+                // Destroy stream to prevent further reads
+                state->destroyed = true;
+                state->ended = true;
+                state->paused = true;
+                state->close_file();
+
+                // Emit error event once (if not already in error listener)
                 if (&listeners != &state->error_listeners && !state->error_listeners.empty()) {
                     try {
                         emit_readable_event_sync(state, state->error_listeners,
                             {Value{std::string(e.what())}});
                     } catch (...) {
-                        std::cerr << "Error listener also threw an exception" << std::endl;
+                        // Error listener also threw - silently ignore
                     }
                 }
+
+                // Stop processing remaining callbacks
+                return;
+
             } catch (const std::exception& e) {
-                std::cerr << "Unhandled error in stream '"
-                          << state->path << "' listener: "
+                std::cerr << "Unhandled error in stream listener: "
                           << e.what() << std::endl;
+
+                state->destroyed = true;
+                state->ended = true;
+                state->paused = true;
+                state->close_file();
+                return;
+
             } catch (...) {
-                std::cerr << "Unknown error in stream '"
-                          << state->path << "' listener" << std::endl;
+                std::cerr << "Unknown error in stream listener" << std::endl;
+
+                state->destroyed = true;
+                state->ended = true;
+                state->paused = true;
+                state->close_file();
+                return;
             }
         }
     }
