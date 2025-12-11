@@ -46,11 +46,13 @@ struct SecretBoxDecryptState {
 };
 
 struct SignState {
+    std::string algorithm;  // empty string means raw mode
     std::vector<uint8_t> secret_key;
-    crypto_hash_sha512_state hash_state;  // We'll hash then sign
+    crypto_hash_sha512_state sha512_state;
+    crypto_hash_sha256_state sha256_state;
+    std::vector<uint8_t> accumulated_data;
     bool finalized = false;
 };
-
 // Helper: convert Value to string
 static std::string value_to_string_simple_crypto(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
@@ -1185,9 +1187,32 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                 throw SwaziError("TypeError", "secretKey must be Buffer", token.loc);
             }
 
+            // Check for optional algorithm parameter (second argument)
+            std::string algorithm;
+            if (args.size() >= 2) {
+                if (std::holds_alternative<std::string>(args[1])) {
+                    algorithm = std::get<std::string>(args[1]);
+                    if (algorithm != "sha256" && algorithm != "sha512") {
+                        throw SwaziError("CryptoError",
+                            "Unsupported algorithm: " + algorithm + ". Supported: sha256, sha512",
+                            token.loc);
+                    }
+                } else if (!std::holds_alternative<std::monostate>(args[1])) {
+                    throw SwaziError("TypeError", "algorithm must be string", token.loc);
+                }
+            }
+
             auto state = std::make_shared<SignState>();
             state->secret_key = sk_buf->data;
-            crypto_hash_sha512_init(&state->hash_state);
+            state->algorithm = algorithm;
+
+            // Initialize hash state if algorithm provided
+            if (algorithm == "sha512") {
+                crypto_hash_sha512_init(&state->sha512_state);
+            } else if (algorithm == "sha256") {
+                crypto_hash_sha256_init(&state->sha256_state);
+            }
+            // else: raw mode (will buffer in accumulated_data)
 
             auto obj = std::make_shared<ObjectValue>();
 
@@ -1210,7 +1235,18 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                     throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
                 }
 
-                crypto_hash_sha512_update(&state->hash_state, data.data(), data.size());
+                if (state->algorithm == "sha512") {
+                    crypto_hash_sha512_update(&state->sha512_state, data.data(), data.size());
+                } else if (state->algorithm == "sha256") {
+                    crypto_hash_sha256_update(&state->sha256_state, data.data(), data.size());
+                } else {
+                    // Raw mode: accumulate in memory
+                    state->accumulated_data.insert(
+                        state->accumulated_data.end(),
+                        data.begin(),
+                        data.end());
+                }
+
                 return std::monostate{};
             };
 
@@ -1220,19 +1256,27 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                     throw SwaziError("CryptoError", "Signer already finalized", token.loc);
                 }
 
-                // Finalize hash
-                std::vector<uint8_t> hash(crypto_hash_sha512_BYTES);
-                crypto_hash_sha512_final(&state->hash_state, hash.data());
+                std::vector<uint8_t> data_to_sign;
 
-                // Sign the hash
+                if (state->algorithm == "sha512") {
+                    data_to_sign.resize(crypto_hash_sha512_BYTES);
+                    crypto_hash_sha512_final(&state->sha512_state, data_to_sign.data());
+                } else if (state->algorithm == "sha256") {
+                    data_to_sign.resize(crypto_hash_sha256_BYTES);
+                    crypto_hash_sha256_final(&state->sha256_state, data_to_sign.data());
+                } else {
+                    // Raw mode: sign accumulated data directly
+                    data_to_sign = std::move(state->accumulated_data);
+                }
+
                 auto result = std::make_shared<BufferValue>();
                 result->data.resize(crypto_sign_BYTES);
 
                 crypto_sign_detached(
                     result->data.data(),
                     nullptr,
-                    hash.data(),
-                    hash.size(),
+                    data_to_sign.data(),
+                    data_to_sign.size(),
                     state->secret_key.data());
 
                 state->finalized = true;
@@ -1285,18 +1329,43 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                 throw SwaziError("TypeError", "signature must be Buffer", token.loc);
             }
 
-            // Create state that holds public key, signature, and hash state
+            // Check for optional algorithm parameter (third argument)
+            std::string algorithm;
+            if (args.size() >= 3) {
+                if (std::holds_alternative<std::string>(args[2])) {
+                    algorithm = std::get<std::string>(args[2]);
+                    if (algorithm != "sha256" && algorithm != "sha512") {
+                        throw SwaziError("CryptoError",
+                            "Unsupported algorithm: " + algorithm + ". Supported: sha256, sha512",
+                            token.loc);
+                    }
+                } else if (!std::holds_alternative<std::monostate>(args[2])) {
+                    throw SwaziError("TypeError", "algorithm must be string", token.loc);
+                }
+            }
+
             struct VerifyState {
+                std::string algorithm;
                 std::vector<uint8_t> public_key;
                 std::vector<uint8_t> signature;
-                crypto_hash_sha512_state hash_state;
+                crypto_hash_sha512_state sha512_state;
+                crypto_hash_sha256_state sha256_state;
+                std::vector<uint8_t> accumulated_data;
                 bool finalized = false;
             };
 
             auto state = std::make_shared<VerifyState>();
             state->public_key = pk_buf->data;
             state->signature = sig_buf->data;
-            crypto_hash_sha512_init(&state->hash_state);
+            state->algorithm = algorithm;
+
+            // Initialize hash state if algorithm provided
+            if (algorithm == "sha512") {
+                crypto_hash_sha512_init(&state->sha512_state);
+            } else if (algorithm == "sha256") {
+                crypto_hash_sha256_init(&state->sha256_state);
+            }
+            // else: raw mode (will buffer in accumulated_data)
 
             auto obj = std::make_shared<ObjectValue>();
 
@@ -1319,7 +1388,18 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                     throw SwaziError("TypeError", "data must be Buffer or string", token.loc);
                 }
 
-                crypto_hash_sha512_update(&state->hash_state, data.data(), data.size());
+                if (state->algorithm == "sha512") {
+                    crypto_hash_sha512_update(&state->sha512_state, data.data(), data.size());
+                } else if (state->algorithm == "sha256") {
+                    crypto_hash_sha256_update(&state->sha256_state, data.data(), data.size());
+                } else {
+                    // Raw mode: accumulate in memory
+                    state->accumulated_data.insert(
+                        state->accumulated_data.end(),
+                        data.begin(),
+                        data.end());
+                }
+
                 return std::monostate{};
             };
 
@@ -1329,15 +1409,23 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                     throw SwaziError("CryptoError", "Verifier already finalized", token.loc);
                 }
 
-                // Finalize hash
-                std::vector<uint8_t> hash(crypto_hash_sha512_BYTES);
-                crypto_hash_sha512_final(&state->hash_state, hash.data());
+                std::vector<uint8_t> data_to_verify;
 
-                // Verify signature against hash
+                if (state->algorithm == "sha512") {
+                    data_to_verify.resize(crypto_hash_sha512_BYTES);
+                    crypto_hash_sha512_final(&state->sha512_state, data_to_verify.data());
+                } else if (state->algorithm == "sha256") {
+                    data_to_verify.resize(crypto_hash_sha256_BYTES);
+                    crypto_hash_sha256_final(&state->sha256_state, data_to_verify.data());
+                } else {
+                    // Raw mode: verify against accumulated data directly
+                    data_to_verify = std::move(state->accumulated_data);
+                }
+
                 int ret = crypto_sign_verify_detached(
                     state->signature.data(),
-                    hash.data(),
-                    hash.size(),
+                    data_to_verify.data(),
+                    data_to_verify.size(),
                     state->public_key.data());
 
                 state->finalized = true;

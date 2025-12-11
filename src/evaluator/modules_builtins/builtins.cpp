@@ -2042,8 +2042,16 @@ static std::pair<bool, Value> apply_replacer_with_context(
         return {true, result};
     } catch (const RemovePropertyException&) {
         return {false, Value{}};  // Signal removal
+    } catch (const SwaziError&) {
+        throw;  // Re-throw SwaziError
+    } catch (const std::exception& e) {
+        throw SwaziError("JsonError",
+            std::string("Error in replacer function for key '") + key + "': " + e.what(),
+            token.loc);
     } catch (...) {
-        return {false, Value{}};  // Error also removes
+        throw SwaziError("JsonError",
+            std::string("Unknown error in replacer function for key '") + key + "'",
+            token.loc);
     }
 }
 
@@ -2095,12 +2103,8 @@ static Value apply_reviver_recursive(
         Value{key},
         processed_value};
 
-    try {
-        Value result = evaluator->invoke_function(reviver_fn, reviver_args, callEnv, token);
-        return result;  // Use the transformed value
-    } catch (...) {
-        return processed_value;  // On error, return unmodified
-    }
+    Value result = evaluator->invoke_function(reviver_fn, reviver_args, callEnv, token);
+    return result;  // Use the transformed value
 }
 
 static std::string json_stringify_value_enhanced(
@@ -2335,11 +2339,16 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator)
                         "", root_value, 0, replacer_fn, evaluator, callEnv, token);
                     if (!remove_result.first) {
                         // Root was removed
-                        return Value{std::string("undefined")};
+                        return Value{};
                     }
                     root_value = remove_result.second;
+                } catch (const SwaziError& e) {
+                  throw;
+                } catch (const std::exception& e) {
+                  throw SwaziError("JsonError", 
+                    std::string("Error in replacer function: ") + e.what(), token.loc);
                 } catch (...) {
-                    return Value{std::string("undefined")};
+                  throw SwaziError("JsonError", "Unknown error in replacer function", token.loc);
                 }
             }
             
