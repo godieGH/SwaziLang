@@ -1206,7 +1206,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         "native:datetime." + mem->property, native_impl, env, mem->token)};
                 };
 
-                if (prop == "toStr") {
+                if (prop == "toStr" || prop == "str") {
                     return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                         if (args.empty()) {
                             return Value{dt->literalText};
@@ -1461,7 +1461,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // --- Universal properties ---
         const std::string& prop = mem->property;
 
-        if (prop == "toStr") {
+        if (prop == "toStr" || prop == "str") {
             auto make_fn = [this, objVal, env, mem]() -> Value {
                 // Create a native function that converts the value to string
                 auto native_impl = [this, objVal](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1661,7 +1661,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
 
             // buffer.toStr([encoding]) -> string
-            if (mem->property == "toStr" || mem->property == "toString") {
+            if (mem->property == "toStr" || mem->property == "str") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (!buf) return Value{std::string()};
 
@@ -1741,7 +1741,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         "\n --> Traced at:\n" + token.loc.get_line_trace());
                 };
 
-                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.toStr"), native_impl, env, mem->token)};
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer."), native_impl, env, mem->token)};
             }
 
             // buf.slice(start, end?) -> Buffer
