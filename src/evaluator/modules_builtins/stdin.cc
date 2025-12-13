@@ -18,7 +18,9 @@
 #include "uv.h"
 
 static uv_tty_t* g_stdin_handle = nullptr;
-static uv_tty_t* g_stdout_handle = nullptr;  // NEW: for prompt output
+static uv_tty_t* g_stdout_handle = nullptr;
+static std::vector<FunctionPtr> g_resize_listeners;
+static uv_signal_t* g_sigwinch_handle = nullptr;
 static std::mutex g_stdin_mutex;
 static std::vector<FunctionPtr> g_data_listeners;
 static std::vector<FunctionPtr> g_eof_listeners;
@@ -311,6 +313,39 @@ static void stdin_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* bu
     if (buf && buf->base) free(buf->base);
 }
 
+static void sigwinch_cb(uv_signal_t* handle, int signum) {
+    (void)handle;
+    (void)signum;
+
+    if (g_stdin_closed.load() || !g_stdin_initialized.load()) return;  // Add initialized check
+
+    // Get new terminal size
+    int width = 80, height = 24;
+    if (g_stdin_handle) {
+        uv_tty_get_winsize(g_stdin_handle, &width, &height);
+    }
+
+    // Create size object
+    auto size_obj = std::make_shared<ObjectValue>();
+    Token tok{};
+    tok.loc = TokenLocation("<stdin>", 0, 0, 0);
+    size_obj->properties["width"] = {Value{static_cast<double>(width)}, false, false, true, tok};
+    size_obj->properties["height"] = {Value{static_cast<double>(height)}, false, false, true, tok};
+
+    // Enqueue callbacks
+    std::vector<FunctionPtr> listeners;
+    {
+        std::lock_guard<std::mutex> lk(g_stdin_mutex);
+        listeners = g_resize_listeners;
+    }
+
+    for (auto& cb : listeners) {
+        if (!cb) continue;
+        CallbackPayload* p = new CallbackPayload(cb, {Value{size_obj}});
+        enqueue_callback_global(static_cast<void*>(p));
+    }
+}
+
 // Global signal handler flag
 static bool g_signal_handlers_installed = false;
 
@@ -385,6 +420,15 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
             uv_tty_set_mode(g_stdin_handle, g_raw_mode.load() ? UV_TTY_MODE_RAW : UV_TTY_MODE_NORMAL);
             uv_read_start((uv_stream_t*)g_stdin_handle, stdin_alloc_cb, stdin_read_cb);
 
+#ifndef _WIN32
+            // Set up SIGWINCH handler for terminal resize
+            if (!g_sigwinch_handle) {
+                g_sigwinch_handle = new uv_signal_t;
+                uv_signal_init(loop, g_sigwinch_handle);
+                uv_signal_start(g_sigwinch_handle, sigwinch_cb, SIGWINCH);
+            }
+#endif
+
             g_stdin_initialized.store(true);
             g_stdin_closed.store(false);
             g_paused.store(false);
@@ -416,9 +460,12 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
         } else if (event == "sigint") {
             g_sigint_listeners.push_back(cb);
             ensure_init();
+        } else if (event == "resize") {
+            g_resize_listeners.push_back(cb);
+            ensure_init();
         } else {
             throw SwaziError("TypeError",
-                "stdin.on unknown event. Valid: data, eof, sigint", token.loc);
+                "stdin.on unknown event. Valid: data, eof, sigint, resize", token.loc);
         }
 
         return std::monostate{};
@@ -588,8 +635,26 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
                 g_stdin_handle = nullptr;
             }
 
+            {
+                std::lock_guard<std::mutex> lk(g_stdin_mutex);
+                g_data_listeners.clear();
+                g_eof_listeners.clear();
+                g_sigint_listeners.clear();
+                g_resize_listeners.clear();  // Clear resize listeners too
+            }
+
             if (loop) destroy_pause_keepalive(loop);
 
+#ifndef _WIN32
+            // Clean up resize signal handler
+            if (g_sigwinch_handle) {
+                uv_signal_stop(g_sigwinch_handle);
+                uv_close((uv_handle_t*)g_sigwinch_handle, [](uv_handle_t* h) {
+                    delete (uv_signal_t*)h;
+                });
+                g_sigwinch_handle = nullptr;
+            }
+#endif
             // Clean up escape timer
             if (g_escape_timer) {
                 uv_timer_stop(g_escape_timer);
