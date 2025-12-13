@@ -1456,12 +1456,12 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
 
     // ============= KEY DERIVATION =============
 
-    // crypto.kdf(password, salt, opsLimit, memLimit, keyLength) -> Buffer
+    // crypto.pwhash(password, salt, opsLimit, memLimit, keyLength) -> Buffer
     {
         auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 5) {
                 throw SwaziError("TypeError",
-                    "crypto.kdf requires (password, salt, opsLimit, memLimit, keyLength)", token.loc);
+                    "crypto.pwhash requires (password, salt, opsLimit, memLimit, keyLength)", token.loc);
             }
 
             // Get password
@@ -1534,27 +1534,27 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         Token tok;
         tok.type = TokenType::IDENTIFIER;
         tok.loc = TokenLocation("<crypto>", 0, 0, 0);
-        auto fn_value = std::make_shared<FunctionValue>("crypto.kdf", fn, env, tok);
-        obj->properties["kdf"] = PropertyDescriptor{fn_value, false, false, false, tok};
+        auto fn_value = std::make_shared<FunctionValue>("crypto.pwhash", fn, env, tok);
+        obj->properties["pwhash"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
 
-    // Export KDF constants for recommended parameters
-    obj->properties["KDF_OPSLIMIT_INTERACTIVE"] = PropertyDescriptor{
+    // Export PWHASH constants for recommended parameters
+    obj->properties["PWHASH_OPSLIMIT_INTERACTIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_OPSLIMIT_INTERACTIVE)},
         false, false, true, Token()};
-    obj->properties["KDF_MEMLIMIT_INTERACTIVE"] = PropertyDescriptor{
+    obj->properties["PWHASH_MEMLIMIT_INTERACTIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_MEMLIMIT_INTERACTIVE)},
         false, false, true, Token()};
-    obj->properties["KDF_OPSLIMIT_MODERATE"] = PropertyDescriptor{
+    obj->properties["PWHASH_OPSLIMIT_MODERATE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_OPSLIMIT_MODERATE)},
         false, false, true, Token()};
-    obj->properties["KDF_MEMLIMIT_MODERATE"] = PropertyDescriptor{
+    obj->properties["PWHASH_MEMLIMIT_MODERATE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_MEMLIMIT_MODERATE)},
         false, false, true, Token()};
-    obj->properties["KDF_OPSLIMIT_SENSITIVE"] = PropertyDescriptor{
+    obj->properties["PWHASH_OPSLIMIT_SENSITIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_OPSLIMIT_SENSITIVE)},
         false, false, true, Token()};
-    obj->properties["KDF_MEMLIMIT_SENSITIVE"] = PropertyDescriptor{
+    obj->properties["PWHASH_MEMLIMIT_SENSITIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_MEMLIMIT_SENSITIVE)},
         false, false, true, Token()};
 
@@ -1725,6 +1725,123 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         tok.loc = TokenLocation("<crypto>", 0, 0, 0);
         auto fn_value = std::make_shared<FunctionValue>("crypto.bytesToUUID", fn, env, tok);
         obj->properties["bytesToUUID"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+
+    // ============= KEY DERIVATION (HKDF) =============
+
+    // Export KDF constants
+    obj->properties["KDF_KEYBYTES"] = PropertyDescriptor{
+        Value{static_cast<double>(crypto_kdf_KEYBYTES)},
+        false, false, true, Token()};
+    obj->properties["KDF_CONTEXTBYTES"] = PropertyDescriptor{
+        Value{static_cast<double>(crypto_kdf_CONTEXTBYTES)},
+        false, false, true, Token()};
+    obj->properties["KDF_BYTES_MIN"] = PropertyDescriptor{
+        Value{static_cast<double>(crypto_kdf_BYTES_MIN)},
+        false, false, true, Token()};
+    obj->properties["KDF_BYTES_MAX"] = PropertyDescriptor{
+        Value{static_cast<double>(crypto_kdf_BYTES_MAX)},
+        false, false, true, Token()};
+
+    // crypto.kdf.deriveKey(masterKey, subkeyId, context, subkeyLength) -> Buffer
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 4) {
+                throw SwaziError("TypeError",
+                    "crypto.kdf.deriveKey requires (masterKey, subkeyId, context, subkeyLength)",
+                    token.loc);
+            }
+
+            // Get master key (must be exactly 32 bytes)
+            BufferPtr key_buf;
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                key_buf = std::get<BufferPtr>(args[0]);
+                if (key_buf->data.size() != crypto_kdf_KEYBYTES) {
+                    throw SwaziError("CryptoError",
+                        "masterKey must be exactly " + std::to_string(crypto_kdf_KEYBYTES) + " bytes",
+                        token.loc);
+                }
+            } else {
+                throw SwaziError("TypeError", "masterKey must be Buffer", token.loc);
+            }
+
+            // Get subkey ID (must be uint64)
+            if (!std::holds_alternative<double>(args[1])) {
+                throw SwaziError("TypeError", "subkeyId must be number", token.loc);
+            }
+            uint64_t subkey_id = static_cast<uint64_t>(std::get<double>(args[1]));
+
+            // Get context (must be exactly 8 bytes)
+            std::vector<uint8_t> context;
+            if (std::holds_alternative<BufferPtr>(args[2])) {
+                context = std::get<BufferPtr>(args[2])->data;
+            } else if (std::holds_alternative<std::string>(args[2])) {
+                std::string str = std::get<std::string>(args[2]);
+                context.assign(str.begin(), str.end());
+            } else {
+                throw SwaziError("TypeError", "context must be Buffer or string", token.loc);
+            }
+
+            // Pad or truncate context to exactly 8 bytes
+            if (context.size() < crypto_kdf_CONTEXTBYTES) {
+                context.resize(crypto_kdf_CONTEXTBYTES, 0);
+            } else if (context.size() > crypto_kdf_CONTEXTBYTES) {
+                context.resize(crypto_kdf_CONTEXTBYTES);
+            }
+
+            // Get subkey length
+            if (!std::holds_alternative<double>(args[3])) {
+                throw SwaziError("TypeError", "subkeyLength must be number", token.loc);
+            }
+            size_t subkey_len = static_cast<size_t>(std::get<double>(args[3]));
+
+            if (subkey_len < crypto_kdf_BYTES_MIN || subkey_len > crypto_kdf_BYTES_MAX) {
+                throw SwaziError("RangeError",
+                    "subkeyLength must be between " + std::to_string(crypto_kdf_BYTES_MIN) +
+                        " and " + std::to_string(crypto_kdf_BYTES_MAX),
+                    token.loc);
+            }
+
+            // Derive subkey
+            auto result = std::make_shared<BufferValue>();
+            result->data.resize(subkey_len);
+
+            int ret = crypto_kdf_derive_from_key(
+                result->data.data(),
+                subkey_len,
+                subkey_id,
+                reinterpret_cast<const char*>(context.data()),
+                key_buf->data.data());
+
+            if (ret != 0) {
+                throw SwaziError("CryptoError", "Key derivation failed", token.loc);
+            }
+
+            result->encoding = "binary";
+            return Value{result};
+        };
+
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.kdf.deriveKey", fn, env, tok);
+
+        auto kdf_obj = std::make_shared<ObjectValue>();
+        kdf_obj->properties["deriveKey"] = PropertyDescriptor{fn_value, false, false, false, tok};
+
+        // crypto.kdf.generateKey() -> Buffer (generate a random master key)
+        auto fn_gen = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto result = std::make_shared<BufferValue>();
+            result->data.resize(crypto_kdf_KEYBYTES);
+            crypto_kdf_keygen(result->data.data());
+            result->encoding = "binary";
+            return Value{result};
+        };
+
+        auto fn_gen_value = std::make_shared<FunctionValue>("crypto.kdf.generateKey", fn_gen, env, tok);
+        kdf_obj->properties["generateKey"] = PropertyDescriptor{fn_gen_value, false, false, false, tok};
+
+        obj->properties["kdf"] = PropertyDescriptor{Value{kdf_obj}, false, false, true, tok};
     }
 
     return obj;
