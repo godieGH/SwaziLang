@@ -72,6 +72,91 @@ static int get_hash_algorithm(const std::string& algo, const Token& token) {
     throw SwaziError("CryptoError", "Unknown hash algorithm: " + algo + ". Supported: sha256, sha512", token.loc);
 }
 
+// Helper function for HKDF-Extract
+static std::vector<uint8_t> hkdf_extract(
+    const std::vector<uint8_t>& salt,
+    const std::vector<uint8_t>& ikm,
+    const std::string& algorithm) {
+    std::vector<uint8_t> prk;
+
+    if (algorithm == "sha256") {
+        prk.resize(crypto_auth_hmacsha256_BYTES);
+
+        // If salt is empty, use zero-filled array
+        std::vector<uint8_t> actual_salt = salt;
+        if (actual_salt.empty()) {
+            actual_salt.resize(crypto_auth_hmacsha256_BYTES, 0);
+        }
+
+        crypto_auth_hmacsha256(
+            prk.data(),
+            ikm.data(), ikm.size(),
+            actual_salt.data());
+    } else {  // sha512
+        prk.resize(crypto_auth_hmacsha512_BYTES);
+
+        std::vector<uint8_t> actual_salt = salt;
+        if (actual_salt.empty()) {
+            actual_salt.resize(crypto_auth_hmacsha512_BYTES, 0);
+        }
+
+        crypto_auth_hmacsha512(
+            prk.data(),
+            ikm.data(), ikm.size(),
+            actual_salt.data());
+    }
+
+    return prk;
+}
+
+// Helper function for HKDF-Expand
+static std::vector<uint8_t> hkdf_expand(
+    const std::vector<uint8_t>& prk,
+    const std::vector<uint8_t>& info,
+    size_t length,
+    const std::string& algorithm) {
+    size_t hash_len = (algorithm == "sha256") ? crypto_auth_hmacsha256_BYTES : crypto_auth_hmacsha512_BYTES;
+
+    if (length > 255 * hash_len) {
+        throw std::runtime_error("HKDF length too large");
+    }
+
+    std::vector<uint8_t> okm;
+    okm.reserve(length);
+
+    std::vector<uint8_t> t;
+    uint8_t counter = 1;
+
+    while (okm.size() < length) {
+        // T(i) = HMAC-Hash(PRK, T(i-1) | info | i)
+        std::vector<uint8_t> hmac_input;
+        hmac_input.insert(hmac_input.end(), t.begin(), t.end());
+        hmac_input.insert(hmac_input.end(), info.begin(), info.end());
+        hmac_input.push_back(counter);
+
+        t.resize(hash_len);
+
+        if (algorithm == "sha256") {
+            crypto_auth_hmacsha256(
+                t.data(),
+                hmac_input.data(), hmac_input.size(),
+                prk.data());
+        } else {
+            crypto_auth_hmacsha512(
+                t.data(),
+                hmac_input.data(), hmac_input.size(),
+                prk.data());
+        }
+
+        size_t bytes_to_copy = std::min(length - okm.size(), hash_len);
+        okm.insert(okm.end(), t.begin(), t.begin() + bytes_to_copy);
+
+        counter++;
+    }
+
+    return okm;
+}
+
 std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
     // Initialize libsodium (idempotent, safe to call multiple times)
     if (sodium_init() < 0) {
@@ -1842,6 +1927,226 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         kdf_obj->properties["generateKey"] = PropertyDescriptor{fn_gen_value, false, false, false, tok};
 
         obj->properties["kdf"] = PropertyDescriptor{Value{kdf_obj}, false, false, true, tok};
+    }
+
+    // ============= HKDF (RFC 5869) =============
+
+    // crypto.hkdf(algorithm, ikm, salt, info, length) -> Buffer
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 5) {
+                throw SwaziError("TypeError",
+                    "crypto.hkdf requires (algorithm, ikm, salt, info, length)", token.loc);
+            }
+
+            // Get algorithm
+            std::string algo = value_to_string_simple_crypto(args[0]);
+            if (algo != "sha256" && algo != "sha512") {
+                throw SwaziError("CryptoError",
+                    "Unsupported algorithm: " + algo + ". Supported: sha256, sha512",
+                    token.loc);
+            }
+
+            // Get IKM (Input Keying Material)
+            std::vector<uint8_t> ikm;
+            if (std::holds_alternative<BufferPtr>(args[1])) {
+                ikm = std::get<BufferPtr>(args[1])->data;
+            } else if (std::holds_alternative<std::string>(args[1])) {
+                std::string str = std::get<std::string>(args[1]);
+                ikm.assign(str.begin(), str.end());
+            } else {
+                throw SwaziError("TypeError", "ikm must be Buffer or string", token.loc);
+            }
+
+            // Get salt (optional, can be empty)
+            std::vector<uint8_t> salt;
+            if (!std::holds_alternative<std::monostate>(args[2])) {
+                if (std::holds_alternative<BufferPtr>(args[2])) {
+                    salt = std::get<BufferPtr>(args[2])->data;
+                } else if (std::holds_alternative<std::string>(args[2])) {
+                    std::string str = std::get<std::string>(args[2]);
+                    salt.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "salt must be Buffer, string, or null", token.loc);
+                }
+            }
+
+            // Get info (optional, can be empty)
+            std::vector<uint8_t> info;
+            if (!std::holds_alternative<std::monostate>(args[3])) {
+                if (std::holds_alternative<BufferPtr>(args[3])) {
+                    info = std::get<BufferPtr>(args[3])->data;
+                } else if (std::holds_alternative<std::string>(args[3])) {
+                    std::string str = std::get<std::string>(args[3]);
+                    info.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "info must be Buffer, string, or null", token.loc);
+                }
+            }
+
+            // Get length
+            if (!std::holds_alternative<double>(args[4])) {
+                throw SwaziError("TypeError", "length must be number", token.loc);
+            }
+            size_t length = static_cast<size_t>(std::get<double>(args[4]));
+
+            size_t max_length = (algo == "sha256") ? (255 * crypto_auth_hmacsha256_BYTES) : (255 * crypto_auth_hmacsha512_BYTES);
+
+            if (length == 0 || length > max_length) {
+                throw SwaziError("RangeError",
+                    "length must be between 1 and " + std::to_string(max_length), token.loc);
+            }
+
+            // Execute HKDF
+            try {
+                // Extract
+                std::vector<uint8_t> prk = hkdf_extract(salt, ikm, algo);
+
+                // Expand
+                std::vector<uint8_t> okm = hkdf_expand(prk, info, length, algo);
+
+                auto result = std::make_shared<BufferValue>();
+                result->data = std::move(okm);
+                result->encoding = "binary";
+
+                return Value{result};
+            } catch (const std::exception& e) {
+                throw SwaziError("CryptoError",
+                    std::string("HKDF failed: ") + e.what(), token.loc);
+            }
+        };
+
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.hkdf", fn, env, tok);
+        obj->properties["hkdf"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+
+    // crypto.hkdfExtract(algorithm, ikm, salt) -> Buffer (PRK)
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 3) {
+                throw SwaziError("TypeError",
+                    "crypto.hkdfExtract requires (algorithm, ikm, salt)", token.loc);
+            }
+
+            std::string algo = value_to_string_simple_crypto(args[0]);
+            if (algo != "sha256" && algo != "sha512") {
+                throw SwaziError("CryptoError",
+                    "Unsupported algorithm: " + algo + ". Supported: sha256, sha512",
+                    token.loc);
+            }
+
+            // Get IKM
+            std::vector<uint8_t> ikm;
+            if (std::holds_alternative<BufferPtr>(args[1])) {
+                ikm = std::get<BufferPtr>(args[1])->data;
+            } else if (std::holds_alternative<std::string>(args[1])) {
+                std::string str = std::get<std::string>(args[1]);
+                ikm.assign(str.begin(), str.end());
+            } else {
+                throw SwaziError("TypeError", "ikm must be Buffer or string", token.loc);
+            }
+
+            // Get salt
+            std::vector<uint8_t> salt;
+            if (!std::holds_alternative<std::monostate>(args[2])) {
+                if (std::holds_alternative<BufferPtr>(args[2])) {
+                    salt = std::get<BufferPtr>(args[2])->data;
+                } else if (std::holds_alternative<std::string>(args[2])) {
+                    std::string str = std::get<std::string>(args[2]);
+                    salt.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "salt must be Buffer, string, or null", token.loc);
+                }
+            }
+
+            std::vector<uint8_t> prk = hkdf_extract(salt, ikm, algo);
+
+            auto result = std::make_shared<BufferValue>();
+            result->data = std::move(prk);
+            result->encoding = "binary";
+
+            return Value{result};
+        };
+
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.hkdfExtract", fn, env, tok);
+        obj->properties["hkdfExtract"] = PropertyDescriptor{fn_value, false, false, false, tok};
+    }
+
+    // crypto.hkdfExpand(algorithm, prk, info, length) -> Buffer (OKM)
+    {
+        auto fn = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 4) {
+                throw SwaziError("TypeError",
+                    "crypto.hkdfExpand requires (algorithm, prk, info, length)", token.loc);
+            }
+
+            std::string algo = value_to_string_simple_crypto(args[0]);
+            if (algo != "sha256" && algo != "sha512") {
+                throw SwaziError("CryptoError",
+                    "Unsupported algorithm: " + algo + ". Supported: sha256, sha512",
+                    token.loc);
+            }
+
+            // Get PRK
+            BufferPtr prk_buf;
+            if (std::holds_alternative<BufferPtr>(args[1])) {
+                prk_buf = std::get<BufferPtr>(args[1]);
+            } else {
+                throw SwaziError("TypeError", "prk must be Buffer", token.loc);
+            }
+
+            size_t expected_prk_len = (algo == "sha256") ? crypto_auth_hmacsha256_BYTES : crypto_auth_hmacsha512_BYTES;
+
+            if (prk_buf->data.size() != expected_prk_len) {
+                throw SwaziError("CryptoError",
+                    "prk must be " + std::to_string(expected_prk_len) + " bytes for " + algo,
+                    token.loc);
+            }
+
+            // Get info
+            std::vector<uint8_t> info;
+            if (!std::holds_alternative<std::monostate>(args[2])) {
+                if (std::holds_alternative<BufferPtr>(args[2])) {
+                    info = std::get<BufferPtr>(args[2])->data;
+                } else if (std::holds_alternative<std::string>(args[2])) {
+                    std::string str = std::get<std::string>(args[2]);
+                    info.assign(str.begin(), str.end());
+                } else {
+                    throw SwaziError("TypeError", "info must be Buffer, string, or null", token.loc);
+                }
+            }
+
+            // Get length
+            if (!std::holds_alternative<double>(args[3])) {
+                throw SwaziError("TypeError", "length must be number", token.loc);
+            }
+            size_t length = static_cast<size_t>(std::get<double>(args[3]));
+
+            try {
+                std::vector<uint8_t> okm = hkdf_expand(prk_buf->data, info, length, algo);
+
+                auto result = std::make_shared<BufferValue>();
+                result->data = std::move(okm);
+                result->encoding = "binary";
+
+                return Value{result};
+            } catch (const std::exception& e) {
+                throw SwaziError("CryptoError",
+                    std::string("HKDF expand failed: ") + e.what(), token.loc);
+            }
+        };
+
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+        auto fn_value = std::make_shared<FunctionValue>("crypto.hkdfExpand", fn, env, tok);
+        obj->properties["hkdfExpand"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
 
     return obj;
