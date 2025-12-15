@@ -1,7 +1,0 @@
-# .cfmtconfig - Configuration for cfmt
-
-# Directories to exclude (comma-separated, relative paths)
-exclude_dirs=build,thirdparty,external,vendor,cmake-build-debug,cmake-build-release,deps,lib
-
-# File patterns to exclude (comma-separated, glob patterns)
-exclude_files=*_generated.h,*.pb.cc,*_generated.cpp,*.pb.h,moc_*.cpp,ui_*.h
