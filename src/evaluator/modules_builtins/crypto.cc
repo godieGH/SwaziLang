@@ -306,7 +306,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             auto obj = std::make_shared<ObjectValue>();
 
             // update(data) method
-            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto update_fn = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 if (state->finalized) {
                     throw SwaziError("CryptoError", "Hash already finalized", token.loc);
                 }
@@ -332,7 +332,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                     crypto_generichash_update(&state->blake2b_state, data.data(), data.size());
                 }
 
-                return std::monostate{};
+                return Value{obj};
             };
 
             // finalize() method
@@ -471,7 +471,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             auto obj = std::make_shared<ObjectValue>();
 
             // update(data) method
-            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto update_fn = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 if (state->finalized) {
                     throw SwaziError("CryptoError", "HMAC already finalized", token.loc);
                 }
@@ -495,7 +495,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                     crypto_auth_hmacsha512_update(&state->sha512_state, data.data(), data.size());
                 }
 
-                return std::monostate{};
+                return Value{obj};  // return the object allow chaining
             };
 
             // finalize() method
@@ -1302,7 +1302,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             auto obj = std::make_shared<ObjectValue>();
 
             // update(data) method
-            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto update_fn = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 if (state->finalized) {
                     throw SwaziError("CryptoError", "Signer already finalized", token.loc);
                 }
@@ -1332,7 +1332,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                         data.end());
                 }
 
-                return std::monostate{};
+                return Value{obj};
             };
 
             // finalize() method - returns signature
@@ -1455,7 +1455,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
             auto obj = std::make_shared<ObjectValue>();
 
             // update(data) method
-            auto update_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto update_fn = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 if (state->finalized) {
                     throw SwaziError("CryptoError", "Verifier already finalized", token.loc);
                 }
@@ -1485,7 +1485,7 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
                         data.end());
                 }
 
-                return std::monostate{};
+                return Value{obj};
             };
 
             // finalize() method - returns true/false

@@ -190,7 +190,7 @@ struct PipeContext {
     bool end_on_finish = true;
     bool piping = false;
     bool cleanup_done = false;
-    
+
     FunctionPtr data_handler;
     FunctionPtr end_handler;
     FunctionPtr error_handler;
@@ -206,17 +206,15 @@ using PipeContextPtr = std::shared_ptr<PipeContext>;
 
 void cleanup_pipe(PipeContextPtr ctx);
 
-Value implement_pipe(ReadableStreamStatePtr readable_state, 
-                     WritableStreamStatePtr writable_state,
-                     bool end_on_finish,
-                     const Token& token);
-
-
+Value implement_pipe(ReadableStreamStatePtr readable_state,
+    WritableStreamStatePtr writable_state,
+    bool end_on_finish,
+    const Token& token);
 
 Value native_createDuplexStream(const std::vector<Value>& args, EnvPtr env, Evaluator* evaluator, const Token& token);
 
 void emit_writable_event_sync(WritableStreamStatePtr state,
     const std::vector<FunctionPtr>& listeners,
     const std::vector<Value>& args);
-    
+
 extern std::atomic<long long> g_next_stream_id;
