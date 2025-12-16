@@ -1321,6 +1321,12 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+    if (c == ':' && peek_next() == '=') {
+        add_token(out, TokenType::WALRUS, ":=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
 
     if (c == '<' && peek_next() == '<') {
         add_token(out, TokenType::BIT_SHIFT_LEFT, "<<", line, col, 2);

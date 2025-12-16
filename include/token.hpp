@@ -47,7 +47,7 @@ enum class TokenType {
     IKIWA,       // conditional-like (keeps related keywords together)
     CHAGUA,      // (switch / choose)
     NI,          // (helper keyword often used in control constructs)
-
+    WALRUS,      // :=
     // -----------------------
     // Loops
     // -----------------------
