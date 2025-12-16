@@ -6,6 +6,7 @@
 #include <string>
 
 #include "ClassRuntime.hpp"
+#include "Frame.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
 
@@ -518,15 +519,45 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
     // --- ForStatementNode (kwa) ---
     if (auto fn = dynamic_cast<ForStatementNode*>(stmt)) {
-        auto forEnv = std::make_shared<Environment>(env);
+        // Get current frame and loop state
+        void* loop_id = static_cast<void*>(fn);
+        CallFramePtr frame = current_frame();
 
-        // ensure a loop-control exists for this loop (use caller's lc if present)
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame) {
+            if (frame->has_loop_state(loop_id)) {
+                resuming = true;
+                state = &frame->loop_states[loop_id];
+            } else {
+                // First entry - initialize state
+                state = &frame->loop_states[loop_id];
+                state->is_first_entry = true;
+                state->init_done = false;
+                state->loop_env = std::make_shared<Environment>(env);
+            }
+        }
+
+        auto forEnv = (state && state->loop_env) ? state->loop_env : std::make_shared<Environment>(env);
+
+        // ensure a loop-control exists for this loop
         LoopControl local_lc;
         LoopControl* loopCtrl = lc ? lc : &local_lc;
 
         if (fn->init) {
-            evaluate_statement(fn->init.get(), forEnv, nullptr, nullptr, loopCtrl);
-            // if init triggered a return it would have returned earlier
+            if (state) {
+                // Inside function: only run if not done
+                if (!state->init_done) {
+                    evaluate_statement(fn->init.get(), forEnv, nullptr, nullptr, loopCtrl);
+                    state->init_done = true;
+                }
+            } else {
+                // Top-level: always run (first time through)
+                if (!resuming) {
+                    evaluate_statement(fn->init.get(), forEnv, nullptr, nullptr, loopCtrl);
+                }
+            }
         }
 
         while (true) {
@@ -541,13 +572,17 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             // run body
             for (auto& s : fn->body) {
                 evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
-                if (did_return && *did_return) return;
+                if (did_return && *did_return) {
+                    if (frame) frame->loop_states.erase(loop_id);
+                    return;
+                }
                 if (loopCtrl->did_break || loopCtrl->did_continue) break;
             }
 
             // handle break
             if (loopCtrl->did_break) {
-                loopCtrl->did_break = false;  // reset for outer loops
+                loopCtrl->did_break = false;
+                if (frame) frame->loop_states.erase(loop_id);
                 break;
             }
 
@@ -562,6 +597,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             if (fn->post) evaluate_expression(fn->post.get(), forEnv);
         }
 
+        if (frame) frame->loop_states.erase(loop_id);
         return;
     }
 
@@ -573,150 +609,255 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         LoopControl local_lc;
         LoopControl* loopCtrl = lc ? lc : &local_lc;
 
+        // Get current frame and loop state
+        void* loop_id = static_cast<void*>(fin);
+        CallFramePtr frame = current_frame();
+
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame && frame->has_loop_state(loop_id)) {
+            resuming = true;
+            state = &frame->loop_states[loop_id];
+        } else if (frame) {
+            // First entry - initialize state
+            state = &frame->loop_states[loop_id];
+            state->is_first_entry = true;
+            state->iteration_count = 0;
+            state->current_index = 0;
+            state->range_position = 0;
+            state->loop_env = std::make_shared<Environment>(env);
+        }
+
+        EnvPtr loopEnv = (state && state->loop_env) ? state->loop_env : std::make_shared<Environment>(env);
+
         // Array case
         if (std::holds_alternative<ArrayPtr>(iterableVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(iterableVal);
-            if (!arr) return;
+            if (!arr) {
+                if (frame) frame->loop_states.erase(loop_id);
+                return;
+            }
 
-            for (size_t i = 0; i < arr->elements.size(); ++i) {
-                auto loopEnv = std::make_shared<Environment>(env);
+            size_t start_index = (state && resuming) ? state->current_index : 0;
+
+            for (size_t i = start_index; i < arr->elements.size(); ++i) {
+                if (state) state->current_index = i;
 
                 if (fin->valueVar) {
-                    Environment::Variable var{
-                        arr->elements[i],
-                        false};
-                    loopEnv->set(fin->valueVar->name, var);
+                    loopEnv->values[fin->valueVar->name] = {arr->elements[i], false};
                 }
                 if (fin->indexVar) {
-                    Environment::Variable var{
-                        static_cast<double>(i),
-                        false};
-                    loopEnv->set(fin->indexVar->name, var);
+                    loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
                 }
 
-                // execute body
                 for (auto& s : fin->body) {
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
-                    if (did_return && *did_return) return;
+                    if (did_return && *did_return) {
+                        if (frame) frame->loop_states.erase(loop_id);
+                        return;
+                    }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
                 }
 
-                // if break -> stop iterating the array
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
+                    if (frame) frame->loop_states.erase(loop_id);
                     break;
                 }
 
-                // if continue -> reset and proceed to next element
                 if (loopCtrl->did_continue) {
                     loopCtrl->did_continue = false;
                     continue;
                 }
             }
 
+            if (frame) frame->loop_states.erase(loop_id);
             return;
         }
 
         else if (std::holds_alternative<RangePtr>(iterableVal)) {
             RangePtr range = std::get<RangePtr>(iterableVal);
-            if (!range) return;
+            if (!range) {
+                if (frame) frame->loop_states.erase(loop_id);
+                return;
+            }
 
-            // Create a copy to iterate without modifying the original range
-            RangeValue r = *range;
+            // Initialize or restore range state
+            if (!resuming && state) {
+                state->set_range_copy(*range);
+                state->range_position = 0;
+                state->iteration_count = 0;
+                // On first entry, fetch the first value
+                if (state->get_range_copy().hasNext()) {
+                    state->current_value = static_cast<double>(state->get_range_copy().next());
+                } else {
+                    state->current_value = std::monostate{};
+                }
+            }
 
-            // Safety check: prevent infinite or extremely large loops
-            const size_t MAX_RANGE_ITERATIONS = 10000000;  // 10 million iterations max
-            size_t iteration_count = 0;
-            size_t position = 0;  // tracks loop count (0-based index from start)
+            if (!state) {
+                // No frame (top-level): use original behavior
+                RangeValue r = *range;
+                size_t iteration_count = 0;
+                size_t position = 0;
+                const size_t MAX_RANGE_ITERATIONS = 10000000;
 
-            while (r.hasNext() && iteration_count < MAX_RANGE_ITERATIONS) {
-                auto loopEnv = std::make_shared<Environment>(env);
+                while (r.hasNext() && iteration_count < MAX_RANGE_ITERATIONS) {
+                    int currentValue = r.next();
+                    iteration_count++;
 
-                // Get current value from range
-                int currentValue = r.next();
+                    if (fin->valueVar) {
+                        loopEnv->values[fin->valueVar->name] = {static_cast<double>(currentValue), false};
+                    }
+                    if (fin->indexVar) {
+                        loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
+                    }
+
+                    for (auto& s : fin->body) {
+                        evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                        if (did_return && *did_return) return;
+                        if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                    }
+
+                    if (loopCtrl->did_break) {
+                        loopCtrl->did_break = false;
+                        break;
+                    }
+                    if (loopCtrl->did_continue) {
+                        loopCtrl->did_continue = false;
+                        position++;
+                        continue;
+                    }
+                    position++;
+                }
+
+                if (iteration_count >= MAX_RANGE_ITERATIONS && r.hasNext()) {
+                    throw SwaziError(
+                        "RangeError",
+                        "Range iteration exceeded maximum limit of 10,000,000 iterations.",
+                        fin->token.loc);
+                }
+
+                return;
+            }
+
+            // With frame: use persistent state
+            RangeValue& r = state->get_range_copy();
+            size_t& iteration_count = state->iteration_count;
+            size_t& position = state->range_position;
+            const size_t MAX_RANGE_ITERATIONS = 10000000;
+
+            while (!std::holds_alternative<std::monostate>(state->current_value) &&
+                iteration_count < MAX_RANGE_ITERATIONS) {
+                // Use the current value (already fetched)
+                double currentValue = std::get<double>(state->current_value);
                 iteration_count++;
 
-                // Bind valueVar to the current range value
                 if (fin->valueVar) {
-                    Environment::Variable var{
-                        static_cast<double>(currentValue),
-                        false};
-                    loopEnv->set(fin->valueVar->name, var);
+                    loopEnv->values[fin->valueVar->name] = {currentValue, false};
                 }
-
-                // Bind indexVar to the position/loop count (0-based)
                 if (fin->indexVar) {
-                    Environment::Variable var{
-                        static_cast<double>(position),
-                        false};
-                    loopEnv->set(fin->indexVar->name, var);
+                    loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
                 }
 
-                // Execute body
+                // Execute body (may suspend here)
                 for (auto& s : fin->body) {
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
-                    if (did_return && *did_return) return;
+                    if (did_return && *did_return) {
+                        if (frame) frame->loop_states.erase(loop_id);
+                        return;
+                    }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
                 }
 
-                // Handle break -> stop iterating the range
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
+                    if (frame) frame->loop_states.erase(loop_id);
                     break;
                 }
 
-                // Handle continue -> reset and proceed to next value
                 if (loopCtrl->did_continue) {
                     loopCtrl->did_continue = false;
+                    // Fetch next value before continuing
                     position++;
+                    if (r.hasNext()) {
+                        state->current_value = static_cast<double>(r.next());
+                    } else {
+                        state->current_value = std::monostate{};
+                    }
                     continue;
                 }
 
+                // Normal iteration: fetch next value
                 position++;
+                if (r.hasNext()) {
+                    state->current_value = static_cast<double>(r.next());
+                } else {
+                    state->current_value = std::monostate{};
+                }
             }
 
-            // Check if we hit the iteration limit
             if (iteration_count >= MAX_RANGE_ITERATIONS && r.hasNext()) {
+                if (frame) frame->loop_states.erase(loop_id);
                 throw SwaziError(
                     "RangeError",
-                    "Range iteration exceeded maximum limit of 10,000,000 iterations. "
-                    "Use a smaller range or increase step size.",
+                    "Range iteration exceeded maximum limit of 10,000,000 iterations.",
                     fin->token.loc);
             }
 
+            if (frame) frame->loop_states.erase(loop_id);
             return;
         }
 
-        // Object case
         else if (std::holds_alternative<ObjectPtr>(iterableVal)) {
             ObjectPtr obj = std::get<ObjectPtr>(iterableVal);
-            if (!obj) return;
+            if (!obj) {
+                if (frame) frame->loop_states.erase(loop_id);
+                return;
+            }
 
-            for (auto& p : obj->properties) {
-                auto loopEnv = std::make_shared<Environment>(env);
+            // Snapshot keys on first entry
+            if (!resuming && state) {
+                state->keys_snapshot.clear();
+                for (auto& p : obj->properties) {
+                    state->keys_snapshot.push_back(p.first);
+                }
+                state->current_index = 0;
+            }
 
-                // per your design: valueVar = key, indexVar = value
+            std::vector<std::string>& keys = state ? state->keys_snapshot : *(new std::vector<std::string>());
+            if (!state) {
+                for (auto& p : obj->properties) keys.push_back(p.first);
+            }
+
+            size_t start_index = (state && resuming) ? state->current_index : 0;
+
+            for (size_t i = start_index; i < keys.size(); ++i) {
+                if (state) state->current_index = i;
+
+                auto it = obj->properties.find(keys[i]);
+                if (it == obj->properties.end()) continue;
+
                 if (fin->valueVar) {
-                    Environment::Variable var{
-                        p.first,
-                        false};  // key (string)
-                    loopEnv->set(fin->valueVar->name, var);
+                    loopEnv->values[fin->valueVar->name] = {keys[i], false};
                 }
                 if (fin->indexVar) {
-                    Environment::Variable var{
-                        p.second.value,
-                        false};  // value
-                    loopEnv->set(fin->indexVar->name, var);
+                    loopEnv->values[fin->indexVar->name] = {it->second.value, false};
                 }
 
                 for (auto& s : fin->body) {
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
-                    if (did_return && *did_return) return;
+                    if (did_return && *did_return) {
+                        if (frame) frame->loop_states.erase(loop_id);
+                        return;
+                    }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
                 }
 
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
+                    if (frame) frame->loop_states.erase(loop_id);
                     break;
                 }
                 if (loopCtrl->did_continue) {
@@ -725,56 +866,53 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 }
             }
 
+            if (frame) frame->loop_states.erase(loop_id);
             return;
         }
 
-        // String case - iterate over characters
         else if (std::holds_alternative<std::string>(iterableVal)) {
             std::string str = std::get<std::string>(iterableVal);
 
-            for (size_t i = 0; i < str.size(); ++i) {
-                auto loopEnv = std::make_shared<Environment>(env);
+            size_t start_index = (state && resuming) ? state->current_index : 0;
 
-                // valueVar gets the character as a single-character string
+            for (size_t i = start_index; i < str.size(); ++i) {
+                if (state) state->current_index = i;
+
                 if (fin->valueVar) {
-                    Environment::Variable var{
-                        std::string(1, str[i]),  // Single character as string
-                        false};
-                    loopEnv->set(fin->valueVar->name, var);
+                    loopEnv->values[fin->valueVar->name] = {std::string(1, str[i]), false};
                 }
 
-                // indexVar gets the position (0-based)
                 if (fin->indexVar) {
-                    Environment::Variable var{
-                        static_cast<double>(i),
-                        false};
-                    loopEnv->set(fin->indexVar->name, var);
+                    loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
                 }
 
-                // Execute body
                 for (auto& s : fin->body) {
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
-                    if (did_return && *did_return) return;
+                    if (did_return && *did_return) {
+                        if (frame) frame->loop_states.erase(loop_id);
+                        return;
+                    }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
                 }
 
-                // Handle break
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
+                    if (frame) frame->loop_states.erase(loop_id);
                     break;
                 }
 
-                // Handle continue
                 if (loopCtrl->did_continue) {
                     loopCtrl->did_continue = false;
                     continue;
                 }
             }
 
+            if (frame) frame->loop_states.erase(loop_id);
             return;
         }
 
         else {
+            if (frame) frame->loop_states.erase(loop_id);
             throw SwaziError(
                 "TypeError",
                 "Cannot iterate over a non-array/non-object/non-range value in 'kwa kila' loop.",

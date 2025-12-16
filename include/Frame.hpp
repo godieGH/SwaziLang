@@ -41,6 +41,53 @@ struct CallFrame {
 
     Value generator_return_value = std::monostate{};
     bool generator_requested_return = false;
+
+    // Loop state persistence for async/generator contexts
+    struct LoopState {
+        EnvPtr loop_env;              // The forEnv/loopEnv
+        size_t iteration_count = 0;   // Track which iteration we're on
+        Value current_value;          // For for-in loops (current element/key)
+        size_t current_index = 0;     // For for-in loops (position in array/object)
+        bool is_first_entry = false;  // Track if this is first time entering loop
+
+        // For classic for loops: kwa(init; cond; post)
+        bool init_done = false;
+
+        // For range/for-in loops
+        std::vector<std::string> keys_snapshot;  // For object iteration
+        size_t range_position = 0;               // For range iteration
+
+        // Optional range copy - only initialized if iterating over a range
+        std::unique_ptr<RangeValue> range_copy_ptr;
+
+        // Default constructor
+        LoopState() = default;
+
+        // Helper to get/set range copy safely
+        RangeValue& get_range_copy() {
+            if (!range_copy_ptr) {
+                // Create a dummy range if not set (should never happen in practice)
+                range_copy_ptr = std::make_unique<RangeValue>(0, 0, 1, false);
+            }
+            return *range_copy_ptr;
+        }
+
+        void set_range_copy(const RangeValue& rv) {
+            range_copy_ptr = std::make_unique<RangeValue>(rv);
+        }
+
+        bool has_range_copy() const {
+            return range_copy_ptr != nullptr;
+        }
+    };
+
+    // Map: statement address -> loop state (supports nested loops)
+    std::unordered_map<void*, LoopState> loop_states;
+
+    // Helper to check if we're resuming into a loop
+    bool has_loop_state(void* loop_stmt) const {
+        return loop_states.find(loop_stmt) != loop_states.end();
+    }
 };
 using CallFramePtr = std::shared_ptr<CallFrame>;
 
