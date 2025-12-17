@@ -30,20 +30,32 @@ static std::string value_to_string_simple_collections(const Value& v) {
 
 // ============= HASHMAP CLASS NATIVES =============
 
-static Value native_HashMap_ctor(const std::vector<Value>& args, EnvPtr, const Token& tok) {
-    // Constructor initializes __store__ from optional source object
-    auto store = std::make_shared<std::unordered_map<std::string, Value>>();
+static Value native_HashMap_ctor(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+    // args[0] = this (the HashMap instance)
+    // args[1] = sourceObj (optional)
 
-    // If first arg is object, initialize from it
-    if (!args.empty() && std::holds_alternative<ObjectPtr>(args[0])) {
-        ObjectPtr src = std::get<ObjectPtr>(args[0]);
+    if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) {
+        throw SwaziError("TypeError", "HashMap constructor requires valid this", tok.loc);
+    }
+
+    ObjectPtr thisObj = std::get<ObjectPtr>(args[0]);
+    auto storage = std::make_shared<MapStorage>();
+
+    // If source object provided and it's an object, copy its properties as map entries
+    if (args.size() > 1 && std::holds_alternative<ObjectPtr>(args[1])) {
+        ObjectPtr src = std::get<ObjectPtr>(args[1]);
         if (src) {
             for (const auto& kv : src->properties) {
-                (*store)[kv.first] = kv.second.value;
+                // Skip private/internal properties
+                if (kv.first.empty()) continue;
+
+                // Store property name as string key, property value as map value
+                storage->data[Value{kv.first}] = kv.second.value;
             }
         }
     }
 
+    thisObj->properties["__map__"] = PropertyDescriptor{storage, true, false, false, tok};
     return std::monostate{};
 }
 
@@ -52,16 +64,21 @@ static Value native_HashMap_set(const std::vector<Value>& args, EnvPtr, const To
         throw SwaziError("TypeError", "HashMap.set requires (this, key, value)", tok.loc);
     }
 
-    if (!std::holds_alternative<ObjectPtr>(args[0])) {
-        throw SwaziError("TypeError", "HashMap method called on non-object", tok.loc);
+    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+
+    // Get or create the map storage
+    auto it = obj->properties.find("__map__");
+    MapStoragePtr storage;
+
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        storage = std::make_shared<MapStorage>();
+        obj->properties["__map__"] = PropertyDescriptor{storage, true, false, false, tok};
+    } else {
+        storage = std::get<MapStoragePtr>(it->second.value);
     }
 
-    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    std::string key = value_to_string_simple_collections(args[1]);
-    Value val = args[2];
-
-    // Store directly in object properties with prefix to avoid collision
-    obj->properties["$map$" + key] = PropertyDescriptor{val, false, false, false, tok};
+    // Store with Value key directly!
+    storage->data[args[1]] = args[2];
 
     return std::monostate{};
 }
@@ -71,16 +88,18 @@ static Value native_HashMap_get(const std::vector<Value>& args, EnvPtr, const To
         throw SwaziError("TypeError", "HashMap.get requires (this, key)", tok.loc);
     }
 
-    if (!std::holds_alternative<ObjectPtr>(args[0])) {
-        throw SwaziError("TypeError", "HashMap method called on non-object", tok.loc);
+    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    auto it = obj->properties.find("__map__");
+
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        return std::monostate{};
     }
 
-    ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    std::string key = value_to_string_simple_collections(args[1]);
+    MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+    auto entry = storage->data.find(args[1]);
 
-    auto it = obj->properties.find("$map$" + key);
-    if (it != obj->properties.end()) {
-        return it->second.value;
+    if (entry != storage->data.end()) {
+        return entry->second;
     }
 
     return std::monostate{};
@@ -96,9 +115,14 @@ static Value native_HashMap_has(const std::vector<Value>& args, EnvPtr, const To
     }
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    std::string key = value_to_string_simple_collections(args[1]);
+    auto it = obj->properties.find("__map__");
 
-    return obj->properties.find("$map$" + key) != obj->properties.end();
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        return false;
+    }
+
+    MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+    return storage->data.find(args[1]) != storage->data.end();
 }
 
 static Value native_HashMap_delete(const std::vector<Value>& args, EnvPtr, const Token& tok) {
@@ -111,11 +135,17 @@ static Value native_HashMap_delete(const std::vector<Value>& args, EnvPtr, const
     }
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    std::string key = value_to_string_simple_collections(args[1]);
+    auto it = obj->properties.find("__map__");
 
-    auto it = obj->properties.find("$map$" + key);
-    if (it != obj->properties.end()) {
-        obj->properties.erase(it);
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        return false;
+    }
+
+    MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+    auto entry = storage->data.find(args[1]);
+
+    if (entry != storage->data.end()) {
+        storage->data.erase(entry);
         return true;
     }
 
@@ -128,12 +158,18 @@ static Value native_HashMap_keys(const std::vector<Value>& args, EnvPtr, const T
     }
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    auto it = obj->properties.find("__map__");
+
     auto arr = std::make_shared<ArrayValue>();
 
-    for (const auto& kv : obj->properties) {
-        if (kv.first.substr(0, 5) == "$map$") {
-            arr->elements.push_back(Value{kv.first.substr(5)});
-        }
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        return arr;
+    }
+
+    MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+
+    for (const auto& kv : storage->data) {
+        arr->elements.push_back(kv.first);
     }
 
     return arr;
@@ -145,12 +181,18 @@ static Value native_HashMap_values(const std::vector<Value>& args, EnvPtr, const
     }
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    auto it = obj->properties.find("__map__");
+
     auto arr = std::make_shared<ArrayValue>();
 
-    for (const auto& kv : obj->properties) {
-        if (kv.first.substr(0, 5) == "$map$") {
-            arr->elements.push_back(kv.second.value);
-        }
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        return arr;
+    }
+
+    MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+
+    for (const auto& kv : storage->data) {
+        arr->elements.push_back(kv.second);
     }
 
     return arr;
@@ -162,15 +204,14 @@ static Value native_HashMap_size(const std::vector<Value>& args, EnvPtr, const T
     }
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
-    size_t count = 0;
+    auto it = obj->properties.find("__map__");
 
-    for (const auto& kv : obj->properties) {
-        if (kv.first.substr(0, 5) == "$map$") {
-            count++;
-        }
+    if (it == obj->properties.end() || !std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        return 0.0;
     }
 
-    return static_cast<double>(count);
+    MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+    return static_cast<double>(storage->data.size());
 }
 
 static Value native_HashMap_clear(const std::vector<Value>& args, EnvPtr, const Token& tok) {
@@ -179,15 +220,11 @@ static Value native_HashMap_clear(const std::vector<Value>& args, EnvPtr, const 
     }
 
     ObjectPtr obj = std::get<ObjectPtr>(args[0]);
+    auto it = obj->properties.find("__map__");
 
-    // Remove all $map$ prefixed properties
-    auto it = obj->properties.begin();
-    while (it != obj->properties.end()) {
-        if (it->first.substr(0, 5) == "$map$") {
-            it = obj->properties.erase(it);
-        } else {
-            ++it;
-        }
+    if (it != obj->properties.end() && std::holds_alternative<MapStoragePtr>(it->second.value)) {
+        MapStoragePtr storage = std::get<MapStoragePtr>(it->second.value);
+        storage->data.clear();
     }
 
     return std::monostate{};
@@ -482,10 +519,15 @@ std::shared_ptr<ObjectValue> make_collections_exports(EnvPtr env) {
         p->defaultValue = std::make_unique<NullNode>(tok);
         ctor->params.push_back(std::move(p));
 
-        // Call native constructor
+        // Call native constructor with both this and sourceObj
         auto call = std::make_unique<CallExpressionNode>();
         call->callee = std::make_unique<IdentifierNode>();
         static_cast<IdentifierNode*>(call->callee.get())->name = "HashMap_native_ctor";
+
+        // Pass 'this' as first argument
+        call->arguments.push_back(std::make_unique<ThisExpressionNode>());
+
+        // Pass sourceObj as second argument
         auto srcId = std::make_unique<IdentifierNode>();
         srcId->name = "sourceObj";
         call->arguments.push_back(std::move(srcId));

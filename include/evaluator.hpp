@@ -153,6 +153,9 @@ using RangePtr = std::shared_ptr<RangeValue>;
 struct DateTimeValue;
 using DateTimePtr = std::shared_ptr<DateTimeValue>;
 
+struct MapStorage;
+using MapStoragePtr = std::shared_ptr<MapStorage>;
+
 using Value = std::variant<
     std::monostate,
     double,
@@ -168,7 +171,166 @@ using Value = std::variant<
     BufferPtr,
     FilePtr,
     RangePtr,
-    DateTimePtr>;
+    DateTimePtr,
+    MapStoragePtr>;
+
+struct ValueHash {
+    std::size_t operator()(const Value& v) const {
+        // For value types, hash the actual value
+        if (std::holds_alternative<double>(v)) {
+            // Hash the bits of the double to handle NaN and special values
+            double d = std::get<double>(v);
+            return std::hash<double>{}(d);
+        }
+
+        if (std::holds_alternative<std::string>(v)) {
+            return std::hash<std::string>{}(std::get<std::string>(v));
+        }
+
+        if (std::holds_alternative<bool>(v)) {
+            return std::hash<bool>{}(std::get<bool>(v));
+        }
+
+        if (std::holds_alternative<std::monostate>(v)) {
+            // All null values hash to the same value
+            return 0;
+        }
+
+        // For reference types, hash the pointer address
+        if (std::holds_alternative<ArrayPtr>(v)) {
+            auto ptr = std::get<ArrayPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<ObjectPtr>(v)) {
+            auto ptr = std::get<ObjectPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<FunctionPtr>(v)) {
+            auto ptr = std::get<FunctionPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<ClassPtr>(v)) {
+            auto ptr = std::get<ClassPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<PromisePtr>(v)) {
+            auto ptr = std::get<PromisePtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<GeneratorPtr>(v)) {
+            auto ptr = std::get<GeneratorPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<BufferPtr>(v)) {
+            auto ptr = std::get<BufferPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<FilePtr>(v)) {
+            auto ptr = std::get<FilePtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<RangePtr>(v)) {
+            auto ptr = std::get<RangePtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<DateTimePtr>(v)) {
+            auto ptr = std::get<DateTimePtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
+        if (std::holds_alternative<HoleValue>(v)) {
+            // Holes hash to a distinct value
+            return 1;
+        }
+
+        // Fallback
+        return 0;
+    }
+};
+struct ValueEqual {
+    bool operator()(const Value& a, const Value& b) const {
+        // Different types are never equal
+        if (a.index() != b.index()) {
+            return false;
+        }
+
+        // Value types: compare by value
+        if (std::holds_alternative<double>(a)) {
+            return std::get<double>(a) == std::get<double>(b);
+        }
+
+        if (std::holds_alternative<std::string>(a)) {
+            return std::get<std::string>(a) == std::get<std::string>(b);
+        }
+
+        if (std::holds_alternative<bool>(a)) {
+            return std::get<bool>(a) == std::get<bool>(b);
+        }
+
+        if (std::holds_alternative<std::monostate>(a)) {
+            return true;  // All nulls are equal
+        }
+
+        if (std::holds_alternative<HoleValue>(a)) {
+            return true;  // All holes are equal
+        }
+
+        // Reference types: compare by identity (pointer equality)
+        if (std::holds_alternative<ArrayPtr>(a)) {
+            return std::get<ArrayPtr>(a).get() == std::get<ArrayPtr>(b).get();
+        }
+
+        if (std::holds_alternative<ObjectPtr>(a)) {
+            return std::get<ObjectPtr>(a).get() == std::get<ObjectPtr>(b).get();
+        }
+
+        if (std::holds_alternative<FunctionPtr>(a)) {
+            return std::get<FunctionPtr>(a).get() == std::get<FunctionPtr>(b).get();
+        }
+
+        if (std::holds_alternative<ClassPtr>(a)) {
+            return std::get<ClassPtr>(a).get() == std::get<ClassPtr>(b).get();
+        }
+
+        if (std::holds_alternative<PromisePtr>(a)) {
+            return std::get<PromisePtr>(a).get() == std::get<PromisePtr>(b).get();
+        }
+
+        if (std::holds_alternative<GeneratorPtr>(a)) {
+            return std::get<GeneratorPtr>(a).get() == std::get<GeneratorPtr>(b).get();
+        }
+
+        if (std::holds_alternative<BufferPtr>(a)) {
+            return std::get<BufferPtr>(a).get() == std::get<BufferPtr>(b).get();
+        }
+
+        if (std::holds_alternative<FilePtr>(a)) {
+            return std::get<FilePtr>(a).get() == std::get<FilePtr>(b).get();
+        }
+
+        if (std::holds_alternative<RangePtr>(a)) {
+            return std::get<RangePtr>(a).get() == std::get<RangePtr>(b).get();
+        }
+
+        if (std::holds_alternative<DateTimePtr>(a)) {
+            return std::get<DateTimePtr>(a).get() == std::get<DateTimePtr>(b).get();
+        }
+
+        return false;
+    }
+};
+struct MapStorage {
+    std::unordered_map<Value, Value, ValueHash, ValueEqual> data;
+};
 
 struct DateTimeValue {
     std::string literalText;
