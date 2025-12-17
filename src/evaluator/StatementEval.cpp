@@ -570,13 +570,29 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             auto bodyEnv = std::make_shared<Environment>(forEnv);
 
             // run body
-            for (auto& s : fn->body) {
+            for (size_t i = 0; i < fn->body.size(); ++i) {
+                auto& s = fn->body[i];
+
+                if (resuming && state && i < state->body_statement_index) {
+                    continue;  // Skip already-executed statements
+                }
+
                 evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+
+                if (state) {
+                    state->body_statement_index = i + 1;  // Track progress
+                }
+
                 if (did_return && *did_return) {
                     if (frame) frame->loop_states.erase(loop_id);
                     return;
                 }
                 if (loopCtrl->did_break || loopCtrl->did_continue) break;
+            }
+
+            // Reset for next iteration
+            if (state) {
+                state->body_statement_index = 0;
             }
 
             // handle break
@@ -644,20 +660,39 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             for (size_t i = start_index; i < arr->elements.size(); ++i) {
                 if (state) state->current_index = i;
 
-                if (fin->valueVar) {
-                    loopEnv->values[fin->valueVar->name] = {arr->elements[i], false};
-                }
-                if (fin->indexVar) {
-                    loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
+                // Only set loop variables on first entry to this iteration
+                if (!resuming || i > start_index) {
+                    if (fin->valueVar) {
+                        loopEnv->values[fin->valueVar->name] = {arr->elements[i], false};
+                    }
+                    if (fin->indexVar) {
+                        loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
+                    }
                 }
 
-                for (auto& s : fin->body) {
+                for (size_t j = 0; j < fin->body.size(); ++j) {
+                    auto& s = fin->body[j];
+
+                    if (resuming && state && j < state->body_statement_index) {
+                        continue;  // Skip already-executed statements
+                    }
+
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+
+                    if (state) {
+                        state->body_statement_index = j + 1;
+                    }
+
                     if (did_return && *did_return) {
                         if (frame) frame->loop_states.erase(loop_id);
                         return;
                     }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                }
+
+                if (state) {
+                    state->body_statement_index = 0;
+                    resuming = false;  // Clear resuming flag after first iteration completes
                 }
 
                 if (loopCtrl->did_break) {
@@ -754,21 +789,40 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 double currentValue = std::get<double>(state->current_value);
                 iteration_count++;
 
-                if (fin->valueVar) {
-                    loopEnv->values[fin->valueVar->name] = {currentValue, false};
-                }
-                if (fin->indexVar) {
-                    loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
+                // Only set loop variables on first entry to this iteration
+                if (!resuming || state->body_statement_index > 0) {
+                    if (fin->valueVar) {
+                        loopEnv->values[fin->valueVar->name] = {currentValue, false};
+                    }
+                    if (fin->indexVar) {
+                        loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
+                    }
                 }
 
                 // Execute body (may suspend here)
-                for (auto& s : fin->body) {
+                for (size_t j = 0; j < fin->body.size(); ++j) {
+                    auto& s = fin->body[j];
+
+                    if (resuming && state && j < state->body_statement_index) {
+                        continue;  // Skip already-executed statements
+                    }
+
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+
+                    if (state) {
+                        state->body_statement_index = j + 1;
+                    }
+
                     if (did_return && *did_return) {
                         if (frame) frame->loop_states.erase(loop_id);
                         return;
                     }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                }
+
+                if (state) {
+                    state->body_statement_index = 0;
+                    resuming = false;  // Clear resuming flag after first iteration completes
                 }
 
                 if (loopCtrl->did_break) {
@@ -817,6 +871,58 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 return;
             }
 
+            // Check if this is a generator object (has __generator__ property)
+            auto gen_it = obj->properties.find("__generator__");
+            if (gen_it != obj->properties.end() &&
+                std::holds_alternative<GeneratorPtr>(gen_it->second.value)) {
+                GeneratorPtr gen = std::get<GeneratorPtr>(gen_it->second.value);
+                size_t position = 0;
+
+                while (true) {
+                    // Call next() on the generator
+                    bool done = false;
+                    Value yielded = resume_generator(gen, std::monostate{}, false, false, done);
+
+                    // If generator is exhausted, exit loop
+                    if (done) break;
+
+                    // Bind yielded value to loop variable
+                    if (fin->valueVar) {
+                        loopEnv->values[fin->valueVar->name] = {yielded, false};
+                    }
+                    if (fin->indexVar) {
+                        loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
+                    }
+
+                    // Execute loop body
+                    for (auto& s : fin->body) {
+                        evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                        if (did_return && *did_return) {
+                            if (frame) frame->loop_states.erase(loop_id);
+                            return;
+                        }
+                        if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                    }
+
+                    if (loopCtrl->did_break) {
+                        loopCtrl->did_break = false;
+                        if (frame) frame->loop_states.erase(loop_id);
+                        break;
+                    }
+
+                    if (loopCtrl->did_continue) {
+                        loopCtrl->did_continue = false;
+                        position++;
+                        continue;
+                    }
+
+                    position++;
+                }
+
+                if (frame) frame->loop_states.erase(loop_id);
+                return;
+            }
+
             // Snapshot keys on first entry
             if (!resuming && state) {
                 state->keys_snapshot.clear();
@@ -846,13 +952,29 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     loopEnv->values[fin->indexVar->name] = {it->second.value, false};
                 }
 
-                for (auto& s : fin->body) {
+                for (size_t j = 0; j < fin->body.size(); ++j) {
+                    auto& s = fin->body[j];
+
+                    if (resuming && state && j < state->body_statement_index) {
+                        continue;  // Skip already-executed statements
+                    }
+
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+
+                    if (state) {
+                        state->body_statement_index = j + 1;
+                    }
+
                     if (did_return && *did_return) {
                         if (frame) frame->loop_states.erase(loop_id);
                         return;
                     }
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                }
+
+                if (state) {
+                    state->body_statement_index = 0;
+                    resuming = false;  // Clear resuming flag
                 }
 
                 if (loopCtrl->did_break) {
@@ -886,8 +1008,19 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
                 }
 
-                for (auto& s : fin->body) {
+                for (size_t j = 0; j < fin->body.size(); ++j) {
+                    auto& s = fin->body[j];
+
+                    if (resuming && state && j < state->body_statement_index) {
+                        continue;  // Skip already-executed statements
+                    }
+
                     evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+
+                    if (state) {
+                        state->body_statement_index = j + 1;
+                    }
+
                     if (did_return && *did_return) {
                         if (frame) frame->loop_states.erase(loop_id);
                         return;
@@ -895,6 +1028,10 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     if (loopCtrl->did_break || loopCtrl->did_continue) break;
                 }
 
+                if (state) {
+                    state->body_statement_index = 0;
+                    resuming = false;  // Clear resuming flag
+                }
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
                     if (frame) frame->loop_states.erase(loop_id);
@@ -925,20 +1062,60 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         LoopControl local_lc;
         LoopControl* loopCtrl = lc ? lc : &local_lc;
 
+        // Get current frame and loop state
+        void* loop_id = static_cast<void*>(wn);
+        CallFramePtr frame = current_frame();
+
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame && frame->has_loop_state(loop_id)) {
+            resuming = true;
+            state = &frame->loop_states[loop_id];
+        } else if (frame) {
+            // First entry - initialize state
+            state = &frame->loop_states[loop_id];
+            state->is_first_entry = true;
+            state->body_statement_index = 0;
+        }
+
         while (true) {
             Value condVal = evaluate_expression(wn->condition.get(), env);
-            if (!to_bool(condVal)) break;
+            if (!to_bool(condVal)) {
+                if (frame) frame->loop_states.erase(loop_id);
+                break;
+            }
 
             auto bodyEnv = std::make_shared<Environment>(env);
 
-            for (auto& s : wn->body) {
+            for (size_t j = 0; j < wn->body.size(); ++j) {
+                auto& s = wn->body[j];
+
+                if (resuming && state && j < state->body_statement_index) {
+                    continue;  // Skip already-executed statements
+                }
+
                 evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
-                if (did_return && *did_return) return;
+
+                if (state) {
+                    state->body_statement_index = j + 1;
+                }
+
+                if (did_return && *did_return) {
+                    if (frame) frame->loop_states.erase(loop_id);
+                    return;
+                }
                 if (loopCtrl->did_break || loopCtrl->did_continue) break;
+            }
+
+            if (state) {
+                state->body_statement_index = 0;
+                resuming = false;  // Clear resuming flag after first iteration completes
             }
 
             if (loopCtrl->did_break) {
                 loopCtrl->did_break = false;
+                if (frame) frame->loop_states.erase(loop_id);
                 break;
             }
             if (loopCtrl->did_continue) {
@@ -947,6 +1124,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             }
         }
 
+        if (frame) frame->loop_states.erase(loop_id);
         return;
     }
 
@@ -955,38 +1133,80 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         LoopControl local_lc;
         LoopControl* loopCtrl = lc ? lc : &local_lc;
 
+        // Get current frame and loop state
+        void* loop_id = static_cast<void*>(dwn);
+        CallFramePtr frame = current_frame();
+
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame && frame->has_loop_state(loop_id)) {
+            resuming = true;
+            state = &frame->loop_states[loop_id];
+        } else if (frame) {
+            // First entry - initialize state
+            state = &frame->loop_states[loop_id];
+            state->is_first_entry = true;
+            state->body_statement_index = 0;
+        }
+
         do {
             auto bodyEnv = std::make_shared<Environment>(env);
 
-            for (auto& s : dwn->body) {
+            for (size_t j = 0; j < dwn->body.size(); ++j) {
+                auto& s = dwn->body[j];
+
+                if (resuming && state && j < state->body_statement_index) {
+                    continue;  // Skip already-executed statements
+                }
+
                 evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
-                if (did_return && *did_return) return;
+
+                if (state) {
+                    state->body_statement_index = j + 1;
+                }
+
+                if (did_return && *did_return) {
+                    if (frame) frame->loop_states.erase(loop_id);
+                    return;
+                }
                 if (loopCtrl->did_break || loopCtrl->did_continue) break;
+            }
+
+            if (state) {
+                state->body_statement_index = 0;
+                resuming = false;  // Clear resuming flag after first iteration completes
             }
 
             if (loopCtrl->did_break) {
                 loopCtrl->did_break = false;
+                if (frame) frame->loop_states.erase(loop_id);
                 break;
             }
             if (loopCtrl->did_continue) {
                 loopCtrl->did_continue = false;
-                // continue -> evaluate condition then maybe loop again (like normal continue)
+                // continue -> evaluate condition then maybe loop again
                 Value condVal = evaluate_expression(dwn->condition.get(), bodyEnv);
-                if (!to_bool(condVal))
+                if (!to_bool(condVal)) {
+                    if (frame) frame->loop_states.erase(loop_id);
                     break;
-                else
+                } else {
                     continue;
+                }
             }
 
             // normal case: test condition for next iteration
             Value condVal = evaluate_expression(dwn->condition.get(), bodyEnv);
-            if (!to_bool(condVal)) break;
+            if (!to_bool(condVal)) {
+                if (frame) frame->loop_states.erase(loop_id);
+                break;
+            }
 
         } while (true);
 
+        if (frame) frame->loop_states.erase(loop_id);
         return;
     }
-
     if (auto bs = dynamic_cast<BreakStatementNode*>(stmt)) {
         if (lc) lc->did_break = true;
         return;

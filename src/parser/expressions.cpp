@@ -1149,7 +1149,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
             nxt.type == TokenType::NAN_LITERAL || nxt.type == TokenType::INF_LITERAL;
 
         if (can_start_expr) {
-            node->expression = parse_unary();
+            node->expression = parse_expression();
         } else {
             node->expression = nullptr;  // yield with no operand
         }

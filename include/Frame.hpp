@@ -44,8 +44,9 @@ struct CallFrame {
 
     // Loop state persistence for async/generator contexts
     struct LoopState {
-        EnvPtr loop_env;              // The forEnv/loopEnv
-        size_t iteration_count = 0;   // Track which iteration we're on
+        EnvPtr loop_env;             // The forEnv/loopEnv
+        size_t iteration_count = 0;  // Track which iteration we're on
+        size_t body_statement_index = 0;
         Value current_value;          // For for-in loops (current element/key)
         size_t current_index = 0;     // For for-in loops (position in array/object)
         bool is_first_entry = false;  // Track if this is first time entering loop
@@ -80,6 +81,8 @@ struct CallFrame {
             return range_copy_ptr != nullptr;
         }
     };
+
+    EnvPtr paused_env = nullptr;
 
     // Map: statement address -> loop state (supports nested loops)
     std::unordered_map<void*, LoopState> loop_states;
