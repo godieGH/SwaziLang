@@ -955,7 +955,6 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
     // ============================================================================
 
     auto isTTY_impl = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-        if (!g_stdin_handle) return Value{false};
         return Value{uv_guess_handle(0) == UV_TTY};
     };
     obj->properties["isTTY"] = {
