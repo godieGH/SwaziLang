@@ -207,6 +207,13 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             return ss.str();
         }
 
+        auto prom_it = op->properties.find("__promise__");
+        if (prom_it != op->properties.end() &&
+            prom_it->second.is_private &&
+            std::holds_alternative<PromisePtr>(prom_it->second.value)) {
+            return print_value(prom_it->second.value);
+        }
+
         return print_object(op, 0, visited);  // <- you write this pretty-printer
     }
     if (std::holds_alternative<ClassPtr>(v)) {
@@ -1020,6 +1027,12 @@ std::string Evaluator::print_value(
             ss << "Object [generator " << fname << " <" << state_str << ">] " + print_object(op, depth, visited);
             return ss.str();
         }
+        auto prom_it = op->properties.find("__promise__");
+        if (prom_it != op->properties.end() &&
+            prom_it->second.is_private &&
+            std::holds_alternative<PromisePtr>(prom_it->second.value)) {
+            return print_value(prom_it->second.value, depth, visited, arrvisited);
+        }
 
         return print_object(op, depth, visited);
     }
@@ -1061,11 +1074,10 @@ std::string Evaluator::print_value(
 
         if (p->state == PromiseValue::State::FULFILLED) {
             std::ostringstream ss;
-            ss << "Promise { ";
+            ss << (use_color ? (Color::bright_blue + "Promise { " + Color::reset) : "Promise { ");
             ss << print_value(p->result, depth + 1, visited, arrvisited);
-            ss << " }";
-            std::string s = ss.str();
-            return use_color ? (Color::bright_blue + s + Color::reset) : s;
+            ss << (use_color ? (Color::bright_blue + " }" + Color::reset) : "}");
+            return ss.str();
         }
 
         // REJECTED
