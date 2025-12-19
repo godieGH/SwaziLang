@@ -36,6 +36,7 @@ class Parser {
     // expression parsing (precedence chain)
     std::unique_ptr<ExpressionNode> parse_expression();
     std::unique_ptr<ExpressionNode> parse_ternary();
+    std::unique_ptr<ExpressionNode> parse_logical_nullish();
     std::unique_ptr<ExpressionNode> parse_logical_or();
     std::unique_ptr<ExpressionNode> parse_logical_and();
     std::unique_ptr<ExpressionNode> parse_equality();

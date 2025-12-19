@@ -75,14 +75,14 @@ std::unique_ptr<ExpressionNode> Parser::parse_ternary() {
     return node;
 }
 std::unique_ptr<ExpressionNode> Parser::parse_range() {
-    auto left = parse_logical_or();
+    auto left = parse_logical_nullish();
 
     // Check for range operators: ".." or "..."
     if (peek().type == TokenType::DOUBLEDOTS || peek().type == TokenType::ELLIPSIS) {
         Token opTok = consume();
         bool inclusive = (opTok.type == TokenType::ELLIPSIS);
 
-        auto right = parse_logical_or();
+        auto right = parse_logical_nullish();
 
         auto node = std::make_unique<RangeExpressionNode>();
         node->token = opTok;
@@ -93,12 +93,27 @@ std::unique_ptr<ExpressionNode> Parser::parse_range() {
         // Optional step: check for "step" keyword
         if (peek().type == TokenType::STEP) {
             consume();  // consume "step"
-            node->step = parse_logical_or();
+            node->step = parse_logical_nullish();
         }
 
         return node;
     }
 
+    return left;
+}
+
+std::unique_ptr<ExpressionNode> Parser::parse_logical_nullish() {
+    auto left = parse_logical_or();
+    while (peek().type == TokenType::NULLISH) {
+        Token op = consume();
+        auto right = parse_logical_or();
+        auto node = std::make_unique<BinaryExpressionNode>();
+        node->op = !op.value.empty() ? op.value : "??";
+        node->left = std::move(left);
+        node->right = std::move(right);
+        node->token = op;
+        left = std::move(node);
+    }
     return left;
 }
 std::unique_ptr<ExpressionNode> Parser::parse_logical_or() {

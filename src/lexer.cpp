@@ -1383,6 +1383,12 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+    if (c == '?' && peek_next() == '?') {
+        add_token(out, TokenType::NULLISH, "??", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
     if (c == '.' && peek_next() == '.') {
         add_token(out, TokenType::DOUBLEDOTS, "..", line, col, 2);
         advance();

@@ -4339,6 +4339,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return evaluate_expression(b->right.get(), env);
         }
 
+        if (op == "??") {
+            // If left is null -> return left (no RHS evaluation).
+            if (!std::holds_alternative<std::monostate>(left)) return left;
+            // Otherwise evaluate RHS and return the RHS value (preserve identity).
+            return evaluate_expression(b->right.get(), env);
+        }
+
         // Logical OR: short-circuit; return operand (left or right).
         if (op == "||" || op == "au") {
             // If left is truthy -> return left (no RHS evaluation).

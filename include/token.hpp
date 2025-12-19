@@ -110,6 +110,7 @@ enum class TokenType {
     CLOSEBRACKET,
     COLON,
     QUESTIONMARK,
+    NULLISH,
     DOT,
     AT_SIGN,
     AMPERSAND,
