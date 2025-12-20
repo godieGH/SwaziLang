@@ -519,6 +519,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
     // --- ForStatementNode (kwa) ---
     if (auto fn = dynamic_cast<ForStatementNode*>(stmt)) {
+        if(fn->body.empty()) return;
         // Get current frame and loop state
         void* loop_id = static_cast<void*>(fn);
         CallFramePtr frame = current_frame();
