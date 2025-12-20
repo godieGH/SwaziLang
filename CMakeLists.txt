@@ -21,6 +21,11 @@ target_include_directories(swazi_net
     PRIVATE ${CMAKE_SOURCE_DIR}/src/evaluator/modules_builtins/net_module
 )
 
+# begining of format lib
+file(GLOB_RECURSE FORMATSOURCE "src/format/*.cc" "src/format/*.cpp")
+add_library(swazi_format SHARED ${FORMATSOURCE})
+target_include_directories(swazi_format PUBLIC ${CMAKE_SOURCE_DIR}/include)
+
 # --- BEGIN embed builtins ---
 find_package(Python COMPONENTS Interpreter REQUIRED)
 
@@ -88,7 +93,10 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --- CORE LIBRARY (compile everything once here) ---
 file(GLOB_RECURSE LIB_SOURCES "src/*.cpp" "src/*.cc" "src/*.c")
 list(FILTER LIB_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
-
+# Exclude the network module sources to avoid double-compilation
+list(FILTER LIB_SOURCES EXCLUDE REGEX "src/evaluator/modules_builtins/net_module/.*")
+# Exclude swazi_format too
+list(FILTER LIB_SOURCES EXCLUDE REGEX "src/format/.*")
 add_library(swazi_lib ${LIB_SOURCES} "${GENERATED_BUILTIN_CPP}")
 
 target_include_directories(swazi_lib PUBLIC 
@@ -107,6 +115,7 @@ target_compile_definitions(swazi_lib PUBLIC
 target_link_libraries(swazi_lib PUBLIC 
     linenoise
     swazi_net
+    swazi_format
     uv
     sodium
     nlohmann_json::nlohmann_json

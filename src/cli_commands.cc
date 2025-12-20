@@ -10,7 +10,9 @@
 #include <regex>
 #include <sstream>
 
+#include "SourceManager.hpp"
 #include "evaluator.hpp"
+#include "format/format.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
 
@@ -153,6 +155,8 @@ CommandResult execute_command(const std::vector<std::string>& args) {
         return cmd_publish(sub_args);
     } else if (command == "install") {
         return cmd_install(sub_args);
+    } else if (command == "fmt") {
+        return cmd_fmt(sub_args);
     } else {
         return {1, "Unknown command: " + command};
     }
@@ -817,6 +821,75 @@ CommandResult cmd_install(const std::vector<std::string>& args) {
     std::cout << "install command (stub)\n";
     std::cout << "This will install dependencies from swazi.json.\n";
     return {0, "Not yet implemented"};
+}
+
+CommandResult cmd_fmt(const std::vector<std::string>& args) {
+    auto print_usage = []() {
+        std::cout << R"(Usage: swazi fmt [options] <src> [dest]
+
+Options:
+  -r, --recursive    Recursively format files in the source path
+  -p, --print        Print output to stdout instead of overwriting
+  -h, --help         Show this help message
+
+Note: For filenames starting with '-', use a path prefix like './-file.sl'
+)";
+    };
+
+    if (args.empty()) {
+        print_usage();
+        return {0, ""};
+    }
+
+    bool recursive = false;
+    bool print_mode = false;
+    std::vector<std::string> arguments;
+    bool is_parsed = false;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        std::string arg = args[i];
+
+        // check if it is an option and validate it
+        if (arg[0] == '-') {
+            if (arg == "-h" || arg == "--help") {
+                print_usage();
+                return {0, ""};
+            } else if (arg == "-r" || arg == "--recursive") {
+                recursive = true;
+            } else if (arg == "-p" || arg == "--print") {
+                print_mode = true;
+            } else {
+                return {1, "Invalid option `" + arg + "` in fmt command."};
+            }
+        } else {
+            if (is_parsed) {
+                return {1, "Too many arguments passed.\nUsage: \n--> swazi fmt <src> [dest]"};
+            }
+            arguments.push_back(arg);
+
+            if ((i + 1) < args.size() && args[i + 1][0] != '-') {
+                i++;
+                arguments.push_back(args[i]);
+            }
+            is_parsed = true;
+        }
+    }
+
+    // validate arguments
+    if (arguments.size() < 1) {
+        return {1, "fmt command requires a source path\nUsage: \n--> swazi fmt <src>"};
+    }
+
+    try {
+        Formatter::Flags flags(recursive, print_mode);
+        Formatter(arguments, flags);
+    } catch (const std::runtime_error& e) {
+        return {1, e.what()};
+    } catch (const std::exception& e) {
+        return {1, std::string("formating error: ") + e.what()};
+    }
+
+    return {0, ""};
 }
 
 }  // namespace cli
