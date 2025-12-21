@@ -241,12 +241,12 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
         obj->properties["test"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // fullMatch(str, pattern [, flags]) -> bool
+    // fullmatch(str, pattern [, flags]) -> bool
     {
-        auto fn = make_native_fn("regex.fullMatch", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        auto fn = make_native_fn("regex.fullmatch", [compile_re](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.size() < 2) {
               throw SwaziError("RuntimeError",
-                "regex.fullMatch requires two arguments: str and pattern. Usage: fullMatch(str, pattern [, flags]) -> bool",
+                "regex.fullmatch requires two arguments: str and pattern. Usage: fullmatch(str, pattern [, flags]) -> bool",
                 token.loc);
             }
             std::string s = value_to_string_simple(args[0]);
@@ -259,7 +259,7 @@ std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
             } catch (const std::regex_error &e) {
                 throw SwaziError("RegexError", std::string("regex error: ") + e.what(), token.loc);
             } }, env);
-        obj->properties["fullMatch"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["fullmatch"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // search(str, pattern [, flags]) -> number (first match position) or -1; supports m
