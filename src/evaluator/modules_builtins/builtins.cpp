@@ -2374,6 +2374,24 @@ std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator)
 std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
+    // path.separator - "/" on Unix, "\" on Windows
+#ifdef _WIN32
+    obj->properties["separator"] = PropertyDescriptor{
+        Value{std::string("\\")}, false, false, true, Token()};
+#else
+    obj->properties["separator"] = PropertyDescriptor{
+        Value{std::string("/")}, false, false, true, Token()};
+#endif
+
+// path.delimiter - ":" on Unix, ";" on Windows (for PATH env var)
+#ifdef _WIN32
+    obj->properties["delimiter"] = PropertyDescriptor{
+        Value{std::string(";")}, false, false, true, Token()};
+#else
+    obj->properties["delimiter"] = PropertyDescriptor{
+        Value{std::string(":")}, false, false, true, Token()};
+#endif
+
     // join(...segments) -> string
     {
         auto fn = make_native_fn("path.join", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -2430,6 +2448,140 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
                 return Value{ p.lexically_normal().string() };
             } }, env);
         obj->properties["resolve"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.normalize(path) -> string
+    {
+        auto fn = make_native_fn("path.normalize", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("RuntimeError", "path.normalize requires a path argument", token.loc);
+        }
+        fs::path p = value_to_string_simple(args[0]);
+        // lexically_normal() handles:
+        // - collapsing "."
+        // - resolving ".." lexically
+        // - removing duplicate separators
+        return Value{p.lexically_normal().string()}; }, env);
+        obj->properties["normalize"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.isAbsolute(path) -> bool
+    {
+        auto fn = make_native_fn("path.isAbsolute", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("RuntimeError", "path.isAbsolute requires a path argument", token.loc);
+        }
+        fs::path p = value_to_string_simple(args[0]);
+        return Value{p.is_absolute()}; }, env);
+        obj->properties["isAbsolute"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+    // path.isRelative(path) -> bool
+    {
+        auto fn = make_native_fn("path.isRelative", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("RuntimeError", "path.isRelative requires a path argument", token.loc);
+        }
+        fs::path p = value_to_string_simple(args[0]);
+        return Value{p.is_relative()}; }, env);
+        obj->properties["isRelative"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.root(path) -> string (returns root component)
+    {
+        auto fn = make_native_fn("path.root", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("RuntimeError", "path.root requires a path argument", token.loc);
+        }
+        fs::path p = value_to_string_simple(args[0]);
+        // root_name() gets drive/UNC part (C:, \\server\share)
+        // root_directory() gets the root name
+        std::string root = p.root_name().string() + p.root_directory().string();
+        return Value{root}; }, env);
+        obj->properties["root"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.rootName(path) -> string (C:, \\server\share)
+    {
+        auto fn = make_native_fn("path.rootName", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("RuntimeError", "path.rootName requires a path argument", token.loc);
+        }
+        fs::path p = value_to_string_simple(args[0]);
+        return Value{p.root_name().string()}; }, env);
+        obj->properties["rootName"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.equals(pathA, pathB) -> bool
+    {
+        auto fn = make_native_fn("path.equals", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("RuntimeError", "path.equals requires two path arguments", token.loc);
+        }
+        fs::path p1 = value_to_string_simple(args[0]);
+        fs::path p2 = value_to_string_simple(args[1]);
+        
+        // lexically_normal() for canonical comparison
+        // This handles separator differences and case sensitivity per OS
+        return Value{p1.lexically_normal() == p2.lexically_normal()}; }, env);
+        obj->properties["equals"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.equivalent(pathA, pathB) -> bool (filesystem-aware)
+    {
+        auto fn = make_native_fn("path.equivalent", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("RuntimeError", "path.equivalent requires two path arguments", token.loc);
+        }
+        fs::path p1 = value_to_string_simple(args[0]);
+        fs::path p2 = value_to_string_simple(args[1]);
+        
+        try {
+            // This checks if they refer to the same file system object
+            // (follows symlinks, checks actual inodes)
+            return Value{fs::equivalent(p1, p2)};
+        } catch (const fs::filesystem_error&) {
+            // If files don't exist or can't be accessed, fall back to lexical
+            return Value{p1.lexically_normal() == p2.lexically_normal()};
+        } }, env);
+        obj->properties["equivalent"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.relative(from, to) -> string
+    {
+        auto fn = make_native_fn("path.relative", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("RuntimeError", "path.relative requires 'from' and 'to' path arguments", token.loc);
+        }
+        fs::path from = value_to_string_simple(args[0]);
+        fs::path to = value_to_string_simple(args[1]);
+        
+        try {
+            // lexically_relative() computes the relative path without filesystem access
+            fs::path result = to.lexically_relative(from);
+            return Value{result.string()};
+        } catch (...) {
+            // If computation fails, return the 'to' path as-is
+            return Value{to.string()};
+        } }, env);
+        obj->properties["relative"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // path.relativeTo(base, target) -> string (alias for clarity)
+    {
+        auto fn = make_native_fn("path.relativeTo", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("RuntimeError", "path.relativeTo requires 'base' and 'target' path arguments", token.loc);
+        }
+        fs::path base = value_to_string_simple(args[0]);
+        fs::path target = value_to_string_simple(args[1]);
+        
+        try {
+            fs::path result = target.lexically_relative(base);
+            return Value{result.string()};
+        } catch (...) {
+            return Value{target.string()};
+        } }, env);
+        obj->properties["relativeTo"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;
