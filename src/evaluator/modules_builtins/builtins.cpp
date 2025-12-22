@@ -847,7 +847,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         } }, env);
         obj->properties["stat"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
-    
+
     // lstat(path) -> object doesnt follow symlink
     {
         auto fn = make_native_fn("fs.lstat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1649,7 +1649,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         return Value{promise}; }, env);
             promises_obj->properties["stat"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
-        
+
         // promises.lstat(path) -> Promise<object>
         {
             auto fn = make_native_fn("fs.promises.lstat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
@@ -1866,7 +1866,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         return Value{promise}; }, env);
             promises_obj->properties["lstat"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
-        
+
         // Attach promises sub-object to main fs object
         obj->properties["promises"] = PropertyDescriptor{Value{promises_obj}, false, false, true, Token()};
     }
@@ -3115,21 +3115,51 @@ std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env) {
             return Value{ p.extension().string() }; }, env);
         obj->properties["extname"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
-    // resolve(...segments)
+
+    // path.resolve(...segments)
     {
         auto fn = make_native_fn("path.resolve", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
-            if (args.empty()) return Value{ std::string() };
+
+        fs::path result = fs::current_path();
+
+        for (const auto& a : args) {
+            fs::path segment = value_to_string_simple(a);
+
+            if (segment.is_absolute()) {
+                result = segment;
+            } else {
+                result /= segment;
+            }
+        }
+        return Value{result.lexically_normal().string()}; }, env);
+        obj->properties["resolve"] = PropertyDescriptor{fn, false, false, false, Token()};
+    }
+
+    // fs.realpath(...segments)
+    {
+        auto fn = make_native_fn("path.realpath", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+            if (args.empty()) {
+                // Standard realpath of nothing is usually the current directory's real path
+                return Value{ fs::canonical(fs::current_path()).string() };
+            }
+    
             fs::path p;
             for (const auto &a : args) {
                 p /= value_to_string_simple(a);
             }
+    
             try {
-                p = fs::weakly_canonical(p);
-                return Value{ p.string() };
+                // 1. weakly_canonical resolves symlinks.
+                // 2. If the file exists, it acts like fs::canonical.
+                // 3. If the file DOES NOT exist, it resolves what it can 
+                //    and treats the rest lexically (preventing a crash/exception).
+                return Value{ fs::weakly_canonical(p).string() };
             } catch (...) {
+                // Fallback for edge cases (e.g., permission errors)
                 return Value{ p.lexically_normal().string() };
             } }, env);
-        obj->properties["resolve"] = PropertyDescriptor{fn, false, false, false, Token()};
+
+        obj->properties["realpath"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     // path.normalize(path) -> string
