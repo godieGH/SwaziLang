@@ -458,7 +458,8 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             // Read file in binary mode always
             std::ifstream in(path, std::ios::binary);
             if (!in.is_open()) {
-                throw SwaziError("IOError", "Failed to open file: " + path, token.loc);
+                std::string reason = std::strerror(errno);
+                throw SwaziError("IOError", "Failed to open file: " + path + " — " + reason, token.loc);
             }
             
             // Read all bytes
