@@ -164,6 +164,8 @@ std::unique_ptr<StatementNode> Parser::parse_for_classic_statement(Token forTok)
             // consume 'data' and parse a variable declaration (we consumed DATA here)
             consume();
             initStmt = parse_variable_declaration();
+            position--;
+            // backtrack the ; so the flow sees it after variable decl
         } else {
             // parse a small assignment/expression statement for the init.
             // We reuse similar logic to parse_assignment_or_expression_statement but
