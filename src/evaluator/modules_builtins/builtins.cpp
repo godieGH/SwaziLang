@@ -1041,6 +1041,86 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         obj->properties["lstat"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
+    // fs.chmod(path, mode) -> bool
+    {
+        auto fn = make_native_fn("fs.chmod", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("RuntimeError", "fs.chmod requires a path and a numeric mode.", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+            if (!std::holds_alternative<double>(args[1])) {
+                throw SwaziError("TypeError", "fs.chmod: mode must be a number (e.g., 0o755).", token.loc);
+            }
+            
+            uint32_t mode = static_cast<uint32_t>(std::get<double>(args[1]));
+            try {
+                // Cast the numeric mode to filesystem permissions
+                fs::permissions(path, static_cast<fs::perms>(mode));
+                return Value{ true };
+            } catch (const fs::filesystem_error &e) {
+                throw SwaziError("FilesystemError", std::string("fs.chmod failed: ") + e.what(), token.loc);
+            } }, env);
+        obj->properties["chmod"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.symlink(target, linkPath) -> bool
+    {
+        auto fn = make_native_fn("fs.symlink", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 2) {
+                throw SwaziError("RuntimeError", "fs.symlink requires a target and a link path.", token.loc);
+            }
+            std::string target = value_to_string_simple(args[0]);
+            std::string linkPath = value_to_string_simple(args[1]);
+            try {
+                // Determine if target is a directory to use the correct filesystem call
+                if (fs::is_directory(target)) {
+                    fs::create_directory_symlink(target, linkPath);
+                } else {
+                    fs::create_symlink(target, linkPath);
+                }
+                return Value{ true };
+            } catch (const fs::filesystem_error &e) {
+                throw SwaziError("FilesystemError", std::string("fs.symlink failed: ") + e.what(), token.loc);
+            } }, env);
+        obj->properties["symlink"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.chown(path, uid, gid) -> bool
+    {
+        auto fn = make_native_fn("fs.chown", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 3) throw SwaziError("RuntimeError", "fs.chown requires path, uid, and gid.", token.loc);
+
+            std::string path = value_to_string_simple(args[0]);
+            int uid = static_cast<int>(std::get<double>(args[1]));
+            int gid = static_cast<int>(std::get<double>(args[2]));
+
+#ifndef _WIN32
+            if (chown(path.c_str(), uid, gid) != 0) {
+                throw SwaziError("SystemError", "chown failed: " + std::string(strerror(errno)), token.loc);
+            }
+            return Value{true};
+#else
+            throw SwaziError("NotSupportedError", "fs.chown is not implemented on Windows.", token.loc);
+#endif
+        },
+            env);
+        obj->properties["chown"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.readlink(path) -> string
+    {
+        auto fn = make_native_fn("fs.readlink", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) throw SwaziError("RuntimeError", "fs.readlink requires a path.", token.loc);
+            
+            std::string path = value_to_string_simple(args[0]);
+            try {
+                return Value{ fs::read_symlink(path).string() };
+            } catch (const fs::filesystem_error &e) {
+                throw SwaziError("FilesystemError", std::string("fs.readlink failed: ") + e.what(), token.loc);
+            } }, env);
+        obj->properties["readlink"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
     {  // ============= fs.promises API =============
         // Create promises sub-object for async versions
         auto promises_obj = std::make_shared<ObjectValue>();
@@ -3432,7 +3512,7 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
         obj->properties["pid"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // os.cwd() -> string
+    // process.cwd() -> string
     {
         auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
         obj->properties["cwd"] = PropertyDescriptor{fn, false, false, false, Token()};
@@ -3458,6 +3538,22 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
             env,
             t);
         obj->properties["on"] = PropertyDescriptor{fn_on, false, false, false, t};
+    }
+
+    // process.chdir(path) -> bool
+    {
+        auto fn = make_native_fn("process.chdir", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "process.chdir requires a path argument.", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+            try {
+                fs::current_path(path); // Changes the process current working directory
+                return Value{ true };
+            } catch (const fs::filesystem_error &e) {
+                throw SwaziError("FilesystemError", std::string("process.chdir failed: ") + e.what(), token.loc);
+            } }, env);
+        obj->properties["chdir"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     return obj;
