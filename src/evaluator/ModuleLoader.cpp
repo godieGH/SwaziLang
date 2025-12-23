@@ -90,7 +90,11 @@ std::string Evaluator::resolve_module_path(const std::string& module_spec, const
     if (requester_filename.empty() || requester_filename == "<repl>") {
         baseDir = fs::current_path();
     } else {
-        baseDir = fs::path(requester_filename).parent_path();
+        try {
+            baseDir = fs::canonical(requester_filename).parent_path();
+        } catch (...) {
+            baseDir = fs::path(requester_filename).parent_path();
+        }
     }
 
     // If spec is absolute, try it directly
