@@ -1284,6 +1284,35 @@ void Lexer::scan_token(std::vector<Token>& out) {
         return;
     }
 
+    if (c == '*' && peek_next() == '*' && peek(2) == '=') {
+        add_token(out, TokenType::DOUBLESTAR_ASSIGN, "**=", line, col, 3);
+        advance();
+        advance();
+        advance();
+        return;
+    }
+    if (c == '&' && peek_next() == '&' && peek(2) == '=') {
+        add_token(out, TokenType::AND_ASSIGN, "&&=", line, col, 3);
+        advance();
+        advance();
+        advance();
+        return;
+    }
+    if (c == '|' && peek_next() == '|' && peek(2) == '=') {
+        add_token(out, TokenType::OR_ASSIGN, "||=", line, col, 3);
+        advance();
+        advance();
+        advance();
+        return;
+    }
+    if (c == '?' && peek_next() == '?' && peek(2) == '=') {
+        add_token(out, TokenType::NULLISH_ASSIGN, "??=", line, col, 3);
+        advance();
+        advance();
+        advance();
+        return;
+    }
+
     // two-char operators
     if (c == '*' && peek_next() == '*') {
         add_token(out, TokenType::POWER, "**", line, col, 2);
@@ -1371,6 +1400,38 @@ void Lexer::scan_token(std::vector<Token>& out) {
         advance();
         return;
     }
+    if (c == '/' && peek_next() == '=') {
+        add_token(out, TokenType::SLASH_ASSIGN, "/=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '%' && peek_next() == '=') {
+        add_token(out, TokenType::PERCENT_ASSIGN, "%=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+
+    if (c == '&' && peek_next() == '=') {
+        add_token(out, TokenType::BIT_AND_ASSIGN, "&=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '|' && peek_next() == '=') {
+        add_token(out, TokenType::BIT_OR_ASSIGN, "|=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+    if (c == '^' && peek_next() == '=') {
+        add_token(out, TokenType::BIT_XOR_ASSIGN, "|=", line, col, 2);
+        advance();
+        advance();
+        return;
+    }
+
     if (c == '&' && peek_next() == '&') {
         add_token(out, TokenType::AND, "&&", line, col, 2);
         advance();

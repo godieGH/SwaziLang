@@ -681,7 +681,16 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
         // Support compound assignment operators (+=, -=, *=) for assignable L-values (Identifier, Member, Index)
         if (peek().type == TokenType::PLUS_ASSIGN ||
             peek().type == TokenType::MINUS_ASSIGN ||
-            peek().type == TokenType::TIMES_ASSIGN) {
+            peek().type == TokenType::TIMES_ASSIGN ||
+            peek().type == TokenType::SLASH_ASSIGN ||
+            peek().type == TokenType::DOUBLESTAR_ASSIGN ||
+            peek().type == TokenType::PERCENT_ASSIGN ||
+            peek().type == TokenType::NULLISH_ASSIGN ||
+            peek().type == TokenType::AND_ASSIGN ||
+            peek().type == TokenType::OR_ASSIGN ||
+            peek().type == TokenType::BIT_AND_ASSIGN ||
+            peek().type == TokenType::BIT_OR_ASSIGN ||
+            peek().type == TokenType::BIT_XOR_ASSIGN) {
             if (!is_assignable(nodeExpr.get())) {
                 Token opTok = peek();
                 throw std::runtime_error("Compound assignment is only supported for assignable targets at " + opTok.loc.to_string() + "\n --> Traced at: \n" + opTok.loc.get_line_trace());
@@ -696,8 +705,26 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
                 bin->op = "+";
             else if (opTok.type == TokenType::MINUS_ASSIGN)
                 bin->op = "-";
-            else /* TIMES_ASSIGN */
+            else if (opTok.type == TokenType::TIMES_ASSIGN)
                 bin->op = "*";
+            else if (opTok.type == TokenType::SLASH_ASSIGN)
+                bin->op = "/";
+            else if (opTok.type == TokenType::DOUBLESTAR_ASSIGN)
+                bin->op = "**";
+            else if (opTok.type == TokenType::PERCENT_ASSIGN)
+                bin->op = "%";
+            else if (opTok.type == TokenType::NULLISH_ASSIGN)
+                bin->op = "??";
+            else if (opTok.type == TokenType::AND_ASSIGN)
+                bin->op = "&&";
+            else if (opTok.type == TokenType::OR_ASSIGN)
+                bin->op = "||";
+            else if (opTok.type == TokenType::BIT_AND_ASSIGN)
+                bin->op = "&";
+            else if (opTok.type == TokenType::BIT_OR_ASSIGN)
+                bin->op = "|";
+            else if (opTok.type == TokenType::BIT_XOR_ASSIGN)
+                bin->op = "^";
 
             // clone the left for the computed expression so we don't lose ownership of the original
             bin->left = nodeExpr->clone();
