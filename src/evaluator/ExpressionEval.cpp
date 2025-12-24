@@ -12,6 +12,7 @@
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+#include "proxy_class.hpp"
 
 inline uint32_t to_uint32(double d) {
     // Handle NaN and infinity
@@ -4059,6 +4060,32 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
         }
 
+        // with proxy
+        if (std::holds_alternative<ObjectPtr>(objVal)) {
+            ObjectPtr obj = std::get<ObjectPtr>(objVal);
+            if (obj) {
+                auto proxy_it = obj->properties.find("__proxy__");
+                if (proxy_it != obj->properties.end() &&
+                    proxy_it->second.is_private &&
+                    std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
+                    ProxyPtr proxy = std::get<ProxyPtr>(proxy_it->second.value);
+
+                    // Try to call handler.get trap
+                    FunctionPtr get_trap = get_handler_method(proxy->handler, "get", mem->token);
+                    if (get_trap) {
+                        // Call: handler.get(target, key)
+                        std::vector<Value> trap_args = {
+                            Value{proxy->target},
+                            Value{mem->property}};
+                        return this->call_function(get_trap, trap_args, env, mem->token);
+                    }
+
+                    // No trap, fall through to default behavior on target
+                    objVal = Value{proxy->target};
+                }
+            }
+        }
+
         // Object properties & methods
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
@@ -4981,6 +5008,34 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // evaluating call arguments.
         if (call->is_optional && is_nullish(calleeVal)) {
             return std::monostate{};
+        }
+
+        if (std::holds_alternative<ObjectPtr>(calleeVal)) {
+            ObjectPtr obj = std::get<ObjectPtr>(calleeVal);
+            if (obj) {
+                auto proxy_it = obj->properties.find("__proxy__");
+                if (proxy_it != obj->properties.end() &&
+                    std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
+                    ProxyPtr proxy = std::get<ProxyPtr>(proxy_it->second.value);
+                    FunctionPtr call_trap = get_handler_method(proxy->handler, "call", call->token);
+
+                    if (call_trap) {
+                        // Evaluate args first
+                        std::vector<Value> args;
+                        eval_args(args);
+
+                        // Convert args to array for trap
+                        auto args_arr = std::make_shared<ArrayValue>();
+                        args_arr->elements = args;
+
+                        // Call: handler.call(target, args)
+                        std::vector<Value> trap_args = {
+                            Value{proxy->target},
+                            Value{args_arr}};
+                        return call_function(call_trap, trap_args, env, call->token);
+                    }
+                }
+            }
         }
 
         if (std::holds_alternative<FunctionPtr>(calleeVal)) {

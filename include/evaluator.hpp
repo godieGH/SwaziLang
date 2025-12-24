@@ -105,6 +105,9 @@ using ClassPtr = std::shared_ptr<ClassValue>;
 struct ObjectValue;
 using ObjectPtr = std::shared_ptr<ObjectValue>;
 
+struct ProxyValue;
+using ProxyPtr = std::shared_ptr<ProxyValue>;
+
 struct CallFrame;
 using CallFramePtr = std::shared_ptr<CallFrame>;
 
@@ -172,7 +175,8 @@ using Value = std::variant<
     FilePtr,
     RangePtr,
     DateTimePtr,
-    MapStoragePtr>;
+    MapStoragePtr,
+    ProxyPtr>;
 
 struct ValueHash {
     std::size_t operator()(const Value& v) const {
@@ -252,6 +256,11 @@ struct ValueHash {
             return 1;
         }
 
+        if (std::holds_alternative<ProxyPtr>(v)) {
+            auto ptr = std::get<ProxyPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
         // Fallback
         return 0;
     }
@@ -323,6 +332,10 @@ struct ValueEqual {
 
         if (std::holds_alternative<DateTimePtr>(a)) {
             return std::get<DateTimePtr>(a).get() == std::get<DateTimePtr>(b).get();
+        }
+
+        if (std::holds_alternative<ProxyPtr>(a)) {
+            return std::get<ProxyPtr>(a).get() == std::get<ProxyPtr>(b).get();
         }
 
         return false;
@@ -795,6 +808,13 @@ struct ObjectValue {
     // This is used by the builtin globals() to expose a live global/module env.
     bool is_env_proxy = false;
     EnvPtr proxy_env = nullptr;
+};
+
+struct ProxyValue {
+    ObjectPtr target;   // The wrapped object
+    ObjectPtr handler;  // The handler with trap methods
+
+    ProxyValue(ObjectPtr t, ObjectPtr h) : target(t), handler(h) {}
 };
 
 struct PromiseValue {

@@ -14,6 +14,7 @@
 #include "Frame.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+#include "proxy_class.hpp"
 
 bool supports_color() {
     return isatty(STDOUT_FILENO);
@@ -212,6 +213,13 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             prom_it->second.is_private &&
             std::holds_alternative<PromisePtr>(prom_it->second.value)) {
             return print_value(prom_it->second.value);
+        }
+        
+        auto proxy_it = op->properties.find("__proxy__");
+        if (proxy_it != op->properties.end() &&
+            proxy_it->second.is_private &&
+            std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
+              return print_value(proxy_it->second.value);
         }
 
         return print_object(op, 0, visited);  // <- you write this pretty-printer
@@ -596,6 +604,29 @@ void Evaluator::set_object_property(ObjectPtr op, const std::string& prop, const
         return;
     }
 
+    auto proxy_it = op->properties.find("__proxy__");
+    if (proxy_it != op->properties.end() &&
+        proxy_it->second.is_private &&
+        std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
+        ProxyPtr proxy = std::get<ProxyPtr>(proxy_it->second.value);
+
+        // Try to call handler.set trap
+        FunctionPtr set_trap = get_handler_method(proxy->handler, "set", token);
+        if (set_trap) {
+            // Call: handler.set(target, key, value)
+            std::vector<Value> trap_args = {
+                Value{proxy->target},
+                Value{prop},
+                val};
+            Value result = this->call_function(set_trap, trap_args, accessorEnv, token);
+            // Set trap should return truthy for success
+            return;
+        }
+
+        // No trap, operate on target
+        op = proxy->target;
+    }
+
     // --- Normal object property semantics ---
 
     // If property exists, enforce permission/lock/private rules
@@ -743,6 +774,7 @@ void Evaluator::bind_pattern_to_value(ExpressionNode* pattern, const Value& valu
         "Unsupported pattern node in destructuring assignment.",
         pattern->token.loc);
 }
+
 // Tune these to control "small object" inline behavior:
 static constexpr int INLINE_MAX_PROPS = 5;
 static constexpr int INLINE_MAX_LEN = 150;
@@ -1033,8 +1065,25 @@ std::string Evaluator::print_value(
             std::holds_alternative<PromisePtr>(prom_it->second.value)) {
             return print_value(prom_it->second.value, depth, visited, arrvisited);
         }
+        
+        auto proxy_it = op->properties.find("__proxy__");
+        if (proxy_it != op->properties.end() &&
+            proxy_it->second.is_private &&
+            std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
+              return print_value(proxy_it->second.value, depth, visited, arrvisited);
+        }
 
         return print_object(op, depth, visited);
+    }
+    
+    if(std::holds_alternative<ProxyPtr>(v)) {
+      
+      ProxyPtr proxy = std::get<ProxyPtr>(v);
+      if(!proxy) {
+        return "{}";
+      }
+      
+      return print_value(proxy->target, depth, visited, arrvisited);
     }
 
     if (std::holds_alternative<ClassPtr>(v)) {

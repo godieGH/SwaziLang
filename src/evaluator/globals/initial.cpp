@@ -17,6 +17,7 @@
 #include "evaluator.hpp"
 #include "globals.hpp"
 #include "muda_class.hpp"
+#include "proxy_class.hpp"
 #include "set_class.hpp"
 #include "time.hpp"
 #include "token.hpp"
@@ -1095,6 +1096,7 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     init_muda_class(env);
     init_set_class(env);
     init_url_class(env);
+    init_proxy_class(env, evaluator);
 
     {
         auto programVal = std::make_shared<ObjectValue>();
