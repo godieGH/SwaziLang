@@ -281,6 +281,10 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             callToken.loc);
     }
 
+    if (fn->is_wrapped() && fn->wrapper_impl) {
+        return fn->wrapper_impl(fn->wrapped_original, args, caller_env, callToken);
+    }
+
     // Native function: call the C++ implementation directly.
     if (fn->is_native) {
         if (!fn->native_impl) {
@@ -566,6 +570,10 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
             "TypeError",
             "Attempt to call a null function.",
             callToken.loc);
+    }
+
+    if (fn->is_wrapped() && fn->wrapper_impl) {
+        return fn->wrapper_impl(fn->wrapped_original, args, caller_env, callToken);
     }
 
     // Native function case: forward (native_impl receives caller_env so it can inspect $ if needed)

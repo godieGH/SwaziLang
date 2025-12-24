@@ -2779,6 +2779,360 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 "\n --> Traced at:\n" + mem->token.loc.get_line_trace());
         }
 
+        // Function introspection and methods
+        if (std::holds_alternative<FunctionPtr>(objVal)) {
+            FunctionPtr fn = std::get<FunctionPtr>(objVal);
+            const std::string& prop = mem->property;
+
+            // fn.name -> string
+            if (prop == "name") {
+                return Value{fn->name.empty() ? std::string("<anonymous>") : fn->name};
+            }
+
+            // fn.arity -> {min: number, max: number}
+            if (prop == "arity") {
+                auto obj = std::make_shared<ObjectValue>();
+                size_t min = 0, max = 0;
+
+                if (fn->is_native) {
+                    // Native functions: unknown arity
+                    obj->properties["min"] = {Value{0.0}, false, true, false, mem->token};
+                    obj->properties["max"] = {Value{std::numeric_limits<double>::infinity()}, false, true, false, mem->token};
+                } else {
+                    for (const auto& p : fn->parameters) {
+                        if (!p) {
+                            max++;
+                            continue;
+                        }
+                        if (p->is_rest) {
+                            max = SIZE_MAX;  // infinite for rest params
+                            min += p->rest_required_count;
+                        } else if (!p->defaultValue) {
+                            min++;
+                            max++;
+                        } else {
+                            max++;
+                        }
+                    }
+                    obj->properties["min"] = {Value{static_cast<double>(min)}, false, true, false, mem->token};
+                    obj->properties["max"] = {Value{max == SIZE_MAX ? std::numeric_limits<double>::infinity() : static_cast<double>(max)}, false, true, false, mem->token};
+                }
+                return Value{obj};
+            }
+
+            // fn.isAsync() -> bool (method)
+            if (prop == "isAsync") {
+                auto native_impl = [fn](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{fn->is_async};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.isAsync", native_impl, env, mem->token)};
+            }
+
+            // fn.isNative() -> bool (method)
+            if (prop == "isNative") {
+                auto native_impl = [fn](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{fn->is_native};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.isNative", native_impl, env, mem->token)};
+            }
+
+            // fn.isGenerator() -> bool (method)
+            if (prop == "isGenerator") {
+                auto native_impl = [fn](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                    return Value{fn->is_generator};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.isGenerator", native_impl, env, mem->token)};
+            }
+
+            // fn.body -> {size: number, id: string}
+            if (prop == "body") {
+                auto obj = std::make_shared<ObjectValue>();
+
+                if (fn->is_native || !fn->body) {
+                    obj->properties["size"] = {Value{0.0}, false, true, false, mem->token};
+                    obj->properties["id"] = {Value{std::string("<native>")}, false, true, false, mem->token};
+                } else {
+                    size_t size = fn->body->body.size();
+                    // Create stable hash from body content
+                    std::hash<std::string> hasher;
+                    std::string body_repr = fn->name + ":" + std::to_string(size);
+                    size_t hash_val = hasher(body_repr);
+
+                    obj->properties["size"] = {Value{static_cast<double>(size)}, false, true, false, mem->token};
+                    obj->properties["id"] = {Value{std::to_string(hash_val)}, false, true, false, mem->token};
+                }
+                return Value{obj};
+            }
+
+            // fn.params() -> array of param descriptors
+            if (prop == "params") {
+                auto native_impl = [this, fn](const std::vector<Value>&, EnvPtr callEnv, const Token& token) -> Value {
+                    auto arr = std::make_shared<ArrayValue>();
+
+                    if (fn->is_native) {
+                        return Value{arr};  // Empty for native functions
+                    }
+
+                    for (const auto& p : fn->parameters) {
+                        if (!p) continue;
+
+                        auto desc = std::make_shared<ObjectValue>();
+                        desc->properties["name"] = {Value{p->name}, false, true, false, token};
+                        desc->properties["is_rest"] = {Value{p->is_rest}, false, true, false, token};
+
+                        bool hasDefault = (p->defaultValue != nullptr);
+                        desc->properties["has_default"] = {Value{hasDefault}, false, true, false, token};
+                        arr->elements.push_back(Value{desc});
+                    }
+
+                    return Value{arr};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.params", native_impl, env, mem->token)};
+            }
+
+            // fn.source -> {file: string, line: number, col: number}
+            if (prop == "source") {
+                auto obj = std::make_shared<ObjectValue>();
+                obj->properties["file"] = {Value{fn->token.loc.filename}, false, true, false, mem->token};
+                obj->properties["line"] = {Value{static_cast<double>(fn->token.loc.line)}, false, true, false, mem->token};
+                obj->properties["col"] = {Value{static_cast<double>(fn->token.loc.col)}, false, true, false, mem->token};
+                return Value{obj};
+            }
+
+            // fn.signature -> string
+            if (prop == "signature") {
+                std::ostringstream sig;
+                sig << "(";
+                if (!fn->is_native) {
+                    for (size_t i = 0; i < fn->parameters.size(); ++i) {
+                        if (i > 0) sig << ", ";
+                        auto& p = fn->parameters[i];
+                        if (p) {
+                            if (p->is_rest) sig << "...";
+                            sig << p->name;
+                        }
+                    }
+                } else {
+                    sig << "...";
+                }
+                sig << ")";
+                return Value{sig.str()};
+            }
+
+            // fn.wrap(wrapperFn) -> new wrapped function
+            if (prop == "wrap") {
+                auto native_impl = [this, fn, mem](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                        throw SwaziError("TypeError", "fn.wrap() requires a wrapper function", token.loc);
+                    }
+
+                    FunctionPtr wrapperFn = std::get<FunctionPtr>(args[0]);
+
+                    // Create new wrapped function
+                    auto wrapped = std::make_shared<FunctionValue>(
+                        fn->name + "$wrapped",
+                        std::vector<std::shared_ptr<ParameterNode>>{},
+                        nullptr,
+                        fn->closure,
+                        mem->token);
+
+                    wrapped->is_native = true;
+                    wrapped->is_async = fn->is_async;
+                    wrapped->is_generator = fn->is_generator;
+
+                    // Store wrapper implementation
+                    wrapped->native_impl = [this, wrapperFn, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& tok) -> Value {
+                        // Build args array for wrapper
+                        auto argsArr = std::make_shared<ArrayValue>();
+                        argsArr->elements = args;
+
+                        // Call: wrapperFn(originalFn, argsArray)
+                        return this->call_function(wrapperFn, {fn, Value{argsArr}}, callEnv, tok);
+                    };
+
+                    wrapped->wrapper_impl = [this, wrapperFn, fn](FunctionPtr orig, const std::vector<Value>& args, EnvPtr env, const Token& tok) -> Value {
+                        auto argsArr = std::make_shared<ArrayValue>();
+                        argsArr->elements = args;
+                        return this->call_function(wrapperFn, {fn, Value{argsArr}}, env, tok);
+                    };
+
+                    return Value{wrapped};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.wrap", native_impl, env, mem->token)};
+            }
+
+            // fn.partial(...boundArgs) -> new function with bound args
+            if (prop == "partial") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    // Clone bound arguments
+                    std::vector<Value> boundArgs = args;
+
+                    // Create the partial function directly
+                    auto partialFn = std::make_shared<FunctionValue>(
+                        fn->name + "$partial",
+                        std::vector<std::shared_ptr<ParameterNode>>{},  // Empty params
+                        nullptr,
+                        fn->closure,
+                        fn->token);
+
+                    partialFn->is_native = true;
+                    partialFn->is_async = fn->is_async;
+                    partialFn->is_generator = fn->is_generator;
+
+                    // The native_impl of the partial function combines bound + call args
+                    partialFn->native_impl = [this, fn, boundArgs](const std::vector<Value>& callArgs, EnvPtr env, const Token& tok) -> Value {
+                        std::vector<Value> combined;
+                        combined.reserve(boundArgs.size() + callArgs.size());
+                        combined.insert(combined.end(), boundArgs.begin(), boundArgs.end());
+                        combined.insert(combined.end(), callArgs.begin(), callArgs.end());
+                        return this->call_function(fn, combined, env, tok);
+                    };
+
+                    return Value{partialFn};  // Return the partial function directly
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.partial", native_impl, env, mem->token)};
+            }
+
+            // fn.compose(otherFn) -> new function f(g(x))
+            if (prop == "compose") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
+                        throw SwaziError("TypeError", "fn.compose() requires a function argument", token.loc);
+                    }
+
+                    FunctionPtr g = std::get<FunctionPtr>(args[0]);
+
+                    auto composed = std::make_shared<FunctionValue>(
+                        fn->name + "$compose$" + g->name,
+                        std::vector<std::shared_ptr<ParameterNode>>{},
+                        nullptr,
+                        fn->closure,
+                        fn->token);
+
+                    composed->is_native = true;
+                    composed->native_impl = [this, fn, g](const std::vector<Value>& callArgs, EnvPtr env, const Token& tok) -> Value {
+                        Value gResult = this->call_function(g, callArgs, env, tok);
+                        return this->call_function(fn, {gResult}, env, tok);
+                    };
+
+                    return Value{composed};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.compose", native_impl, env, mem->token)};
+            }
+
+            // fn.bind(receiver, ...args) -> new function with bound receiver and args
+            if (prop == "bind") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    if (args.empty()) {
+                        throw SwaziError("TypeError", "fn.bind() requires at least a receiver argument", token.loc);
+                    }
+
+                    Value receiver = args[0];
+                    std::vector<Value> boundArgs(args.begin() + 1, args.end());
+
+                    auto bound = std::make_shared<FunctionValue>(
+                        fn->name + "$bound",
+                        std::vector<std::shared_ptr<ParameterNode>>{},
+                        nullptr,
+                        fn->closure,
+                        fn->token);
+
+                    bound->is_native = true;
+                    bound->is_async = fn->is_async;
+                    bound->is_generator = fn->is_generator;
+                    bound->native_impl = [this, fn, receiver, boundArgs](const std::vector<Value>& callArgs, EnvPtr env, const Token& tok) -> Value {
+                        std::vector<Value> combined;
+                        combined.reserve(boundArgs.size() + callArgs.size());
+                        combined.insert(combined.end(), boundArgs.begin(), boundArgs.end());
+                        combined.insert(combined.end(), callArgs.begin(), callArgs.end());
+
+                        // If receiver is an object, call with receiver
+                        if (std::holds_alternative<ObjectPtr>(receiver)) {
+                            return this->call_function_with_receiver(fn, std::get<ObjectPtr>(receiver), combined, env, tok);
+                        }
+                        return this->call_function(fn, combined, env, tok);
+                    };
+
+                    return Value{bound};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.bind", native_impl, env, mem->token)};
+            }
+
+            // fn.invoke(options) -> fundamental execution primitive
+            if (prop == "invoke") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) {
+                        throw SwaziError("TypeError", "fn.invoke() requires an options object {receiver?, arguments}", token.loc);
+                    }
+
+                    ObjectPtr opts = std::get<ObjectPtr>(args[0]);
+
+                    // Extract receiver (default null)
+                    Value receiver = std::monostate{};
+                    auto recIt = opts->properties.find("receiver");
+                    if (recIt != opts->properties.end()) {
+                        receiver = recIt->second.value;
+                    }
+
+                    // Extract arguments array (required)
+                    std::vector<Value> invokeArgs;
+                    auto argsIt = opts->properties.find("arguments");
+                    if (argsIt != opts->properties.end()) {
+                        if (std::holds_alternative<ArrayPtr>(argsIt->second.value)) {
+                            ArrayPtr arr = std::get<ArrayPtr>(argsIt->second.value);
+                            if (arr) invokeArgs = arr->elements;
+                        } else {
+                            throw SwaziError("TypeError", "fn.invoke() options.arguments must be an array", token.loc);
+                        }
+                    }
+
+                    // Execute with or without receiver
+                    if (std::holds_alternative<ObjectPtr>(receiver)) {
+                        return this->call_function_with_receiver(fn, std::get<ObjectPtr>(receiver), invokeArgs, callEnv, token);
+                    }
+                    return this->call_function(fn, invokeArgs, callEnv, token);
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.invoke", native_impl, env, mem->token)};
+            }
+
+            // fn.call(receiver, ...args) -> convenience wrapper
+            if (prop == "call") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    if (args.empty()) {
+                        return this->call_function(fn, {}, callEnv, token);
+                    }
+
+                    Value receiver = args[0];
+                    std::vector<Value> callArgs(args.begin() + 1, args.end());
+
+                    if (std::holds_alternative<ObjectPtr>(receiver)) {
+                        return this->call_function_with_receiver(fn, std::get<ObjectPtr>(receiver), callArgs, callEnv, token);
+                    }
+                    return this->call_function(fn, callArgs, callEnv, token);
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.call", native_impl, env, mem->token)};
+            }
+
+            // fn.apply(receiver, argsArray) -> convenience wrapper
+            if (prop == "apply") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    Value receiver = args.size() > 0 ? args[0] : std::monostate{};
+
+                    std::vector<Value> callArgs;
+                    if (args.size() > 1 && std::holds_alternative<ArrayPtr>(args[1])) {
+                        ArrayPtr arr = std::get<ArrayPtr>(args[1]);
+                        if (arr) callArgs = arr->elements;
+                    }
+
+                    if (std::holds_alternative<ObjectPtr>(receiver)) {
+                        return this->call_function_with_receiver(fn, std::get<ObjectPtr>(receiver), callArgs, callEnv, token);
+                    }
+                    return this->call_function(fn, callArgs, callEnv, token);
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.apply", native_impl, env, mem->token)};
+            }
+        }
+
         // String property 'herufi' (length)
         if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {
             const std::string& s = std::get<std::string>(objVal);

@@ -838,7 +838,7 @@ struct ArrayValue {
 };
 
 // Function value: closure with parameters, body, and defining environment
-struct FunctionValue {
+struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
     std::string name;
     std::vector<std::shared_ptr<ParameterNode>> parameters;
     std::shared_ptr<FunctionDeclarationNode> body;
@@ -848,6 +848,9 @@ struct FunctionValue {
     bool is_generator = false;
     bool is_native = false;
     std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> native_impl;
+
+    std::shared_ptr<FunctionValue> wrapped_original;
+    std::function<Value(FunctionPtr, const std::vector<Value>&, EnvPtr, const Token&)> wrapper_impl;
 
     FunctionValue(
         const std::string& nm,
@@ -901,6 +904,16 @@ struct FunctionValue {
                             is_generator(false),
                             is_native(true),
                             native_impl(std::move(impl)) {
+    }
+
+    bool is_wrapped() const { return wrapped_original != nullptr; }
+
+    FunctionPtr get_original() const {
+        auto fn = const_cast<FunctionValue*>(this)->shared_from_this();
+        while (fn->wrapped_original) {
+            fn = fn->wrapped_original;
+        }
+        return fn;
     }
 };
 
