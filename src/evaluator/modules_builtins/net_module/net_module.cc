@@ -115,6 +115,12 @@ std::shared_ptr<ObjectValue> make_net_exports(EnvPtr env, Evaluator* evaluator) 
             false, false, true, tok};
     }
 
+    // net.unix -> Unix domain socket APIs
+    {
+        obj->properties["unix"] = PropertyDescriptor{Value{make_unix_socket_exports(env, evaluator)},
+            false, false, true, tok};
+    }
+
     // net.resolve(host) -> Promise<array of addresses>
     {
         auto fn_resolve = make_native_fn("net.resolve", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
