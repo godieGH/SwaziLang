@@ -3135,7 +3135,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         }
 
         // String property 'herufi' (length)
-        if (std::holds_alternative<std::string>(objVal) && mem->property == "herufi") {
+        if (std::holds_alternative<std::string>(objVal) && (mem->property == "herufi" || mem->property == "size")) {
             const std::string& s = std::get<std::string>(objVal);
             return Value{
                 static_cast<double>(s.size())};
@@ -3602,7 +3602,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
 
             // length property
-            if (mem->property == "idadi") {
+            if (mem->property == "idadi" || mem->property == "size") {
                 return Value{static_cast<double>(arr ? arr->elements.size() : 0)};
             }
 
