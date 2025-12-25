@@ -4357,6 +4357,69 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return arr->elements[(size_t)rawIndex];
         }
 
+        // Buffer indexing uses index or range
+        if (std::holds_alternative<BufferPtr>(objVal)) {
+            BufferPtr buf = std::get<BufferPtr>(objVal);
+            if (!buf) return std::monostate{};
+
+            // Case 1: Range-based slicing (buf[range])
+            // if (std::holds_alternative<RangePtr>(indexVal)) {
+            //     RangePtr range = std::get<RangePtr>(indexVal);
+            //     if (!range) return std::monostate{};
+
+            //     // Create result array buffer
+            //     auto result = std::make_shared<BufferValue>();
+
+            //     // Create a copy to iterate
+            //     RangeValue r = *range;
+
+            //     // Safety check for extremely large ranges
+            //     const size_t MAX_SLICE_SIZE = 1000000;  // 1 million elements max
+            //     size_t collected = 0;
+
+            //     while (r.hasNext() && collected < MAX_SLICE_SIZE) {
+            //         int index = r.next();
+
+            //         // Skip negative indices
+            //         if (index < 0) continue;
+
+            //         // Skip indices beyond buffer bounds
+            //         if ((size_t)index >= buf->data.size()) {
+            //             // If we're past the end and moving forward, stop early
+            //             if (r.increasing) break;
+            //             continue;
+            //         }
+
+            //         // Add element at this index
+            //         result->data.push_back(buf->data[(size_t)index]);
+            //         collected++;
+            //     }
+
+            //     // Check if we hit the safety limit
+            //     if (collected >= MAX_SLICE_SIZE && r.hasNext()) {
+            //         throw std::runtime_error(
+            //             "RangeError at " + idx->token.loc.to_string() +
+            //             "\nRange slice exceeded maximum size of 1,000,000 elements." +
+            //             "\n --> Traced at:\n" + idx->token.loc.get_line_trace());
+            //     }
+
+            //     result->encoding = buf->encoding;
+
+            //     return Value{result};
+            // }
+
+            // Case 2: Single numeric index (buf)
+            long long index = static_cast<long long>(to_number(indexVal, idx->token));
+            if (index < 0 || (size_t)index >= buf->data.size()) {
+                throw SwaziError(
+                    "RangeError",
+                    "Index " + std::to_string(index) + " is out of bounds (buffer size: " + std::to_string(buf->data.size()) + "). Index should be from 0-" + std::to_string(buf->data.size() - 1) + ".",
+                    idx->token.loc);
+            }
+
+            return Value{static_cast<double>(buf->data[(size_t)index])};
+        }
+
         // String indexing: return single-char string OR range slice
         if (std::holds_alternative<std::string>(objVal)) {
             std::string s = std::get<std::string>(objVal);

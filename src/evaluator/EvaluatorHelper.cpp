@@ -214,12 +214,12 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             std::holds_alternative<PromisePtr>(prom_it->second.value)) {
             return print_value(prom_it->second.value);
         }
-        
+
         auto proxy_it = op->properties.find("__proxy__");
         if (proxy_it != op->properties.end() &&
             proxy_it->second.is_private &&
             std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
-              return print_value(proxy_it->second.value);
+            return print_value(proxy_it->second.value);
         }
 
         return print_object(op, 0, visited);  // <- you write this pretty-printer
@@ -1065,25 +1065,24 @@ std::string Evaluator::print_value(
             std::holds_alternative<PromisePtr>(prom_it->second.value)) {
             return print_value(prom_it->second.value, depth, visited, arrvisited);
         }
-        
+
         auto proxy_it = op->properties.find("__proxy__");
         if (proxy_it != op->properties.end() &&
             proxy_it->second.is_private &&
             std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
-              return print_value(proxy_it->second.value, depth, visited, arrvisited);
+            return print_value(proxy_it->second.value, depth, visited, arrvisited);
         }
 
         return print_object(op, depth, visited);
     }
-    
-    if(std::holds_alternative<ProxyPtr>(v)) {
-      
-      ProxyPtr proxy = std::get<ProxyPtr>(v);
-      if(!proxy) {
-        return "{}";
-      }
-      
-      return print_value(proxy->target, depth, visited, arrvisited);
+
+    if (std::holds_alternative<ProxyPtr>(v)) {
+        ProxyPtr proxy = std::get<ProxyPtr>(v);
+        if (!proxy) {
+            return "{}";
+        }
+
+        return print_value(proxy->target, depth, visited, arrvisited);
     }
 
     if (std::holds_alternative<ClassPtr>(v)) {
