@@ -341,5 +341,4 @@ void init_set_class(EnvPtr env) {
     var.value = classDesc;
     var.is_constant = true;
     env->set(classDesc->name, var);
-    env->set("Seti", var);
 }
