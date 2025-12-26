@@ -77,7 +77,8 @@ void Evaluator::run_event_loop() {
                 net_has_active_work() ||
                 udp_has_active_work() ||
                 unix_has_active_work() ||
-                streams_have_active_work();
+                streams_have_active_work() ||
+                fs_has_active_work();
         });
         return;
     }

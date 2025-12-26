@@ -44,3 +44,4 @@ bool net_has_active_work();
 bool udp_has_active_work();
 bool unix_has_active_work();
 bool streams_have_active_work();
+bool fs_has_active_work();

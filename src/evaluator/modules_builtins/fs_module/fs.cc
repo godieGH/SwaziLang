@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -16,15 +17,254 @@
 #include "evaluator.hpp"
 #include "uv.h"
 
+#define _POSIX_C_SOURCE 200809L
+#include <fnmatch.h>
+
+// Platform-specific glob support
+#if defined(__unix__) || defined(__APPLE__) || defined(__ANDROID__)
+#include <glob.h>
+#define HAVE_POSIX_GLOB 1
+#endif
+
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
 #else
 #include <processthreadsapi.h>
+#include <shlwapi.h>  // For PathMatchSpec on Windows
 #include <windows.h>
+#pragma comment(lib, "shlwapi.lib")
 #endif
 
 namespace fs = std::filesystem;
+
+// Cross-platform glob pattern matching with proper ** support
+static bool matches_pattern(const std::string& text, const std::string& pattern) {
+    // Handle special case: ** (matches everything recursively)
+    if (pattern == "**" || pattern == "**/*") {
+        return true;
+    }
+
+    // Check if pattern contains **/ (recursive match)
+    size_t double_star = pattern.find("**/");
+    if (double_star != std::string::npos) {
+        // Pattern like "node_modules/**" or "**/test/**"
+        std::string prefix = pattern.substr(0, double_star);
+        std::string suffix = pattern.substr(double_star + 3);  // Skip "**/
+
+        // Check if text starts with prefix
+        if (!prefix.empty() && text.find(prefix) != 0) {
+            return false;
+        }
+
+        // If there's a suffix, check if any part of remaining path matches
+        if (!suffix.empty()) {
+            size_t start = prefix.length();
+            while (start < text.length()) {
+                std::string remaining = text.substr(start);
+                if (matches_pattern(remaining, suffix)) {
+                    return true;
+                }
+                // Move to next directory separator
+                size_t next_sep = text.find_first_of("/\\", start + 1);
+                if (next_sep == std::string::npos) break;
+                start = next_sep + 1;
+            }
+            return false;
+        }
+        return true;  // Pattern ends with **, matches everything after prefix
+    }
+
+#if HAVE_POSIX_GLOB
+    // Use fnmatch on POSIX systems
+    return fnmatch(pattern.c_str(), text.c_str(), FNM_PERIOD | FNM_PATHNAME) == 0;
+#elif defined(_WIN32)
+    // Use PathMatchSpec on Windows
+    return PathMatchSpecA(text.c_str(), pattern.c_str()) == TRUE;
+#else
+    // Fallback: simple wildcard matching
+    size_t p = 0, t = 0;
+    size_t star = std::string::npos, match = 0;
+
+    while (t < text.length()) {
+        if (p < pattern.length() && (pattern[p] == '?' || pattern[p] == text[t])) {
+            p++;
+            t++;
+        } else if (p < pattern.length() && pattern[p] == '*') {
+            star = p++;
+            match = t;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            t = ++match;
+        } else {
+            return false;
+        }
+    }
+
+    while (p < pattern.length() && pattern[p] == '*') p++;
+    return p == pattern.length();
+#endif
+}
+// ============= FS.WATCH IMPLEMENTATION (libuv-based) =============
+
+// Track active watchers for event loop integration
+static std::atomic<int> g_active_fs_watchers{0};
+
+// Watcher state
+struct FsWatcher {
+    uv_fs_event_t* handle = nullptr;
+    std::string path;
+    bool recursive;
+    FunctionPtr callback;
+    std::atomic<bool> closed{false};
+    long long id;
+
+    // Debouncing support
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_event_times;
+    std::mutex debounce_mutex;
+    int debounce_ms = 100;  // default 100ms debounce
+
+    // Filter support
+    std::vector<std::string> ignore_patterns;
+    std::vector<std::string> include_patterns;
+    bool has_include_filter = false;
+
+    std::atomic<bool> paused{false};
+
+    bool should_emit_event(const std::string& filepath) {
+        std::lock_guard<std::mutex> lock(debounce_mutex);
+        auto now = std::chrono::steady_clock::now();
+        auto it = last_event_times.find(filepath);
+
+        if (it != last_event_times.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second).count();
+            if (elapsed < debounce_ms) {
+                return false;  // Too soon, skip this event
+            }
+        }
+
+        last_event_times[filepath] = now;
+        return true;
+    }
+
+    bool should_watch_file(const std::string& filepath) {
+        // Get relative path from the watch root
+        std::string relative_path = filepath;
+        if (filepath.find(path) == 0 && filepath.length() > path.length()) {
+            relative_path = filepath.substr(path.length());
+            // Remove leading slash
+            while (!relative_path.empty() && (relative_path[0] == '/' || relative_path[0] == '\\')) {
+                relative_path = relative_path.substr(1);
+            }
+        }
+
+        // Also get just the filename
+        std::string filename = fs::path(filepath).filename().string();
+
+        // If include patterns exist, file must match at least one
+        if (has_include_filter && !include_patterns.empty()) {
+            bool matches = false;
+            for (const auto& pattern : include_patterns) {
+                // Try relative path first (for patterns like "src/**/*.js")
+                // Then try filename only (for patterns like "*.js")
+                if (matches_pattern(relative_path, pattern) ||
+                    matches_pattern(filename, pattern)) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) return false;
+        }
+
+        // Check ignore patterns (same priority: relative path, then filename)
+        for (const auto& pattern : ignore_patterns) {
+            if (matches_pattern(relative_path, pattern) ||
+                matches_pattern(filename, pattern)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+    ~FsWatcher() {
+        if (handle && !closed.load()) {
+            closed.store(true);
+            uv_fs_event_stop(handle);
+            // Don't close here - let the close callback handle cleanup
+        }
+    }
+};
+
+static std::mutex g_fs_watchers_mutex;
+static std::unordered_map<long long, std::shared_ptr<FsWatcher>> g_fs_watchers;
+static std::atomic<long long> g_next_watcher_id{1};
+
+// Callback invoked by libuv when file system events occur
+static void fs_event_callback(uv_fs_event_t* handle, const char* filename, int events, int status) {
+    FsWatcher* watcher = static_cast<FsWatcher*>(handle->data);
+    if (!watcher || watcher->closed.load() || !watcher->callback) {
+        return;
+    }
+
+    if (watcher->paused.load()) {
+        return;  // Skip event while paused
+    }
+
+    if (status != 0) {
+        return;
+    }
+
+    // Build full path FIRST
+    std::string full_path = watcher->path;
+    if (filename && filename[0] != '\0') {
+        full_path = (fs::path(watcher->path) / filename).string();
+    }
+
+    // Debounce check
+    if (!watcher->should_emit_event(full_path)) {
+        return;  // Skip duplicate event
+    }
+
+    // Filter check
+    if (!watcher->should_watch_file(full_path)) {
+        return;  // Filtered out
+    }
+
+    // Determine event type with better heuristics
+    std::string event_type;
+    bool file_exists = fs::exists(full_path);
+
+    if (events & UV_RENAME) {
+        // UV_RENAME can mean: created, deleted, or renamed
+        if (file_exists) {
+            event_type = "add";  // File was created or renamed TO this name
+        } else {
+            event_type = "unlink";  // File was deleted or renamed FROM this name
+        }
+    } else if (events & UV_CHANGE) {
+        event_type = "change";  // File content changed
+    } else {
+        event_type = "change";  // Fallback
+    }
+
+    // Build event object
+    auto event = std::make_shared<ObjectValue>();
+    Token tok;
+    tok.loc = TokenLocation("<fs>", 0, 0, 0);
+
+    event->properties["type"] = PropertyDescriptor{Value{event_type}, false, false, true, tok};
+    event->properties["path"] = PropertyDescriptor{Value{full_path}, false, false, true, tok};
+
+    if (filename && filename[0] != '\0') {
+        event->properties["name"] = PropertyDescriptor{Value{std::string(filename)}, false, false, true, tok};
+    } else {
+        event->properties["name"] = PropertyDescriptor{Value{std::monostate{}}, false, false, true, tok};
+    }
+
+    // Schedule callback on event loop
+    CallbackPayload* payload = new CallbackPayload(watcher->callback, {Value{event}});
+    enqueue_callback_global(static_cast<void*>(payload));
+}
 
 // Helper to coerce Value -> string
 static std::string value_to_string_simple(const Value& v) {
@@ -46,147 +286,6 @@ static FunctionPtr make_native_fn(const std::string& name, F impl, EnvPtr env) {
     };
     auto fn = std::make_shared<FunctionValue>(name, native_impl, env, Token());
     return fn;
-}
-
-// ============= FS.WATCH IMPLEMENTATION =============
-
-struct FileWatcher {
-    std::string path;
-    bool recursive;
-    FunctionPtr callback;
-    std::thread watch_thread;
-    std::atomic<bool> should_stop{false};
-
-    // Track file states
-    struct FileState {
-        fs::file_time_type last_write;
-        uintmax_t size;
-        bool exists;
-    };
-    std::unordered_map<std::string, FileState> file_states;
-
-    FileWatcher(const std::string& p, bool rec, FunctionPtr cb)
-        : path(p), recursive(rec), callback(cb) {}
-};
-
-static std::vector<std::shared_ptr<FileWatcher>> active_watchers;
-static std::mutex watchers_mutex;
-
-// Background thread function for watching
-static void watch_thread_func(std::shared_ptr<FileWatcher> watcher) {
-    auto get_file_state = [](const fs::path& p) -> FileWatcher::FileState {
-        FileWatcher::FileState state;
-        try {
-            if (fs::exists(p)) {
-                state.exists = true;
-                state.last_write = fs::last_write_time(p);
-                if (fs::is_regular_file(p)) {
-                    state.size = fs::file_size(p);
-                } else {
-                    state.size = 0;
-                }
-            } else {
-                state.exists = false;
-                state.size = 0;
-            }
-        } catch (...) {
-            state.exists = false;
-            state.size = 0;
-        }
-        return state;
-    };
-
-    // Initial scan
-    try {
-        if (watcher->recursive) {
-            for (auto& entry : fs::recursive_directory_iterator(watcher->path, fs::directory_options::skip_permission_denied)) {
-                if (fs::is_regular_file(entry)) {
-                    watcher->file_states[entry.path().string()] = get_file_state(entry.path());
-                }
-            }
-        } else {
-            for (auto& entry : fs::directory_iterator(watcher->path, fs::directory_options::skip_permission_denied)) {
-                if (fs::is_regular_file(entry)) {
-                    watcher->file_states[entry.path().string()] = get_file_state(entry.path());
-                }
-            }
-        }
-    } catch (...) {
-        // Ignore initial scan errors
-    }
-
-    // Watch loop
-    while (!watcher->should_stop) {
-        try {
-            std::unordered_map<std::string, FileWatcher::FileState> current_states;
-
-            // Scan current state
-            if (watcher->recursive) {
-                for (auto& entry : fs::recursive_directory_iterator(watcher->path, fs::directory_options::skip_permission_denied)) {
-                    if (fs::is_regular_file(entry)) {
-                        current_states[entry.path().string()] = get_file_state(entry.path());
-                    }
-                }
-            } else {
-                for (auto& entry : fs::directory_iterator(watcher->path, fs::directory_options::skip_permission_denied)) {
-                    if (fs::is_regular_file(entry)) {
-                        current_states[entry.path().string()] = get_file_state(entry.path());
-                    }
-                }
-            }
-
-            // Check for changes
-            for (auto& [path, current_state] : current_states) {
-                auto it = watcher->file_states.find(path);
-
-                if (it == watcher->file_states.end()) {
-                    // New file
-                    auto event = std::make_shared<ObjectValue>();
-                    event->properties["type"] = PropertyDescriptor{Value{std::string("create")}, false, false, true, Token()};
-                    event->properties["path"] = PropertyDescriptor{Value{path}, false, false, true, Token()};
-
-                    if (watcher->callback) {
-                        CallbackPayload* payload = new CallbackPayload(watcher->callback, {Value{event}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
-                } else if (it->second.last_write != current_state.last_write ||
-                    it->second.size != current_state.size) {
-                    // Modified file
-                    auto event = std::make_shared<ObjectValue>();
-                    event->properties["type"] = PropertyDescriptor{Value{std::string("change")}, false, false, true, Token()};
-                    event->properties["path"] = PropertyDescriptor{Value{path}, false, false, true, Token()};
-
-                    if (watcher->callback) {
-                        CallbackPayload* payload = new CallbackPayload(watcher->callback, {Value{event}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
-                }
-            }
-
-            // Check for deletions
-            for (auto& [path, old_state] : watcher->file_states) {
-                if (current_states.find(path) == current_states.end()) {
-                    // Deleted file
-                    auto event = std::make_shared<ObjectValue>();
-                    event->properties["type"] = PropertyDescriptor{Value{std::string("delete")}, false, false, true, Token()};
-                    event->properties["path"] = PropertyDescriptor{Value{path}, false, false, true, Token()};
-
-                    if (watcher->callback) {
-                        CallbackPayload* payload = new CallbackPayload(watcher->callback, {Value{event}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
-                }
-            }
-
-            watcher->file_states = std::move(current_states);
-
-        } catch (...) {
-            // Ignore scan errors during watching
-        }
-
-        // Sleep for a bit (polling interval)
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
 }
 
 // ============= MAIN EXPORTS FUNCTION =============
@@ -923,71 +1022,214 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     // ============= fs.watch() =============
     {
         auto fn = make_native_fn("fs.watch", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("RuntimeError", 
-                    "fs.watch requires path and callback. Usage: fs.watch(path, options?, callback)", 
-                    token.loc);
+    if (args.size() < 2) {
+        throw SwaziError("RuntimeError", 
+            "fs.watch requires path and callback. Usage: fs.watch(path, options?, callback)", 
+            token.loc);
+    }
+    
+    std::string path = value_to_string_simple(args[0]);
+    bool recursive = false;
+    int debounce_ms = 100;  // default
+    std::vector<std::string> ignore_patterns;
+    std::vector<std::string> include_patterns;
+    bool has_include_filter = false;
+    FunctionPtr callback;
+    
+    // Parse arguments: (path, callback) or (path, options, callback)
+    if (args.size() == 2) {
+        if (!std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "Second argument must be a callback function", token.loc);
+        }
+        callback = std::get<FunctionPtr>(args[1]);
+    } else if (args.size() >= 3) {
+        // Parse options
+        if (std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+            
+            // Parse recursive
+            auto rec_it = opts->properties.find("recursive");
+            if (rec_it != opts->properties.end() && std::holds_alternative<bool>(rec_it->second.value)) {
+                recursive = std::get<bool>(rec_it->second.value);
             }
             
-            std::string path = value_to_string_simple(args[0]);
-            bool recursive = false;
-            FunctionPtr callback;
+            // Parse debounce
+            auto debounce_it = opts->properties.find("debounce");
+            if (debounce_it != opts->properties.end() && std::holds_alternative<double>(debounce_it->second.value)) {
+                debounce_ms = static_cast<int>(std::get<double>(debounce_it->second.value));
+            }
             
-            // Parse arguments: (path, callback) or (path, options, callback)
-            if (args.size() == 2) {
-                if (!std::holds_alternative<FunctionPtr>(args[1])) {
-                    throw SwaziError("TypeError", "Second argument must be a callback function", token.loc);
-                }
-                callback = std::get<FunctionPtr>(args[1]);
-            } else if (args.size() >= 3) {
-                // Parse options
-                if (std::holds_alternative<ObjectPtr>(args[1])) {
-                    ObjectPtr opts = std::get<ObjectPtr>(args[1]);
-                    auto rec_it = opts->properties.find("recursive");
-                    if (rec_it != opts->properties.end() && std::holds_alternative<bool>(rec_it->second.value)) {
-                        recursive = std::get<bool>(rec_it->second.value);
+            // Parse ignore patterns
+            auto ignore_it = opts->properties.find("ignore");
+            if (ignore_it != opts->properties.end()) {
+                if (std::holds_alternative<std::string>(ignore_it->second.value)) {
+                    ignore_patterns.push_back(std::get<std::string>(ignore_it->second.value));
+                } else if (std::holds_alternative<ArrayPtr>(ignore_it->second.value)) {
+                    ArrayPtr arr = std::get<ArrayPtr>(ignore_it->second.value);
+                    for (const auto& elem : arr->elements) {
+                        if (std::holds_alternative<std::string>(elem)) {
+                            ignore_patterns.push_back(std::get<std::string>(elem));
+                        }
                     }
                 }
-                
-                if (!std::holds_alternative<FunctionPtr>(args[2])) {
-                    throw SwaziError("TypeError", "Third argument must be a callback function", token.loc);
+            }
+            
+            // Parse include patterns
+            auto include_it = opts->properties.find("include");
+            if (include_it != opts->properties.end()) {
+                has_include_filter = true;
+                if (std::holds_alternative<std::string>(include_it->second.value)) {
+                    include_patterns.push_back(std::get<std::string>(include_it->second.value));
+                } else if (std::holds_alternative<ArrayPtr>(include_it->second.value)) {
+                    ArrayPtr arr = std::get<ArrayPtr>(include_it->second.value);
+                    for (const auto& elem : arr->elements) {
+                        if (std::holds_alternative<std::string>(elem)) {
+                            include_patterns.push_back(std::get<std::string>(elem));
+                        }
+                    }
                 }
-                callback = std::get<FunctionPtr>(args[2]);
             }
             
-            // Verify path exists
-            if (!fs::exists(path)) {
-                throw SwaziError("IOError", "Watch path does not exist: " + path, token.loc);
+            // Validate: can't have both include and ignore
+            if (has_include_filter && !ignore_patterns.empty()) {
+                throw SwaziError("RuntimeError", 
+                    "fs.watch: Cannot use both 'include' and 'ignore' options together. Use only one.",
+                    token.loc);
             }
-            
-            if (!fs::is_directory(path)) {
-                throw SwaziError("IOError", "Watch path must be a directory: " + path, token.loc);
+        }
+        
+        if (!std::holds_alternative<FunctionPtr>(args[2])) {
+            throw SwaziError("TypeError", "Third argument must be a callback function", token.loc);
+        }
+        callback = std::get<FunctionPtr>(args[2]);
+    }
+    
+    // Verify path exists
+    if (!fs::exists(path)) {
+        throw SwaziError("IOError", "Watch path does not exist: " + path, token.loc);
+    }
+    
+    if (!fs::is_directory(path)) {
+        throw SwaziError("IOError", "Watch path must be a directory: " + path, token.loc);
+    }
+    
+    // Get event loop
+    uv_loop_t* loop = scheduler_get_loop();
+    if (!loop) {
+        throw SwaziError("RuntimeError", "No event loop available for fs.watch", token.loc);
+    }
+    
+    // Create watcher
+    auto watcher = std::make_shared<FsWatcher>();
+    watcher->path = path;
+    watcher->recursive = recursive;
+    watcher->callback = callback;
+    watcher->id = g_next_watcher_id.fetch_add(1);
+    watcher->debounce_ms = debounce_ms;
+    watcher->ignore_patterns = ignore_patterns;
+    watcher->include_patterns = include_patterns;
+    watcher->has_include_filter = has_include_filter;
+    
+    // Store watcher before initializing libuv
+    {
+        std::lock_guard<std::mutex> lock(g_fs_watchers_mutex);
+        g_fs_watchers[watcher->id] = watcher;
+    }
+    
+    // Initialize on loop thread
+    scheduler_run_on_loop([watcher, path, recursive, loop]() {
+        // Allocate handle
+        watcher->handle = new uv_fs_event_t;
+        watcher->handle->data = watcher.get();
+        
+        // Initialize handle
+        int r = uv_fs_event_init(loop, watcher->handle);
+        if (r != 0) {
+            delete watcher->handle;
+            watcher->handle = nullptr;
+            std::lock_guard<std::mutex> lock(g_fs_watchers_mutex);
+            g_fs_watchers.erase(watcher->id);
+            return;
+        }
+        
+        // Start watching
+        unsigned int flags = 0;
+        if (recursive) {
+            flags |= UV_FS_EVENT_RECURSIVE;
+        }
+        
+        r = uv_fs_event_start(watcher->handle, fs_event_callback, path.c_str(), flags);
+        if (r != 0) {
+            uv_close((uv_handle_t*)watcher->handle, [](uv_handle_t* h) {
+                delete (uv_fs_event_t*)h;
+            });
+            watcher->handle = nullptr;
+            std::lock_guard<std::mutex> lock(g_fs_watchers_mutex);
+            g_fs_watchers.erase(watcher->id);
+            return;
+        }
+        
+        // Successfully started - increment work counter
+        g_active_fs_watchers.fetch_add(1);
+    });
+    
+    // Return control object
+    auto control = std::make_shared<ObjectValue>();
+    Token ctok;
+    ctok.loc = TokenLocation("<fs>", 0, 0, 0);
+    
+    // close() method
+    auto close_fn = make_native_fn("watcher.close", [watcher](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        if (watcher->closed.exchange(true)) {
+            return std::monostate{};
+        }
+        
+        scheduler_run_on_loop([watcher]() {
+            if (watcher->handle) {
+                uv_fs_event_stop(watcher->handle);
+                
+                uv_close((uv_handle_t*)watcher->handle, [](uv_handle_t* h) {
+                    FsWatcher* w = static_cast<FsWatcher*>(h->data);
+                    if (w) {
+                        g_active_fs_watchers.fetch_sub(1);
+                        
+                        {
+                            std::lock_guard<std::mutex> lock(g_fs_watchers_mutex);
+                            g_fs_watchers.erase(w->id);
+                        }
+                    }
+                    delete (uv_fs_event_t*)h;
+                });
+                
+                watcher->handle = nullptr;
             }
-            
-            // Create watcher
-            auto watcher = std::make_shared<FileWatcher>(path, recursive, callback);
-            
-            // Start watch thread
-            watcher->watch_thread = std::thread(watch_thread_func, watcher);
-            watcher->watch_thread.detach();
-            
-            // Store watcher
-            {
-                std::lock_guard<std::mutex> lock(watchers_mutex);
-                active_watchers.push_back(watcher);
-            }
-            
-            // Return watcher control object
-            auto control = std::make_shared<ObjectValue>();
-            
-            // close() method
-            auto close_fn = make_native_fn("watcher.close", [watcher](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
-                watcher->should_stop = true;
-                return Value{std::monostate{}};
-            }, nullptr);
-            control->properties["close"] = PropertyDescriptor{close_fn, false, false, false, Token()};
-            
-            return Value{control}; }, env);
+        });
+        
+        return std::monostate{};
+    }, nullptr);
+    control->properties["close"] = PropertyDescriptor{close_fn, false, false, false, ctok};
+    
+        // pause() method
+    auto pause_fn = make_native_fn("watcher.pause", [watcher](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        watcher->paused.store(true);
+        return std::monostate{};
+    }, nullptr);
+    control->properties["pause"] = PropertyDescriptor{pause_fn, false, false, false, ctok};
+    
+    // resume() method
+    auto resume_fn = make_native_fn("watcher.resume", [watcher](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        watcher->paused.store(false);
+        return std::monostate{};
+    }, nullptr);
+    control->properties["resume"] = PropertyDescriptor{resume_fn, false, false, false, ctok};
+    
+    // isPaused() method (optional but useful)
+    auto is_paused_fn = make_native_fn("watcher.isPaused", [watcher](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return Value{watcher->paused.load()};
+    }, nullptr);
+    control->properties["isPaused"] = PropertyDescriptor{is_paused_fn, false, false, false, ctok};
+        
+    return Value{control}; }, env);
         obj->properties["watch"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
@@ -2060,5 +2302,147 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         obj->properties["constants"] = PropertyDescriptor{Value{constants}, false, false, true, Token()};
     }
 
+    // fs.glob(pattern, options?) -> array of paths
+    // Options: { cwd: ".", absolute: false, onlyFiles: false, onlyDirectories: false, deep: Infinity }
+    {
+        auto fn = make_native_fn("fs.glob", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+    if (args.empty()) {
+        throw SwaziError("RuntimeError", "fs.glob requires a pattern argument. Usage: glob(pattern, options?) -> [matches]", token.loc);
+    }
+    
+    std::string pattern = value_to_string_simple(args[0]);
+    std::string cwd = ".";
+    bool absolute = false;
+    bool onlyFiles = false;
+    bool onlyDirectories = false;
+    
+    // Parse options
+    if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+        ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+        
+        auto cwd_it = opts->properties.find("cwd");
+        if (cwd_it != opts->properties.end() && std::holds_alternative<std::string>(cwd_it->second.value)) {
+            cwd = std::get<std::string>(cwd_it->second.value);
+        }
+        
+        auto abs_it = opts->properties.find("absolute");
+        if (abs_it != opts->properties.end() && std::holds_alternative<bool>(abs_it->second.value)) {
+            absolute = std::get<bool>(abs_it->second.value);
+        }
+        
+        auto files_it = opts->properties.find("onlyFiles");
+        if (files_it != opts->properties.end() && std::holds_alternative<bool>(files_it->second.value)) {
+            onlyFiles = std::get<bool>(files_it->second.value);
+        }
+        
+        auto dirs_it = opts->properties.find("onlyDirectories");
+        if (dirs_it != opts->properties.end() && std::holds_alternative<bool>(dirs_it->second.value)) {
+            onlyDirectories = std::get<bool>(dirs_it->second.value);
+        }
+    }
+    
+    auto result = std::make_shared<ArrayValue>();
+    
+    try {
+        // Check if pattern has ** (globstar - recursive wildcard)
+        bool has_globstar = (pattern.find("**") != std::string::npos);
+        
+        if (!has_globstar) {
+            // Non-recursive glob - use filesystem iteration with exact depth matching
+            // Split pattern into directory parts and filename part
+            fs::path pattern_path(pattern);
+            fs::path search_base = fs::path(cwd);
+            
+            // Build the search path by processing non-wildcard directory components
+            std::vector<std::string> parts;
+            for (const auto& part : pattern_path) {
+                parts.push_back(part.string());
+            }
+            
+            // Recursive function to match each level
+            std::function<void(const fs::path&, size_t)> match_level;
+            match_level = [&](const fs::path& current_dir, size_t part_idx) {
+                if (part_idx >= parts.size()) return;
+                
+                std::string current_pattern = parts[part_idx];
+                bool is_last = (part_idx == parts.size() - 1);
+                
+                try {
+                    for (auto& entry : fs::directory_iterator(current_dir)) {
+                        std::string name = entry.path().filename().string();
+                        
+                        // Check if this entry matches the current pattern part
+                        if (matches_pattern(name, current_pattern)) {
+                            if (is_last) {
+                                // Last part - this is a match
+                                if (onlyFiles && !entry.is_regular_file()) continue;
+                                if (onlyDirectories && !entry.is_directory()) continue;
+                                
+                                std::string path_to_add = absolute ? 
+                                    fs::absolute(entry.path()).string() : 
+                                    fs::relative(entry.path(), cwd).string();
+                                result->elements.push_back(Value{path_to_add});
+                            } else {
+                                // Not last part - continue matching if it's a directory
+                                if (entry.is_directory()) {
+                                    match_level(entry.path(), part_idx + 1);
+                                }
+                            }
+                        }
+                    }
+                } catch (const fs::filesystem_error&) {
+                    // Skip directories we can't read
+                }
+            };
+            
+            match_level(search_base, 0);
+            
+        } else {
+            // Has ** - recursive glob
+            std::function<void(const fs::path&)> walk;
+            walk = [&](const fs::path& dir) {
+                try {
+                    for (auto& entry : fs::directory_iterator(dir)) {
+                        std::string relative_path = fs::relative(entry.path(), cwd).string();
+                        
+                        // Normalize path separators
+                        std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
+                        
+                        // Check if matches pattern
+                        if (matches_pattern(relative_path, pattern)) {
+                            if (onlyFiles && !entry.is_regular_file()) continue;
+                            if (onlyDirectories && !entry.is_directory()) continue;
+                            
+                            std::string path_to_add = absolute ? 
+                                fs::absolute(entry.path()).string() : 
+                                relative_path;
+                            result->elements.push_back(Value{path_to_add});
+                        }
+                        
+                        // Always recurse for ** patterns
+                        if (entry.is_directory()) {
+                            walk(entry.path());
+                        }
+                    }
+                } catch (const fs::filesystem_error&) {
+                    // Skip directories we can't read
+                }
+            };
+            
+            walk(fs::path(cwd));
+        }
+        
+    } catch (const fs::filesystem_error& e) {
+        // Return empty array on error
+    }
+    
+    return Value{result}; }, env);
+        obj->properties["glob"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
     return obj;
+}
+
+bool fs_has_active_work() {
+    return g_active_fs_watchers.load() > 0;
 }
