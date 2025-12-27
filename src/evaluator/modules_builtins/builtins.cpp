@@ -2051,6 +2051,31 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
         obj->properties["ignoreSignals"] = PropertyDescriptor{fn_ignore, false, false, false, t};
     }
 
+    {
+        auto constants_obj = std::make_shared<ObjectValue>();
+        constants_obj->is_frozen = true;  // Make it immutable
+
+        // Add signal constants
+        auto signals = get_all_signals();  // You'll need to expose this
+        for (const auto& sig : signals) {
+            constants_obj->properties[sig.name] = {
+                Value{static_cast<double>(sig.number)},
+                false,
+                false,
+                true,
+                Token{}};
+        }
+
+        // Add other process constants
+#ifndef _WIN32
+        constants_obj->properties["STDIN_FILENO"] = {Value{0.0}, false, false, true, Token{}};
+        constants_obj->properties["STDOUT_FILENO"] = {Value{1.0}, false, false, true, Token{}};
+        constants_obj->properties["STDERR_FILENO"] = {Value{2.0}, false, false, true, Token{}};
+#endif
+
+        obj->properties["constants"] = {constants_obj, false, false, true, Token{}};
+    }
+
     return obj;
 }
 

@@ -50,3 +50,11 @@ bool udp_has_active_work();
 bool unix_has_active_work();
 bool streams_have_active_work();
 bool fs_has_active_work();
+
+struct SignalInfo {
+    std::string name;
+    int number;
+    bool catchable;
+    std::string description;
+};
+std::vector<SignalInfo> get_all_signals();

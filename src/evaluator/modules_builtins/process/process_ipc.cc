@@ -22,6 +22,103 @@
 Value process_detach_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
 Value process_ignore_signals_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
 
+std::vector<SignalInfo> get_all_signals() {
+    std::vector<SignalInfo> signals;
+
+#ifndef _WIN32
+    // Standard POSIX signals
+    signals.push_back({"SIGINT", SIGINT, true, "Interrupt from keyboard (Ctrl+C)"});
+    signals.push_back({"SIGTERM", SIGTERM, true, "Termination signal"});
+    signals.push_back({"SIGHUP", SIGHUP, true, "Hangup detected on controlling terminal"});
+    signals.push_back({"SIGQUIT", SIGQUIT, true, "Quit from keyboard (Ctrl+\\)"});
+    signals.push_back({"SIGUSR1", SIGUSR1, true, "User-defined signal 1"});
+    signals.push_back({"SIGUSR2", SIGUSR2, true, "User-defined signal 2"});
+    signals.push_back({"SIGPIPE", SIGPIPE, true, "Broken pipe"});
+    signals.push_back({"SIGALRM", SIGALRM, true, "Timer signal from alarm()"});
+    signals.push_back({"SIGCHLD", SIGCHLD, true, "Child stopped or terminated"});
+    signals.push_back({"SIGCONT", SIGCONT, true, "Continue if stopped"});
+    signals.push_back({"SIGTSTP", SIGTSTP, true, "Stop typed at terminal (Ctrl+Z)"});
+    signals.push_back({"SIGTTIN", SIGTTIN, true, "Terminal input for background process"});
+    signals.push_back({"SIGTTOU", SIGTTOU, true, "Terminal output for background process"});
+    signals.push_back({"SIGWINCH", SIGWINCH, true, "Window resize signal"});
+    signals.push_back({"SIGURG", SIGURG, true, "Urgent condition on socket"});
+    signals.push_back({"SIGXCPU", SIGXCPU, true, "CPU time limit exceeded"});
+    signals.push_back({"SIGXFSZ", SIGXFSZ, true, "File size limit exceeded"});
+    signals.push_back({"SIGVTALRM", SIGVTALRM, true, "Virtual alarm clock"});
+    signals.push_back({"SIGPROF", SIGPROF, true, "Profiling timer expired"});
+
+    // Uncatchable signals (for documentation)
+    signals.push_back({"SIGKILL", SIGKILL, false, "Kill signal (uncatchable)"});
+    signals.push_back({"SIGSTOP", SIGSTOP, false, "Stop process (uncatchable)"});
+
+    // Dangerous signals (catchable but risky)
+    signals.push_back({"SIGSEGV", SIGSEGV, true, "Invalid memory reference (dangerous to catch)"});
+    signals.push_back({"SIGBUS", SIGBUS, true, "Bus error (dangerous to catch)"});
+    signals.push_back({"SIGFPE", SIGFPE, true, "Floating-point exception (dangerous to catch)"});
+    signals.push_back({"SIGILL", SIGILL, true, "Illegal instruction (dangerous to catch)"});
+    signals.push_back({"SIGTRAP", SIGTRAP, true, "Trace/breakpoint trap (dangerous to catch)"});
+    signals.push_back({"SIGABRT", SIGABRT, true, "Abort signal from abort()"});
+    signals.push_back({"SIGSYS", SIGSYS, true, "Bad system call"});
+
+#else  // Windows
+    signals.push_back({"SIGINT", SIGINT, true, "Interrupt from keyboard (Ctrl+C)"});
+    signals.push_back({"SIGTERM", SIGTERM, true, "Termination signal"});
+    signals.push_back({"SIGBREAK", SIGBREAK, true, "Break signal (Ctrl+Break)"});
+    signals.push_back({"SIGABRT", SIGABRT, true, "Abort signal from abort()"});
+    signals.push_back({"SIGFPE", SIGFPE, true, "Floating-point exception"});
+    signals.push_back({"SIGILL", SIGILL, true, "Illegal instruction"});
+    signals.push_back({"SIGSEGV", SIGSEGV, true, "Invalid memory reference"});
+#endif
+
+    return signals;
+}
+
+// Helper: convert signal name or number to signal number
+static int resolve_signal(const Value& v, const Token& token) {
+    // If it's a number (signal code), validate and return
+    if (std::holds_alternative<double>(v)) {
+        int sig = static_cast<int>(std::get<double>(v));
+#ifndef _WIN32
+        if (sig < 1 || sig > 64) {  // Most systems support 1-64
+            throw SwaziError("RangeError",
+                "Signal number must be between 1 and 64", token.loc);
+        }
+#else
+        // Windows only supports a handful
+        if (sig != SIGINT && sig != SIGTERM && sig != SIGBREAK &&
+            sig != SIGABRT && sig != SIGFPE && sig != SIGILL && sig != SIGSEGV) {
+            throw SwaziError("ValueError",
+                "Invalid signal number for Windows", token.loc);
+        }
+#endif
+        return sig;
+    }
+
+    // If it's a string (signal name), look it up
+    if (std::holds_alternative<std::string>(v)) {
+        std::string sig_name = std::get<std::string>(v);
+
+        // Add "SIG" prefix if missing
+        if (sig_name.size() >= 2 && sig_name.substr(0, 3) != "SIG") {
+            sig_name = "SIG" + sig_name;
+        }
+
+        // Look up in our signal table
+        auto signals = get_all_signals();
+        for (const auto& s : signals) {
+            if (s.name == sig_name) {
+                return s.number;
+            }
+        }
+
+        throw SwaziError("ValueError",
+            "Unknown signal name: " + std::get<std::string>(v), token.loc);
+    }
+
+    throw SwaziError("TypeError",
+        "Signal must be a string name or numeric code", token.loc);
+}
+
 // Global state for child IPC
 static struct IPCState {
     bool initialized = false;
@@ -230,6 +327,8 @@ static struct SignalState {
     std::mutex mutex;
     std::unordered_map<std::string, std::vector<FunctionPtr>> signal_listeners;
     std::unordered_map<std::string, uv_signal_t*> signal_handles;
+
+    std::vector<FunctionPtr> catch_all_listeners;
 } g_signal_state;
 
 // Signal callback
@@ -237,30 +336,41 @@ static void signal_cb(uv_signal_t* handle, int signum) {
     std::string sig_name = "SIG" + std::to_string(signum);
 
     // Map common signal numbers to names
-    if (signum == SIGTERM)
-        sig_name = "SIGTERM";
-    else if (signum == SIGINT)
-        sig_name = "SIGINT";
-#ifndef _WIN32
-    else if (signum == SIGHUP)
-        sig_name = "SIGHUP";
-    else if (signum == SIGUSR1)
-        sig_name = "SIGUSR1";
-    else if (signum == SIGUSR2)
-        sig_name = "SIGUSR2";
-#endif
+    auto signals = get_all_signals();
+    for (const auto& s : signals) {
+        if (s.number == signum) {
+            sig_name = s.name;
+            break;
+        }
+    }
 
     std::vector<FunctionPtr> listeners;
+    std::vector<FunctionPtr> catch_all;
+
     {
         std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+
+        // Get specific signal listeners
         auto it = g_signal_state.signal_listeners.find(sig_name);
         if (it != g_signal_state.signal_listeners.end()) {
             listeners = it->second;
         }
+
+        // Get catch-all listeners
+        catch_all = g_signal_state.catch_all_listeners;
     }
 
+    // Fire specific signal listeners: callback(signalName)
     for (auto& cb : listeners) {
         if (cb) schedule_message_listener(cb, {Value{sig_name}});
+    }
+
+    // Fire catch-all "signal" listeners: callback(signalCode, signalName)
+    for (auto& cb : catch_all) {
+        if (cb) schedule_message_listener(cb, {
+                                                  Value{static_cast<double>(signum)},  // code
+                                                  Value{sig_name}                      // type/name
+                                              });
     }
 }
 
@@ -284,44 +394,69 @@ static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, 
 
     // Handle "message" event (IPC)
     if (event == "message") {
-        // Initialize IPC if not already done
         if (!g_ipc_state.initialized) {
             initialize_child_ipc();
         }
-
-        // SILENT MODE: If not a forked child, just return (do nothing)
         if (!g_ipc_state.is_forked_child) {
             return std::monostate{};
         }
 
-        // Register the listener
-        {
-            std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
-            g_ipc_state.message_listeners.push_back(callback);
+        std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+        g_ipc_state.message_listeners.push_back(callback);
+        return std::monostate{};
+    }
+
+    // NEW: Handle "signal" event (catch-all for ALL signals)
+    if (event == "signal") {
+        uv_loop_t* loop = scheduler_get_loop();
+        if (!loop) {
+            return std::monostate{};
+        }
+
+        std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+
+        // Add to catch-all listeners
+        g_signal_state.catch_all_listeners.push_back(callback);
+
+        // Register ALL catchable signals if not already registered
+        auto signals = get_all_signals();
+        for (const auto& sig : signals) {
+            if (!sig.catchable) continue;  // Skip SIGKILL, SIGSTOP
+
+#ifdef _WIN32
+            // Windows only supports a few signals
+            if (sig.number != SIGINT && sig.number != SIGTERM &&
+                sig.number != SIGBREAK && sig.number != SIGABRT) {
+                continue;
+            }
+#endif
+
+            // Create signal handle if not exists
+            if (g_signal_state.signal_handles.find(sig.name) ==
+                g_signal_state.signal_handles.end()) {
+                uv_signal_t* sig_handle = new uv_signal_t;
+                uv_signal_init(loop, sig_handle);
+                uv_signal_start(sig_handle, signal_cb, sig.number);
+                g_signal_state.signal_handles[sig.name] = sig_handle;
+            }
         }
 
         return std::monostate{};
     }
 
-    // Handle signal events (SIGTERM, SIGINT, etc.)
+    // Handle specific signal events (SIGTERM, SIGINT, etc.)
+    // First try to resolve as a signal name/number
     int signum = -1;
-    if (event == "SIGTERM")
-        signum = SIGTERM;
-    else if (event == "SIGINT")
-        signum = SIGINT;
-#ifndef _WIN32
-    else if (event == "SIGHUP")
-        signum = SIGHUP;
-    else if (event == "SIGUSR1")
-        signum = SIGUSR1;
-    else if (event == "SIGUSR2")
-        signum = SIGUSR2;
-#endif
+    try {
+        signum = resolve_signal(Value{event}, token);
+    } catch (...) {
+        // Not a valid signal, silently ignore unknown events
+        return std::monostate{};
+    }
 
     if (signum != -1) {
         uv_loop_t* loop = scheduler_get_loop();
         if (!loop) {
-            // No loop - can't register signal handlers
             return std::monostate{};
         }
 
@@ -331,7 +466,8 @@ static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, 
         g_signal_state.signal_listeners[event].push_back(callback);
 
         // Create signal handle if not exists
-        if (g_signal_state.signal_handles.find(event) == g_signal_state.signal_handles.end()) {
+        if (g_signal_state.signal_handles.find(event) ==
+            g_signal_state.signal_handles.end()) {
             uv_signal_t* sig_handle = new uv_signal_t;
             uv_signal_init(loop, sig_handle);
             uv_signal_start(sig_handle, signal_cb, signum);
@@ -344,7 +480,6 @@ static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, 
     // Unknown event - silently ignore
     return std::monostate{};
 }
-
 // process.detach() - detach from parent terminal (daemonize)
 static Value process_detach(const std::vector<Value>& /*args*/, EnvPtr /*env*/, const Token& token) {
 #ifndef _WIN32
@@ -388,43 +523,28 @@ static Value process_detach(const std::vector<Value>& /*args*/, EnvPtr /*env*/, 
 
 // process.ignoreSignals(signals...) - ignore specified signals
 static Value process_ignore_signals(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
+    for (const auto& arg : args) {
+        int signum = resolve_signal(arg, token);
+
+        // Check if uncatchable
 #ifndef _WIN32
-    for (const auto& arg : args) {
-        std::string sig_name = value_to_string_ipc(arg);
-
-        int signum = -1;
-        if (sig_name == "SIGTERM")
-            signum = SIGTERM;
-        else if (sig_name == "SIGINT")
-            signum = SIGINT;
-        else if (sig_name == "SIGHUP")
-            signum = SIGHUP;
-        else if (sig_name == "SIGUSR1")
-            signum = SIGUSR1;
-        else if (sig_name == "SIGUSR2")
-            signum = SIGUSR2;
-        else if (sig_name == "SIGKILL" || sig_name == "SIGSTOP") {
+        if (signum == SIGKILL || signum == SIGSTOP) {
             throw SwaziError("RuntimeError",
-                std::string("Cannot ignore ") + sig_name + " (uncatchable)", token.loc);
+                "Cannot ignore SIGKILL or SIGSTOP (uncatchable)", token.loc);
         }
 
-        if (signum != -1) {
-            signal(signum, SIG_IGN);
+        // Warn about dangerous signals
+        if (signum == SIGSEGV || signum == SIGBUS || signum == SIGFPE ||
+            signum == SIGILL || signum == SIGTRAP) {
+            std::cerr << "Warning: Ignoring signal " << signum
+                      << " is dangerous and may cause crashes\n";
         }
-    }
-    return Value{true};
-#else
-    // Windows - ignore SIGINT, SIGTERM only
-    for (const auto& arg : args) {
-        std::string sig_name = value_to_string_simple(arg);
-        if (sig_name == "SIGINT") {
-            signal(SIGINT, SIG_IGN);
-        } else if (sig_name == "SIGTERM") {
-            signal(SIGTERM, SIG_IGN);
-        }
-    }
-    return Value{true};
 #endif
+
+        signal(signum, SIG_IGN);
+    }
+
+    return Value{true};
 }
 
 Value process_send_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token) {
