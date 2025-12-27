@@ -1,5 +1,6 @@
 #pragma once
 #include "evaluator.hpp"
+#include "swazi.hpp"
 #include "uv.h"
 
 // Factories producing the ObjectPtr exports for each builtin module.

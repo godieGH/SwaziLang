@@ -19,6 +19,7 @@
 #include "muda_class.hpp"
 #include "proxy_class.hpp"
 #include "set_class.hpp"
+#include "swazi.hpp"
 #include "time.hpp"
 #include "token.hpp"
 #include "url_class.hpp"
@@ -1138,6 +1139,15 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
         // swazi.cerr -> swazi.stderr.write
         auto cerrFn = std::make_shared<FunctionValue>("cerr", builtin_cerr, env, Token{});
         programVal->properties["cerr"] = {cerrFn, false, false, true, Token{}};
+
+        {
+            auto serialize_exports = make_serialization_exports(env, evaluator);
+
+            // Add serialize and deserialize to swazi object
+            for (const auto& kv : serialize_exports->properties) {
+                programVal->properties[kv.first] = kv.second;
+            }
+        }
 
         // Finalize swazi global
         Environment::Variable program;
