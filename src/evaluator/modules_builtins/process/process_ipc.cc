@@ -19,6 +19,9 @@
 #include <io.h>
 #endif
 
+Value process_detach_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
+Value process_ignore_signals_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
+
 // Global state for child IPC
 static struct IPCState {
     bool initialized = false;
@@ -342,10 +345,100 @@ static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, 
     return std::monostate{};
 }
 
+// process.detach() - detach from parent terminal (daemonize)
+static Value process_detach(const std::vector<Value>& /*args*/, EnvPtr /*env*/, const Token& token) {
+#ifndef _WIN32
+    // Fork and exit parent
+    pid_t pid = fork();
+    if (pid < 0) {
+        throw SwaziError("RuntimeError", "Fork failed during detach", token.loc);
+    }
+    if (pid > 0) {
+        // Parent exits
+        exit(0);
+    }
+
+    // Child continues - create new session
+    if (setsid() < 0) {
+        throw SwaziError("RuntimeError", "setsid failed during detach", token.loc);
+    }
+
+    // Ignore SIGHUP
+    signal(SIGHUP, SIG_IGN);
+
+    // Second fork to prevent acquiring terminal
+    pid = fork();
+    if (pid < 0) {
+        throw SwaziError("RuntimeError", "Second fork failed during detach", token.loc);
+    }
+    if (pid > 0) {
+        exit(0);
+    }
+
+    // Close standard file descriptors
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    return Value{true};
+#else
+    throw SwaziError("NotImplementedError", "process.detach() not supported on Windows", token.loc);
+#endif
+}
+
+// process.ignoreSignals(signals...) - ignore specified signals
+static Value process_ignore_signals(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
+#ifndef _WIN32
+    for (const auto& arg : args) {
+        std::string sig_name = value_to_string_ipc(arg);
+
+        int signum = -1;
+        if (sig_name == "SIGTERM")
+            signum = SIGTERM;
+        else if (sig_name == "SIGINT")
+            signum = SIGINT;
+        else if (sig_name == "SIGHUP")
+            signum = SIGHUP;
+        else if (sig_name == "SIGUSR1")
+            signum = SIGUSR1;
+        else if (sig_name == "SIGUSR2")
+            signum = SIGUSR2;
+        else if (sig_name == "SIGKILL" || sig_name == "SIGSTOP") {
+            throw SwaziError("RuntimeError",
+                std::string("Cannot ignore ") + sig_name + " (uncatchable)", token.loc);
+        }
+
+        if (signum != -1) {
+            signal(signum, SIG_IGN);
+        }
+    }
+    return Value{true};
+#else
+    // Windows - ignore SIGINT, SIGTERM only
+    for (const auto& arg : args) {
+        std::string sig_name = value_to_string_simple(arg);
+        if (sig_name == "SIGINT") {
+            signal(SIGINT, SIG_IGN);
+        } else if (sig_name == "SIGTERM") {
+            signal(SIGTERM, SIG_IGN);
+        }
+    }
+    return Value{true};
+#endif
+}
+
 Value process_send_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token) {
     return process_send(args, env, token);
 }
 
 Value process_on_message_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token) {
     return process_on_message(args, env, token);
+}
+
+Value process_detach_impl(const std::vector<Value>& args, EnvPtr env, const Token& token) {
+    return process_detach(args, env, token);
+}
+
+Value process_ignore_signals_impl(const std::vector<Value>& args, EnvPtr env, const Token& token) {
+    return process_ignore_signals(args, env, token);
 }

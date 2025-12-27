@@ -2023,6 +2023,34 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
         obj->properties["chdir"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
+    // process.detach()
+    {
+        Token t;
+        t.type = TokenType::IDENTIFIER;
+        t.loc = TokenLocation("<process>", 0, 0, 0);
+
+        auto fn_detach = std::make_shared<FunctionValue>(
+            "process.detach",
+            process_detach_impl,
+            env,
+            t);
+        obj->properties["detach"] = PropertyDescriptor{fn_detach, false, false, false, t};
+    }
+
+    // process.ignoreSignals(...signals)
+    {
+        Token t;
+        t.type = TokenType::IDENTIFIER;
+        t.loc = TokenLocation("<process>", 0, 0, 0);
+
+        auto fn_ignore = std::make_shared<FunctionValue>(
+            "process.ignoreSignals",
+            process_ignore_signals_impl,
+            env,
+            t);
+        obj->properties["ignoreSignals"] = PropertyDescriptor{fn_ignore, false, false, false, t};
+    }
+
     return obj;
 }
 

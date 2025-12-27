@@ -36,9 +36,13 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);
 
-// NEW: Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)
+// Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)
 ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket);
 ObjectPtr create_network_writable_stream_object(uv_tcp_t* socket);
+
+// for process_detach_impl abd process_ignore_signals_impl wrappers
+Value process_detach_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
+Value process_ignore_signals_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
 
 bool tcp_has_active_work();
 bool net_has_active_work();
