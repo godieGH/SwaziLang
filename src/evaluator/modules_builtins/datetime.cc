@@ -268,13 +268,13 @@ static DateTimePtr parse_iso_datetime(const std::string& iso_str, const Token& t
     return dt;
 }
 
-// time.now() -> DateTimeValue
-static Value native_time_now(const std::vector<Value>&, EnvPtr, const Token&) {
+// datetime.now() -> DateTimeValue
+static Value native_datetime_now(const std::vector<Value>&, EnvPtr, const Token&) {
     return Value{create_current_datetime()};
 }
 
-// time.date(...args) -> DateTimeValue
-static Value native_time_date(const std::vector<Value>& args, EnvPtr, const Token& token) {
+// datetime.date(...args) -> DateTimeValue
+static Value native_datetime_date(const std::vector<Value>& args, EnvPtr, const Token& token) {
     if (args.empty()) {
         throw SwaziError("TypeError",
             "time.date requires at least one argument. "
@@ -432,24 +432,24 @@ static Value native_time_date(const std::vector<Value>& args, EnvPtr, const Toke
 }
 
 // Export factory
-std::shared_ptr<ObjectValue> make_time_exports(EnvPtr env) {
+std::shared_ptr<ObjectValue> make_datetime_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
-    // time.now() -> DateTimeValue
+    // datetime.now() -> DateTimeValue
     {
         auto fn = std::make_shared<FunctionValue>(
             "time.now",
-            native_time_now,
+            native_datetime_now,
             env,
             Token{});
         obj->properties["now"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // time.date(...args) -> DateTimeValue
+    // datetime.date(...args) -> DateTimeValue
     {
         auto fn = std::make_shared<FunctionValue>(
             "time.date",
-            native_time_date,
+            native_datetime_date,
             env,
             Token{});
         obj->properties["date"] = PropertyDescriptor{fn, false, false, false, Token()};

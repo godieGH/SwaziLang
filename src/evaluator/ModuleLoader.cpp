@@ -730,8 +730,8 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             return rec->exports;
         }
 
-        if (module_spec == "time" || module_spec == "swazi:time") {
-            const std::string key = "__builtin__:time";
+        if (module_spec == "datetime" || module_spec == "swazi:datetime") {
+            const std::string key = "__builtin__:datetime";
             auto it = module_cache.find(key);
             if (it != module_cache.end()) return it->second->exports;
 
@@ -741,9 +741,9 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             rec->path = key;
             rec->module_env = std::make_shared<Environment>(global_env);
             module_cache[key] = rec;
-            populate_module_metadata(rec->module_env, rec->path, "time", false);
+            populate_module_metadata(rec->module_env, rec->path, "datetime", false);
 
-            rec->exports = make_time_exports(rec->module_env);
+            rec->exports = make_datetime_exports(rec->module_env);
 
             rec->state = ModuleRecord::State::Loaded;
             return rec->exports;

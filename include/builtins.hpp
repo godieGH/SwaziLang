@@ -29,7 +29,7 @@ std::shared_ptr<ObjectValue> make_net_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_collections_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evaluator);
-std::shared_ptr<ObjectValue> make_time_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_datetime_exports(EnvPtr env);
 
 std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
