@@ -288,6 +288,222 @@ static FunctionPtr make_native_fn(const std::string& name, F impl, EnvPtr env) {
     return fn;
 }
 
+// Helper function to build stat object from path
+// use_lstat: if true, use symlink_status (don't follow symlinks)
+static Value build_stat_object(const std::string& path, bool use_lstat, const Token& token) {
+    auto obj = std::make_shared<ObjectValue>();
+
+    try {
+        if (!std::filesystem::exists(path)) {
+            obj->properties["exists"] = PropertyDescriptor{Value{false}, false, false, true, Token()};
+            return Value{obj};
+        }
+
+        // Get filesystem status (follow or don't follow symlinks)
+        auto status = use_lstat ? std::filesystem::symlink_status(path) : std::filesystem::status(path);
+        bool isFile = std::filesystem::is_regular_file(status);
+        bool isDir = std::filesystem::is_directory(status);
+        bool isSymlink = std::filesystem::is_symlink(path);
+
+        // Unix-specific: detect sockets, FIFOs, devices
+        bool isSocket = false;
+        bool isFifo = false;
+        bool isBlockDevice = false;
+        bool isCharDevice = false;
+
+        uintmax_t size = 0;
+        if (isFile) {
+            size = std::filesystem::file_size(path);
+        }
+
+        // Get timestamps
+        std::string mtime;
+        std::string ctime;
+        std::string atime;
+
+        // Modified time (cross-platform)
+        try {
+            auto ftime = std::filesystem::last_write_time(path);
+            auto st = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
+            std::time_t tt = std::chrono::system_clock::to_time_t(st);
+            std::tm tm{};
+#ifdef _MSC_VER
+            gmtime_s(&tm, &tt);
+#else
+            gmtime_r(&tt, &tm);
+#endif
+            char buf[64];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            mtime = buf;
+        } catch (...) {
+            mtime = "";
+        }
+
+#ifndef _WIN32
+        // Unix: use stat() to get all timestamps + file type details
+        struct stat st;
+        bool stat_success = use_lstat ? (lstat(path.c_str(), &st) == 0) : (stat(path.c_str(), &st) == 0);
+
+        if (stat_success) {
+            // Detect special file types
+            isSocket = S_ISSOCK(st.st_mode);
+            isFifo = S_ISFIFO(st.st_mode);
+            isBlockDevice = S_ISBLK(st.st_mode);
+            isCharDevice = S_ISCHR(st.st_mode);
+
+            std::tm tm{};
+            char buf[64];
+
+            // Access time
+#ifdef __APPLE__
+            std::time_t at = st.st_atimespec.tv_sec;
+#else
+            std::time_t at = st.st_atime;
+#endif
+            gmtime_r(&at, &tm);
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            atime = buf;
+
+            // Birth time (creation)
+#ifdef __APPLE__
+            std::time_t bt = st.st_birthtimespec.tv_sec;
+            gmtime_r(&bt, &tm);
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            ctime = buf;
+#elif defined(__linux__)
+            std::time_t ct = st.st_ctime;
+            gmtime_r(&ct, &tm);
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            ctime = buf;
+#else
+            ctime = "";
+#endif
+        }
+#else
+        // Windows: use GetFileTime
+        HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            FILETIME ftCreate, ftAccess, ftWrite;
+            if (GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
+                auto convert_filetime = [](const FILETIME& ft) -> std::string {
+                    ULARGE_INTEGER uli;
+                    uli.LowPart = ft.dwLowDateTime;
+                    uli.HighPart = ft.dwHighDateTime;
+
+                    const uint64_t EPOCH_DIFF = 116444736000000000ULL;
+                    uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
+
+                    std::time_t tt = static_cast<std::time_t>(timestamp);
+                    std::tm tm{};
+                    gmtime_s(&tm, &tt);
+                    char buf[64];
+                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+                    return buf;
+                };
+
+                ctime = convert_filetime(ftCreate);
+                atime = convert_filetime(ftAccess);
+            }
+            CloseHandle(hFile);
+        }
+#endif
+
+        // Permissions
+        auto perms = status.permissions();
+        uint32_t perms_raw = static_cast<uint32_t>(perms);
+
+        std::string perms_summary;
+        perms_summary += ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) ? "r" : "-";
+        perms_summary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
+        perms_summary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
+        perms_summary += ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) ? "r" : "-";
+        perms_summary += ((perms & std::filesystem::perms::group_write) != std::filesystem::perms::none) ? "w" : "-";
+        perms_summary += ((perms & std::filesystem::perms::group_exec) != std::filesystem::perms::none) ? "x" : "-";
+        perms_summary += ((perms & std::filesystem::perms::others_read) != std::filesystem::perms::none) ? "r" : "-";
+        perms_summary += ((perms & std::filesystem::perms::others_write) != std::filesystem::perms::none) ? "w" : "-";
+        perms_summary += ((perms & std::filesystem::perms::others_exec) != std::filesystem::perms::none) ? "x" : "-";
+
+        // Determine file type string
+        std::string type_str;
+        if (isFile)
+            type_str = "file";
+        else if (isDir)
+            type_str = "directory";
+        else if (isSymlink)
+            type_str = "symlink";
+        else if (isSocket)
+            type_str = "socket";
+        else if (isFifo)
+            type_str = "fifo";
+        else if (isBlockDevice)
+            type_str = "block-device";
+        else if (isCharDevice)
+            type_str = "char-device";
+        else
+            type_str = "other";
+
+        // Build standard properties
+        obj->properties["exists"] = PropertyDescriptor{Value{true}, false, false, true, Token()};
+        obj->properties["type"] = PropertyDescriptor{Value{type_str}, false, false, true, Token()};
+        obj->properties["size"] = PropertyDescriptor{Value{static_cast<double>(size)}, false, false, true, Token()};
+
+        obj->properties["mtime"] = PropertyDescriptor{Value{mtime}, false, false, true, Token()};
+        obj->properties["ctime"] = PropertyDescriptor{Value{ctime}, false, false, true, Token()};
+        obj->properties["atime"] = PropertyDescriptor{Value{atime}, false, false, true, Token()};
+
+        obj->properties["permissions"] = PropertyDescriptor{Value{perms_summary}, false, false, true, Token()};
+        obj->properties["mode"] = PropertyDescriptor{Value{static_cast<double>(perms_raw)}, false, false, true, Token()};
+
+        // Deprecated boolean fields (for compatibility)
+        obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
+        obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
+
+        // New boolean fields for special types
+        obj->properties["isSocket"] = PropertyDescriptor{Value{isSocket}, false, false, true, Token()};
+        obj->properties["isFifo"] = PropertyDescriptor{Value{isFifo}, false, false, true, Token()};
+        obj->properties["isBlockDevice"] = PropertyDescriptor{Value{isBlockDevice}, false, false, true, Token()};
+        obj->properties["isCharDevice"] = PropertyDescriptor{Value{isCharDevice}, false, false, true, Token()};
+
+#ifndef _WIN32
+        // Unix: raw platform data
+        if (stat_success) {
+            auto raw_obj = std::make_shared<ObjectValue>();
+            raw_obj->properties["dev"] = PropertyDescriptor{Value{static_cast<double>(st.st_dev)}, false, false, true, Token()};
+            raw_obj->properties["ino"] = PropertyDescriptor{Value{static_cast<double>(st.st_ino)}, false, false, true, Token()};
+            raw_obj->properties["nlink"] = PropertyDescriptor{Value{static_cast<double>(st.st_nlink)}, false, false, true, Token()};
+            raw_obj->properties["uid"] = PropertyDescriptor{Value{static_cast<double>(st.st_uid)}, false, false, true, Token()};
+            raw_obj->properties["gid"] = PropertyDescriptor{Value{static_cast<double>(st.st_gid)}, false, false, true, Token()};
+            raw_obj->properties["rdev"] = PropertyDescriptor{Value{static_cast<double>(st.st_rdev)}, false, false, true, Token()};
+            raw_obj->properties["blksize"] = PropertyDescriptor{Value{static_cast<double>(st.st_blksize)}, false, false, true, Token()};
+            raw_obj->properties["blocks"] = PropertyDescriptor{Value{static_cast<double>(st.st_blocks)}, false, false, true, Token()};
+
+            obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
+        }
+#else
+        // Windows: file attributes
+        DWORD attrs = GetFileAttributesA(path.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            auto raw_obj = std::make_shared<ObjectValue>();
+            raw_obj->properties["attributes"] = PropertyDescriptor{Value{static_cast<double>(attrs)}, false, false, true, Token()};
+            raw_obj->properties["hidden"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_HIDDEN) != 0}, false, false, true, Token()};
+            raw_obj->properties["system"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_SYSTEM) != 0}, false, false, true, Token()};
+            raw_obj->properties["archive"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ARCHIVE) != 0}, false, false, true, Token()};
+            raw_obj->properties["readonly"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_READONLY) != 0}, false, false, true, Token()};
+            raw_obj->properties["compressed"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_COMPRESSED) != 0}, false, false, true, Token()};
+            raw_obj->properties["encrypted"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ENCRYPTED) != 0}, false, false, true, Token()};
+
+            obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
+        }
+#endif
+
+        return Value{obj};
+    } catch (const std::filesystem::filesystem_error& e) {
+        throw SwaziError("FilesystemError", std::string("fs.stat failed: ") + e.what(), token.loc);
+    }
+}
+
 // ============= MAIN EXPORTS FUNCTION =============
 
 std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
@@ -527,388 +743,22 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     // stat(path) -> object
     {
         auto fn = make_native_fn("fs.stat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) {
-            throw SwaziError("RuntimeError", "fs.stat requires a path argument", token.loc);
-        }
-        std::string path = value_to_string_simple(args[0]);
-        
-        auto obj = std::make_shared<ObjectValue>();
-        
-        try {
-            if (!std::filesystem::exists(path)) {
-                obj->properties["exists"] = PropertyDescriptor{Value{false}, false, false, true, Token()};
-                return Value{obj};
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.stat requires a path argument", token.loc);
             }
-            
-            auto status = std::filesystem::status(path);
-            bool isFile = std::filesystem::is_regular_file(status);
-            bool isDir = std::filesystem::is_directory(status);
-            bool isSymlink = std::filesystem::is_symlink(path);
-            
-            uintmax_t size = 0;
-            if (isFile) {
-                size = std::filesystem::file_size(path);
-            }
-            
-            // Get timestamps
-            std::string mtime;  // Modified time
-            std::string ctime;  // Creation time (birthtime on supporting systems)
-            std::string atime;  // Access time
-            
-            // Modified time (cross-platform)
-            try {
-                auto ftime = std::filesystem::last_write_time(path);
-                auto st = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                    ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
-                std::time_t tt = std::chrono::system_clock::to_time_t(st);
-                std::tm tm{};
-#ifdef _MSC_VER
-                gmtime_s(&tm, &tt);
-#else
-                gmtime_r(&tt, &tm);
-#endif
-                char buf[64];
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                mtime = buf;
-            } catch (...) {
-                mtime = "";
-            }
-
-                // Get creation and access times (platform-specific)
-#ifndef _WIN32
-            // Unix: use stat() to get all timestamps
-            struct stat st;
-            bool stat_success = (stat(path.c_str(), &st) == 0); 
-            if (stat_success) {
-                // Birth time (creation time) - available on some systems
-                std::tm tm{};
-                char buf[64];
-
-                    // Access time
-#ifdef __APPLE__
-                // macOS has st_atimespec
-                std::time_t at = st.st_atimespec.tv_sec;
-#else
-                std::time_t at = st.st_atime;
-#endif
-                gmtime_r(&at, &tm);
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                atime = buf;
-
-                    // Birth time (creation) - platform specific
-#ifdef __APPLE__
-                // macOS has st_birthtimespec
-                std::time_t bt = st.st_birthtimespec.tv_sec;
-                gmtime_r(&bt, &tm);
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                ctime = buf;
-#elif defined(__linux__)
-                // Linux: statx() can provide birth time on newer kernels/filesystems
-                // For now, fall back to ctime (inode change time, not creation)
-                std::time_t ct = st.st_ctime;
-                gmtime_r(&ct, &tm);
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                ctime = buf;  // Note: this is inode change time, not true creation
-#else
-                ctime = "";  // Not available
-#endif
-            }
-#else
-            // Windows: use GetFileTime for proper creation time
-            HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, 
-                                      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-            if (hFile != INVALID_HANDLE_VALUE) {
-                FILETIME ftCreate, ftAccess, ftWrite;
-                if (GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
-                    auto convert_filetime = [](const FILETIME& ft) -> std::string {
-                        ULARGE_INTEGER uli;
-                        uli.LowPart = ft.dwLowDateTime;
-                        uli.HighPart = ft.dwHighDateTime;
-                        
-                        // Convert to Unix epoch
-                        const uint64_t EPOCH_DIFF = 116444736000000000ULL;
-                        uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
-                        
-                        std::time_t tt = static_cast<std::time_t>(timestamp);
-                        std::tm tm{};
-                        gmtime_s(&tm, &tt);
-                        char buf[64];
-                        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                        return buf;
-                    };
-                    
-                    ctime = convert_filetime(ftCreate);
-                    atime = convert_filetime(ftAccess);
-                }
-                CloseHandle(hFile);
-            }
-#endif
-            
-            // Get raw permissions (the actual bits)
-            auto perms = status.permissions();
-            uint32_t perms_raw = static_cast<uint32_t>(perms);
-            
-            // Compute human-readable summary (convenience)
-            std::string perms_summary;
-            perms_summary += ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) ? "r" : "-";
-            perms_summary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
-            perms_summary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
-            perms_summary += ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) ? "r" : "-";
-            perms_summary += ((perms & std::filesystem::perms::group_write) != std::filesystem::perms::none) ? "w" : "-";
-            perms_summary += ((perms & std::filesystem::perms::group_exec) != std::filesystem::perms::none) ? "x" : "-";
-            perms_summary += ((perms & std::filesystem::perms::others_read) != std::filesystem::perms::none) ? "r" : "-";
-            perms_summary += ((perms & std::filesystem::perms::others_write) != std::filesystem::perms::none) ? "w" : "-";
-            perms_summary += ((perms & std::filesystem::perms::others_exec) != std::filesystem::perms::none) ? "x" : "-";
-            
-            // Standard fields (normalized cross-platform)
-            obj->properties["exists"] = PropertyDescriptor{Value{true}, false, false, true, Token()};
-            obj->properties["type"] = PropertyDescriptor{
-                Value{isFile ? std::string("file") : isDir ? std::string("directory") : isSymlink ? std::string("symlink") : std::string("other")},
-                false, false, true, Token()
-            };
-            obj->properties["size"] = PropertyDescriptor{Value{static_cast<double>(size)}, false, false, true, Token()};
-            
-            // Timestamps (standard names)
-            obj->properties["mtime"] = PropertyDescriptor{Value{mtime}, false, false, true, Token()};        // Modified
-            obj->properties["ctime"] = PropertyDescriptor{Value{ctime}, false, false, true, Token()};        // Created
-            obj->properties["atime"] = PropertyDescriptor{Value{atime}, false, false, true, Token()};        // Accessed
-            
-            // Permissions (both forms)
-            obj->properties["permissions"] = PropertyDescriptor{Value{perms_summary}, false, false, true, Token()};
-            obj->properties["mode"] = PropertyDescriptor{Value{static_cast<double>(perms_raw)}, false, false, true, Token()};
-            
-            // Deprecated fields (for compatibility)
-            obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
-            obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
-
-                // Platform-specific raw data
-#ifndef _WIN32
-            // Unix: include inode, device, nlink, uid, gid
-            if (stat_success) {
-                auto raw_obj = std::make_shared<ObjectValue>();
-                raw_obj->properties["dev"] = PropertyDescriptor{Value{static_cast<double>(st.st_dev)}, false, false, true, Token()};
-                raw_obj->properties["ino"] = PropertyDescriptor{Value{static_cast<double>(st.st_ino)}, false, false, true, Token()};
-                raw_obj->properties["nlink"] = PropertyDescriptor{Value{static_cast<double>(st.st_nlink)}, false, false, true, Token()};
-                raw_obj->properties["uid"] = PropertyDescriptor{Value{static_cast<double>(st.st_uid)}, false, false, true, Token()};
-                raw_obj->properties["gid"] = PropertyDescriptor{Value{static_cast<double>(st.st_gid)}, false, false, true, Token()};
-                raw_obj->properties["rdev"] = PropertyDescriptor{Value{static_cast<double>(st.st_rdev)}, false, false, true, Token()};
-                raw_obj->properties["blksize"] = PropertyDescriptor{Value{static_cast<double>(st.st_blksize)}, false, false, true, Token()};
-                raw_obj->properties["blocks"] = PropertyDescriptor{Value{static_cast<double>(st.st_blocks)}, false, false, true, Token()};
-                
-                obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-            }
-#else
-            // Windows: include file attributes
-            DWORD attrs = GetFileAttributesA(path.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES) {
-                auto raw_obj = std::make_shared<ObjectValue>();
-                raw_obj->properties["attributes"] = PropertyDescriptor{Value{static_cast<double>(attrs)}, false, false, true, Token()};
-                raw_obj->properties["hidden"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_HIDDEN) != 0}, false, false, true, Token()};
-                raw_obj->properties["system"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_SYSTEM) != 0}, false, false, true, Token()};
-                raw_obj->properties["archive"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ARCHIVE) != 0}, false, false, true, Token()};
-                
-                obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-            }
-#endif
-            
-            return Value{obj};
-        } catch (const std::filesystem::filesystem_error &e) {
-            throw SwaziError("FilesystemError", std::string("fs.stat failed: ") + e.what(), token.loc);
-        } }, env);
+            std::string path = value_to_string_simple(args[0]);
+            return build_stat_object(path, false, token); }, env);
         obj->properties["stat"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
-    // lstat(path) -> object doesnt follow symlink
+    // lstat(path) -> object (doesn't follow symlinks)
     {
         auto fn = make_native_fn("fs.lstat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) {
-            throw SwaziError("RuntimeError", "fs.stat requires a path argument", token.loc);
-        }
-        std::string path = value_to_string_simple(args[0]);
-        
-        auto obj = std::make_shared<ObjectValue>();
-        
-        try {
-            if (!std::filesystem::exists(path)) {
-                obj->properties["exists"] = PropertyDescriptor{Value{false}, false, false, true, Token()};
-                return Value{obj};
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.lstat requires a path argument", token.loc);
             }
-            
-            auto status = std::filesystem::symlink_status(path); 
-            bool isFile = std::filesystem::is_regular_file(status);
-            bool isDir = std::filesystem::is_directory(status);
-            bool isSymlink = std::filesystem::is_symlink(path);
-            
-            uintmax_t size = 0;
-            if (isFile) {
-                size = std::filesystem::file_size(path);
-            }
-            
-            // Get timestamps
-            std::string mtime;  // Modified time
-            std::string ctime;  // Creation time (birthtime on supporting systems)
-            std::string atime;  // Access time
-            
-            // Modified time (cross-platform)
-            try {
-                auto ftime = std::filesystem::last_write_time(path);
-                auto st = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                    ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
-                std::time_t tt = std::chrono::system_clock::to_time_t(st);
-                std::tm tm{};
-#ifdef _MSC_VER
-                gmtime_s(&tm, &tt);
-#else
-                gmtime_r(&tt, &tm);
-#endif
-                char buf[64];
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                mtime = buf;
-            } catch (...) {
-                mtime = "";
-            }
-
-                // Get creation and access times (platform-specific)
-#ifndef _WIN32
-            // Unix: use stat() to get all timestamps
-            struct stat st;
-            bool stat_success = (stat(path.c_str(), &st) == 0); 
-            if (stat_success) {
-                // Birth time (creation time) - available on some systems
-                std::tm tm{};
-                char buf[64];
-
-                    // Access time
-#ifdef __APPLE__
-                // macOS has st_atimespec
-                std::time_t at = st.st_atimespec.tv_sec;
-#else
-                std::time_t at = st.st_atime;
-#endif
-                gmtime_r(&at, &tm);
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                atime = buf;
-
-                    // Birth time (creation) - platform specific
-#ifdef __APPLE__
-                // macOS has st_birthtimespec
-                std::time_t bt = st.st_birthtimespec.tv_sec;
-                gmtime_r(&bt, &tm);
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                ctime = buf;
-#elif defined(__linux__)
-                // Linux: statx() can provide birth time on newer kernels/filesystems
-                // For now, fall back to ctime (inode change time, not creation)
-                std::time_t ct = st.st_ctime;
-                gmtime_r(&ct, &tm);
-                std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                ctime = buf;  // Note: this is inode change time, not true creation
-#else
-                ctime = "";  // Not available
-#endif
-            }
-#else
-            // Windows: use GetFileTime for proper creation time
-            HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, 
-                                      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-            if (hFile != INVALID_HANDLE_VALUE) {
-                FILETIME ftCreate, ftAccess, ftWrite;
-                if (GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
-                    auto convert_filetime = [](const FILETIME& ft) -> std::string {
-                        ULARGE_INTEGER uli;
-                        uli.LowPart = ft.dwLowDateTime;
-                        uli.HighPart = ft.dwHighDateTime;
-                        
-                        // Convert to Unix epoch
-                        const uint64_t EPOCH_DIFF = 116444736000000000ULL;
-                        uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
-                        
-                        std::time_t tt = static_cast<std::time_t>(timestamp);
-                        std::tm tm{};
-                        gmtime_s(&tm, &tt);
-                        char buf[64];
-                        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                        return buf;
-                    };
-                    
-                    ctime = convert_filetime(ftCreate);
-                    atime = convert_filetime(ftAccess);
-                }
-                CloseHandle(hFile);
-            }
-#endif
-            
-            // Get raw permissions (the actual bits)
-            auto perms = status.permissions();
-            uint32_t perms_raw = static_cast<uint32_t>(perms);
-            
-            // Compute human-readable summary (convenience)
-            std::string perms_summary;
-            perms_summary += ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) ? "r" : "-";
-            perms_summary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
-            perms_summary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
-            perms_summary += ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) ? "r" : "-";
-            perms_summary += ((perms & std::filesystem::perms::group_write) != std::filesystem::perms::none) ? "w" : "-";
-            perms_summary += ((perms & std::filesystem::perms::group_exec) != std::filesystem::perms::none) ? "x" : "-";
-            perms_summary += ((perms & std::filesystem::perms::others_read) != std::filesystem::perms::none) ? "r" : "-";
-            perms_summary += ((perms & std::filesystem::perms::others_write) != std::filesystem::perms::none) ? "w" : "-";
-            perms_summary += ((perms & std::filesystem::perms::others_exec) != std::filesystem::perms::none) ? "x" : "-";
-            
-            // Standard fields (normalized cross-platform)
-            obj->properties["exists"] = PropertyDescriptor{Value{true}, false, false, true, Token()};
-            obj->properties["type"] = PropertyDescriptor{
-                Value{isFile ? std::string("file") : isDir ? std::string("directory") : isSymlink ? std::string("symlink") : std::string("other")},
-                false, false, true, Token()
-            };
-            obj->properties["size"] = PropertyDescriptor{Value{static_cast<double>(size)}, false, false, true, Token()};
-            
-            // Timestamps (standard names)
-            obj->properties["mtime"] = PropertyDescriptor{Value{mtime}, false, false, true, Token()};        // Modified
-            obj->properties["ctime"] = PropertyDescriptor{Value{ctime}, false, false, true, Token()};        // Created
-            obj->properties["atime"] = PropertyDescriptor{Value{atime}, false, false, true, Token()};        // Accessed
-            
-            // Permissions (both forms)
-            obj->properties["permissions"] = PropertyDescriptor{Value{perms_summary}, false, false, true, Token()};
-            obj->properties["mode"] = PropertyDescriptor{Value{static_cast<double>(perms_raw)}, false, false, true, Token()};
-            
-            // Deprecated fields (for compatibility)
-            obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
-            obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
-
-                // Platform-specific raw data
-#ifndef _WIN32
-            // Unix: include inode, device, nlink, uid, gid
-            if (stat_success) {
-                auto raw_obj = std::make_shared<ObjectValue>();
-                raw_obj->properties["dev"] = PropertyDescriptor{Value{static_cast<double>(st.st_dev)}, false, false, true, Token()};
-                raw_obj->properties["ino"] = PropertyDescriptor{Value{static_cast<double>(st.st_ino)}, false, false, true, Token()};
-                raw_obj->properties["nlink"] = PropertyDescriptor{Value{static_cast<double>(st.st_nlink)}, false, false, true, Token()};
-                raw_obj->properties["uid"] = PropertyDescriptor{Value{static_cast<double>(st.st_uid)}, false, false, true, Token()};
-                raw_obj->properties["gid"] = PropertyDescriptor{Value{static_cast<double>(st.st_gid)}, false, false, true, Token()};
-                raw_obj->properties["rdev"] = PropertyDescriptor{Value{static_cast<double>(st.st_rdev)}, false, false, true, Token()};
-                raw_obj->properties["blksize"] = PropertyDescriptor{Value{static_cast<double>(st.st_blksize)}, false, false, true, Token()};
-                raw_obj->properties["blocks"] = PropertyDescriptor{Value{static_cast<double>(st.st_blocks)}, false, false, true, Token()};
-                
-                obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-            }
-#else
-            // Windows: include file attributes
-            DWORD attrs = GetFileAttributesA(path.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES) {
-                auto raw_obj = std::make_shared<ObjectValue>();
-                raw_obj->properties["attributes"] = PropertyDescriptor{Value{static_cast<double>(attrs)}, false, false, true, Token()};
-                raw_obj->properties["hidden"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_HIDDEN) != 0}, false, false, true, Token()};
-                raw_obj->properties["system"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_SYSTEM) != 0}, false, false, true, Token()};
-                raw_obj->properties["archive"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ARCHIVE) != 0}, false, false, true, Token()};
-                
-                obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-            }
-#endif
-            
-            return Value{obj};
-        } catch (const std::filesystem::filesystem_error &e) {
-            throw SwaziError("FilesystemError", std::string("fs.stat failed: ") + e.what(), token.loc);
-        } }, env);
+            std::string path = value_to_string_simple(args[0]);
+            return build_stat_object(path, true, token); }, env);
         obj->properties["lstat"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
@@ -1017,6 +867,38 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         },
             env);
         obj->properties["access"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.mkfifo(path, mode?) -> bool
+    {
+        auto fn = make_native_fn("fs.mkfifo", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", "fs.mkfifo requires a path argument", token.loc);
+            }
+            std::string path = value_to_string_simple(args[0]);
+
+#ifndef _WIN32
+            // Default mode: 0666 (rw-rw-rw-)
+            mode_t mode = 0666;
+            if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                mode = static_cast<mode_t>(std::get<double>(args[1]));
+            }
+
+            // Create the FIFO
+            if (mkfifo(path.c_str(), mode) == 0) {
+                return Value{true};
+            } else {
+                std::string err = std::strerror(errno);
+                throw SwaziError("FilesystemError",
+                    std::string("fs.mkfifo failed: ") + err, token.loc);
+            }
+#else
+            throw SwaziError("NotSupportedError",
+                "fs.mkfifo is not supported on Windows (use named pipes instead)", token.loc);
+#endif
+        },
+            env);
+        obj->properties["mkfifo"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // ============= fs.watch() =============
@@ -1629,436 +1511,64 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         // promises.stat(path) -> Promise<object>
         {
             auto fn = make_native_fn("fs.promises.stat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) {
-            throw SwaziError("RuntimeError", "fs.promises.stat requires a path argument", token.loc);
-        }
-        std::string path = value_to_string_simple(args[0]);
-
-        auto promise = std::make_shared<PromiseValue>();
-        promise->state = PromiseValue::State::PENDING;
-
-        scheduler_run_on_loop([promise, path]() {
-            try {
-                auto obj = std::make_shared<ObjectValue>();
-                
-                if (!std::filesystem::exists(path)) {
-                    obj->properties["exists"] = PropertyDescriptor{Value{false}, false, false, true, Token()};
-                    promise->state = PromiseValue::State::FULFILLED;
-                    promise->result = Value{obj};
-                    for (auto& cb : promise->then_callbacks) {
-                        try { cb(promise->result); } catch(...) {}
+                if (args.empty()) {
+                    throw SwaziError("RuntimeError", "fs.promises.stat requires a path argument", token.loc);
+                }
+                std::string path = value_to_string_simple(args[0]);
+        
+                auto promise = std::make_shared<PromiseValue>();
+                promise->state = PromiseValue::State::PENDING;
+        
+                scheduler_run_on_loop([promise, path, token]() {
+                    try {
+                        Value result = build_stat_object(path, false, token);
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = result;
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("Stat error: ") + e.what()};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
                     }
-                    return;
-                }
-
-                auto status = std::filesystem::status(path);
-                bool isFile = std::filesystem::is_regular_file(status);
-                bool isDir = std::filesystem::is_directory(status);
-                bool isSymlink = std::filesystem::is_symlink(path);
-                
-                uintmax_t size = 0;
-                if (isFile) {
-                    size = std::filesystem::file_size(path);
-                }
-
-                // Get timestamps
-                std::string mtime;  // Modified time
-                std::string ctime;  // Creation time
-                std::string atime;  // Access time
-
-                // Modified time (cross-platform)
-                try {
-                    auto ftime = std::filesystem::last_write_time(path);
-                    auto st = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                        ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
-                    std::time_t tt = std::chrono::system_clock::to_time_t(st);
-                    std::tm tm{};
-#ifdef _MSC_VER
-                    gmtime_s(&tm, &tt);
-#else
-                    gmtime_r(&tt, &tm);
-#endif
-                    char buf[64];
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    mtime = buf;
-                } catch (...) {
-                    mtime = "";
-                }
-
-                        // Get creation and access times (platform-specific)
-#ifndef _WIN32
-                // Unix: use stat() to get all timestamps
-                struct stat st;
-                bool stat_success = (stat(path.c_str(), &st) == 0);
-                if (stat_success) {
-                    std::tm tm{};
-                    char buf[64];
-
-                            // Access time
-#ifdef __APPLE__
-                    std::time_t at = st.st_atimespec.tv_sec;
-#else
-                    std::time_t at = st.st_atime;
-#endif
-                    gmtime_r(&at, &tm);
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    atime = buf;
-
-                            // Birth time (creation)
-#ifdef __APPLE__
-                    std::time_t bt = st.st_birthtimespec.tv_sec;
-                    gmtime_r(&bt, &tm);
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    ctime = buf;
-#elif defined(__linux__)
-                    // Linux: use ctime (inode change time)
-                    std::time_t ct = st.st_ctime;
-                    gmtime_r(&ct, &tm);
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    ctime = buf;
-#else
-                    ctime = "";
-#endif
-                }
-#else
-                // Windows: use GetFileTime for proper creation time
-                HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, 
-                                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-                if (hFile != INVALID_HANDLE_VALUE) {
-                    FILETIME ftCreate, ftAccess, ftWrite;
-                    if (GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
-                        auto convert_filetime = [](const FILETIME& ft) -> std::string {
-                            ULARGE_INTEGER uli;
-                            uli.LowPart = ft.dwLowDateTime;
-                            uli.HighPart = ft.dwHighDateTime;
-                            
-                            const uint64_t EPOCH_DIFF = 116444736000000000ULL;
-                            uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
-                            
-                            std::time_t tt = static_cast<std::time_t>(timestamp);
-                            std::tm tm{};
-                            gmtime_s(&tm, &tt);
-                            char buf[64];
-                            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                            return buf;
-                        };
-                        
-                        ctime = convert_filetime(ftCreate);
-                        atime = convert_filetime(ftAccess);
-                    }
-                    CloseHandle(hFile);
-                }
-#endif
-
-                // Get permissions (both raw and human-readable)
-                auto perms = status.permissions();
-                uint32_t perms_raw = static_cast<uint32_t>(perms);
-                
-                // Full permission summary (rwxrwxrwx)
-                std::string permSummary;
-                permSummary += ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) ? "r" : "-";
-                permSummary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
-                permSummary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
-                permSummary += ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) ? "r" : "-";
-                permSummary += ((perms & std::filesystem::perms::group_write) != std::filesystem::perms::none) ? "w" : "-";
-                permSummary += ((perms & std::filesystem::perms::group_exec) != std::filesystem::perms::none) ? "x" : "-";
-                permSummary += ((perms & std::filesystem::perms::others_read) != std::filesystem::perms::none) ? "r" : "-";
-                permSummary += ((perms & std::filesystem::perms::others_write) != std::filesystem::perms::none) ? "w" : "-";
-                permSummary += ((perms & std::filesystem::perms::others_exec) != std::filesystem::perms::none) ? "x" : "-";
-
-                // Standard fields (normalized cross-platform)
-                obj->properties["exists"] = PropertyDescriptor{Value{true}, false, false, true, Token()};
-                obj->properties["type"] = PropertyDescriptor{
-                    Value{isFile ? std::string("file") : isDir ? std::string("directory") : isSymlink ? std::string("symlink") : std::string("other")},
-                    false, false, true, Token()
-                };
-                obj->properties["size"] = PropertyDescriptor{Value{static_cast<double>(size)}, false, false, true, Token()};
-                
-                // Timestamps (standard names)
-                obj->properties["mtime"] = PropertyDescriptor{Value{mtime}, false, false, true, Token()};
-                obj->properties["ctime"] = PropertyDescriptor{Value{ctime}, false, false, true, Token()};
-                obj->properties["atime"] = PropertyDescriptor{Value{atime}, false, false, true, Token()};
-                
-                // Permissions (both convenience and raw)
-                obj->properties["permissions"] = PropertyDescriptor{Value{permSummary}, false, false, true, Token()};
-                obj->properties["mode"] = PropertyDescriptor{Value{static_cast<double>(perms_raw)}, false, false, true, Token()};
-                
-                // Deprecated fields (for compatibility)
-                obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
-                obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
-
-                        // Platform-specific raw data
-#ifndef _WIN32
-                // Unix: include inode, device, nlink, uid, gid, etc.
-                if (stat_success) {
-                    auto raw_obj = std::make_shared<ObjectValue>();
-                    raw_obj->properties["dev"] = PropertyDescriptor{Value{static_cast<double>(st.st_dev)}, false, false, true, Token()};
-                    raw_obj->properties["ino"] = PropertyDescriptor{Value{static_cast<double>(st.st_ino)}, false, false, true, Token()};
-                    raw_obj->properties["nlink"] = PropertyDescriptor{Value{static_cast<double>(st.st_nlink)}, false, false, true, Token()};
-                    raw_obj->properties["uid"] = PropertyDescriptor{Value{static_cast<double>(st.st_uid)}, false, false, true, Token()};
-                    raw_obj->properties["gid"] = PropertyDescriptor{Value{static_cast<double>(st.st_gid)}, false, false, true, Token()};
-                    raw_obj->properties["rdev"] = PropertyDescriptor{Value{static_cast<double>(st.st_rdev)}, false, false, true, Token()};
-                    raw_obj->properties["blksize"] = PropertyDescriptor{Value{static_cast<double>(st.st_blksize)}, false, false, true, Token()};
-                    raw_obj->properties["blocks"] = PropertyDescriptor{Value{static_cast<double>(st.st_blocks)}, false, false, true, Token()};
-                    
-                    obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-                }
-#else
-                // Windows: include file attributes
-                DWORD attrs = GetFileAttributesA(path.c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES) {
-                    auto raw_obj = std::make_shared<ObjectValue>();
-                    raw_obj->properties["attributes"] = PropertyDescriptor{Value{static_cast<double>(attrs)}, false, false, true, Token()};
-                    raw_obj->properties["hidden"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_HIDDEN) != 0}, false, false, true, Token()};
-                    raw_obj->properties["system"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_SYSTEM) != 0}, false, false, true, Token()};
-                    raw_obj->properties["archive"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ARCHIVE) != 0}, false, false, true, Token()};
-                    raw_obj->properties["readonly"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_READONLY) != 0}, false, false, true, Token()};
-                    raw_obj->properties["compressed"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_COMPRESSED) != 0}, false, false, true, Token()};
-                    raw_obj->properties["encrypted"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ENCRYPTED) != 0}, false, false, true, Token()};
-                    
-                    obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-                }
-#endif
-
-                promise->state = PromiseValue::State::FULFILLED;
-                promise->result = Value{obj};
-                for (auto& cb : promise->then_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
-                }
-            } catch (const std::filesystem::filesystem_error& e) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = Value{std::string("Stat error: ") + e.what()};
-                for (auto& cb : promise->catch_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
-                }
-            } catch (const std::exception& e) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = Value{std::string("Stat error: ") + e.what()};
-                for (auto& cb : promise->catch_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
-                }
-            }
-        });
-
-        return Value{promise}; }, env);
+                });
+        
+                return Value{promise}; }, env);
             promises_obj->properties["stat"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
 
         // promises.lstat(path) -> Promise<object>
         {
             auto fn = make_native_fn("fs.promises.lstat", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) {
-            throw SwaziError("RuntimeError", "fs.promises.stat requires a path argument", token.loc);
-        }
-        std::string path = value_to_string_simple(args[0]);
-
-        auto promise = std::make_shared<PromiseValue>();
-        promise->state = PromiseValue::State::PENDING;
-
-        scheduler_run_on_loop([promise, path]() {
-            try {
-                auto obj = std::make_shared<ObjectValue>();
-                
-                if (!std::filesystem::exists(path)) {
-                    obj->properties["exists"] = PropertyDescriptor{Value{false}, false, false, true, Token()};
-                    promise->state = PromiseValue::State::FULFILLED;
-                    promise->result = Value{obj};
-                    for (auto& cb : promise->then_callbacks) {
-                        try { cb(promise->result); } catch(...) {}
+                if (args.empty()) {
+                    throw SwaziError("RuntimeError", "fs.promises.lstat requires a path argument", token.loc);
+                }
+                std::string path = value_to_string_simple(args[0]);
+        
+                auto promise = std::make_shared<PromiseValue>();
+                promise->state = PromiseValue::State::PENDING;
+        
+                scheduler_run_on_loop([promise, path, token]() {
+                    try {
+                        Value result = build_stat_object(path, true, token);
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = result;
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("Stat error: ") + e.what()};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
                     }
-                    return;
-                }
-
-                auto status = std::filesystem::symlink_status(path); 
-                bool isFile = std::filesystem::is_regular_file(status);
-                bool isDir = std::filesystem::is_directory(status);
-                bool isSymlink = std::filesystem::is_symlink(path);
-                
-                uintmax_t size = 0;
-                if (isFile) {
-                    size = std::filesystem::file_size(path);
-                }
-
-                // Get timestamps
-                std::string mtime;  // Modified time
-                std::string ctime;  // Creation time
-                std::string atime;  // Access time
-
-                // Modified time (cross-platform)
-                try {
-                    auto ftime = std::filesystem::last_write_time(path);
-                    auto st = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                        ftime - decltype(ftime)::clock::now() + std::chrono::system_clock::now());
-                    std::time_t tt = std::chrono::system_clock::to_time_t(st);
-                    std::tm tm{};
-#ifdef _MSC_VER
-                    gmtime_s(&tm, &tt);
-#else
-                    gmtime_r(&tt, &tm);
-#endif
-                    char buf[64];
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    mtime = buf;
-                } catch (...) {
-                    mtime = "";
-                }
-
-                        // Get creation and access times (platform-specific)
-#ifndef _WIN32
-                // Unix: use stat() to get all timestamps
-                struct stat st;
-                bool stat_success = (stat(path.c_str(), &st) == 0); 
-                if (stat_success) {
-                    std::tm tm{};
-                    char buf[64];
-
-                            // Access time
-#ifdef __APPLE__
-                    std::time_t at = st.st_atimespec.tv_sec;
-#else
-                    std::time_t at = st.st_atime;
-#endif
-                    gmtime_r(&at, &tm);
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    atime = buf;
-
-                            // Birth time (creation)
-#ifdef __APPLE__
-                    std::time_t bt = st.st_birthtimespec.tv_sec;
-                    gmtime_r(&bt, &tm);
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    ctime = buf;
-#elif defined(__linux__)
-                    // Linux: use ctime (inode change time)
-                    std::time_t ct = st.st_ctime;
-                    gmtime_r(&ct, &tm);
-                    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                    ctime = buf;
-#else
-                    ctime = "";
-#endif
-                }
-#else
-                // Windows: use GetFileTime for proper creation time
-                HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, 
-                                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-                if (hFile != INVALID_HANDLE_VALUE) {
-                    FILETIME ftCreate, ftAccess, ftWrite;
-                    if (GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
-                        auto convert_filetime = [](const FILETIME& ft) -> std::string {
-                            ULARGE_INTEGER uli;
-                            uli.LowPart = ft.dwLowDateTime;
-                            uli.HighPart = ft.dwHighDateTime;
-                            
-                            const uint64_t EPOCH_DIFF = 116444736000000000ULL;
-                            uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
-                            
-                            std::time_t tt = static_cast<std::time_t>(timestamp);
-                            std::tm tm{};
-                            gmtime_s(&tm, &tt);
-                            char buf[64];
-                            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-                            return buf;
-                        };
-                        
-                        ctime = convert_filetime(ftCreate);
-                        atime = convert_filetime(ftAccess);
-                    }
-                    CloseHandle(hFile);
-                }
-#endif
-
-                // Get permissions (both raw and human-readable)
-                auto perms = status.permissions();
-                uint32_t perms_raw = static_cast<uint32_t>(perms);
-                
-                // Full permission summary (rwxrwxrwx)
-                std::string permSummary;
-                permSummary += ((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none) ? "r" : "-";
-                permSummary += ((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none) ? "w" : "-";
-                permSummary += ((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none) ? "x" : "-";
-                permSummary += ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) ? "r" : "-";
-                permSummary += ((perms & std::filesystem::perms::group_write) != std::filesystem::perms::none) ? "w" : "-";
-                permSummary += ((perms & std::filesystem::perms::group_exec) != std::filesystem::perms::none) ? "x" : "-";
-                permSummary += ((perms & std::filesystem::perms::others_read) != std::filesystem::perms::none) ? "r" : "-";
-                permSummary += ((perms & std::filesystem::perms::others_write) != std::filesystem::perms::none) ? "w" : "-";
-                permSummary += ((perms & std::filesystem::perms::others_exec) != std::filesystem::perms::none) ? "x" : "-";
-
-                // Standard fields (normalized cross-platform)
-                obj->properties["exists"] = PropertyDescriptor{Value{true}, false, false, true, Token()};
-                obj->properties["type"] = PropertyDescriptor{
-                    Value{isFile ? std::string("file") : isDir ? std::string("directory") : isSymlink ? std::string("symlink") : std::string("other")},
-                    false, false, true, Token()
-                };
-                obj->properties["size"] = PropertyDescriptor{Value{static_cast<double>(size)}, false, false, true, Token()};
-                
-                // Timestamps (standard names)
-                obj->properties["mtime"] = PropertyDescriptor{Value{mtime}, false, false, true, Token()};
-                obj->properties["ctime"] = PropertyDescriptor{Value{ctime}, false, false, true, Token()};
-                obj->properties["atime"] = PropertyDescriptor{Value{atime}, false, false, true, Token()};
-                
-                // Permissions (both convenience and raw)
-                obj->properties["permissions"] = PropertyDescriptor{Value{permSummary}, false, false, true, Token()};
-                obj->properties["mode"] = PropertyDescriptor{Value{static_cast<double>(perms_raw)}, false, false, true, Token()};
-                
-                // Deprecated fields (for compatibility)
-                obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
-                obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
-
-                        // Platform-specific raw data
-#ifndef _WIN32
-                // Unix: include inode, device, nlink, uid, gid, etc.
-                if (stat_success) {
-                    auto raw_obj = std::make_shared<ObjectValue>();
-                    raw_obj->properties["dev"] = PropertyDescriptor{Value{static_cast<double>(st.st_dev)}, false, false, true, Token()};
-                    raw_obj->properties["ino"] = PropertyDescriptor{Value{static_cast<double>(st.st_ino)}, false, false, true, Token()};
-                    raw_obj->properties["nlink"] = PropertyDescriptor{Value{static_cast<double>(st.st_nlink)}, false, false, true, Token()};
-                    raw_obj->properties["uid"] = PropertyDescriptor{Value{static_cast<double>(st.st_uid)}, false, false, true, Token()};
-                    raw_obj->properties["gid"] = PropertyDescriptor{Value{static_cast<double>(st.st_gid)}, false, false, true, Token()};
-                    raw_obj->properties["rdev"] = PropertyDescriptor{Value{static_cast<double>(st.st_rdev)}, false, false, true, Token()};
-                    raw_obj->properties["blksize"] = PropertyDescriptor{Value{static_cast<double>(st.st_blksize)}, false, false, true, Token()};
-                    raw_obj->properties["blocks"] = PropertyDescriptor{Value{static_cast<double>(st.st_blocks)}, false, false, true, Token()};
-                    
-                    obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-                }
-#else
-                // Windows: include file attributes
-                DWORD attrs = GetFileAttributesA(path.c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES) {
-                    auto raw_obj = std::make_shared<ObjectValue>();
-                    raw_obj->properties["attributes"] = PropertyDescriptor{Value{static_cast<double>(attrs)}, false, false, true, Token()};
-                    raw_obj->properties["hidden"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_HIDDEN) != 0}, false, false, true, Token()};
-                    raw_obj->properties["system"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_SYSTEM) != 0}, false, false, true, Token()};
-                    raw_obj->properties["archive"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ARCHIVE) != 0}, false, false, true, Token()};
-                    raw_obj->properties["readonly"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_READONLY) != 0}, false, false, true, Token()};
-                    raw_obj->properties["compressed"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_COMPRESSED) != 0}, false, false, true, Token()};
-                    raw_obj->properties["encrypted"] = PropertyDescriptor{Value{(attrs & FILE_ATTRIBUTE_ENCRYPTED) != 0}, false, false, true, Token()};
-                    
-                    obj->properties["raw"] = PropertyDescriptor{Value{raw_obj}, false, false, true, Token()};
-                }
-#endif
-
-                promise->state = PromiseValue::State::FULFILLED;
-                promise->result = Value{obj};
-                for (auto& cb : promise->then_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
-                }
-            } catch (const std::filesystem::filesystem_error& e) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = Value{std::string("Stat error: ") + e.what()};
-                for (auto& cb : promise->catch_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
-                }
-            } catch (const std::exception& e) {
-                promise->state = PromiseValue::State::REJECTED;
-                promise->result = Value{std::string("Stat error: ") + e.what()};
-                for (auto& cb : promise->catch_callbacks) {
-                    try { cb(promise->result); } catch(...) {}
-                }
-            }
-        });
-
-        return Value{promise}; }, env);
+                });
+        
+                return Value{promise}; }, env);
             promises_obj->properties["lstat"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
 
@@ -2251,6 +1761,50 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
 
         return Value{promise}; }, env);
             promises_obj->properties["access"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.mkfifo(path, mode?) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.mkfifo", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+              if (args.empty()) {
+                  throw SwaziError("RuntimeError", "fs.promises.mkfifo requires a path argument", token.loc);
+              }
+              std::string path = value_to_string_simple(args[0]);
+              
+              mode_t mode = 0666;
+              if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                  mode = static_cast<mode_t>(std::get<double>(args[1]));
+              }
+              
+              auto promise = std::make_shared<PromiseValue>();
+              promise->state = PromiseValue::State::PENDING;
+      
+              scheduler_run_on_loop([promise, path, mode]() {
+#ifndef _WIN32
+                  if (mkfifo(path.c_str(), mode) == 0) {
+                      promise->state = PromiseValue::State::FULFILLED;
+                      promise->result = Value{true};
+                      for (auto& cb : promise->then_callbacks) {
+                          try { cb(promise->result); } catch(...) {}
+                      }
+                  } else {
+                      promise->state = PromiseValue::State::REJECTED;
+                      promise->result = Value{std::string("mkfifo error: ") + std::strerror(errno)};
+                      for (auto& cb : promise->catch_callbacks) {
+                          try { cb(promise->result); } catch(...) {}
+                      }
+                  }
+#else
+                  promise->state = PromiseValue::State::REJECTED;
+                  promise->result = Value{std::string("mkfifo not supported on Windows")};
+                  for (auto& cb : promise->catch_callbacks) {
+                      try { cb(promise->result); } catch(...) {}
+                  }
+#endif
+              });
+      
+              return Value{promise}; }, env);
+            promises_obj->properties["mkfifo"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
 
         // Attach promises sub-object to main fs object
