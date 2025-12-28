@@ -28,6 +28,7 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 #else
 #include <processthreadsapi.h>
@@ -899,6 +900,244 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         },
             env);
         obj->properties["mkfifo"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.setTimes(path, atime, mtime) -> bool
+    {
+        auto fn = make_native_fn("fs.setTimes", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.size() < 3) {
+                throw SwaziError("RuntimeError",
+                    "fs.setTimes requires three arguments: path, atime, and mtime. "
+                    "Pass null for either time to leave it unchanged.",
+                    token.loc);
+            }
+
+            std::string path = value_to_string_simple(args[0]);
+
+            // Check file exists first - strict requirement
+            if (!fs::exists(path)) {
+                throw SwaziError("IOError",
+                    "fs.setTimes: file does not exist: " + path,
+                    token.loc);
+            }
+
+            // Helper to convert Value to time_t
+            auto value_to_time_t = [&token](const Value& v) -> std::time_t {
+                if (std::holds_alternative<double>(v)) {
+                    // Unix timestamp in MILLISECONDS (convert to seconds)
+                    double millis = std::get<double>(v);
+                    return static_cast<std::time_t>(millis / 1000.0);
+                } else if (std::holds_alternative<DateTimePtr>(v)) {
+                    // DateTime object - convert epochNanoseconds to seconds
+                    DateTimePtr dt = std::get<DateTimePtr>(v);
+                    return static_cast<std::time_t>(dt->epochNanoseconds / 1'000'000'000ULL);
+                } else {
+                    throw SwaziError("TypeError",
+                        "fs.setTimes: time must be a number (milliseconds since epoch), DateTime object, or null.",
+                        token.loc);
+                }
+            };
+
+            // Parse atime
+            bool set_atime = !std::holds_alternative<std::monostate>(args[1]);
+            std::time_t atime = 0;
+            if (set_atime) {
+                atime = value_to_time_t(args[1]);
+            }
+
+            // Parse mtime
+            bool set_mtime = !std::holds_alternative<std::monostate>(args[2]);
+            std::time_t mtime = 0;
+            if (set_mtime) {
+                mtime = value_to_time_t(args[2]);
+            }
+
+            // If both null, it's a no-op
+            if (!set_atime && !set_mtime) {
+                return Value{true};
+            }
+
+#ifndef _WIN32
+            // If only one is set, we need to read the current value for the other
+            if (!set_atime || !set_mtime) {
+                struct stat st;
+                if (stat(path.c_str(), &st) != 0) {
+                    throw SwaziError("SystemError",
+                        "fs.setTimes: failed to read current timestamps: " + std::string(std::strerror(errno)),
+                        token.loc);
+                }
+                if (!set_atime) atime = st.st_atime;
+                if (!set_mtime) mtime = st.st_mtime;
+            }
+
+            // Use utimes() on Unix
+            struct timeval times[2];
+            times[0].tv_sec = atime;
+            times[0].tv_usec = 0;
+            times[1].tv_sec = mtime;
+            times[1].tv_usec = 0;
+
+            if (utimes(path.c_str(), times) != 0) {
+                std::string err = std::strerror(errno);
+                throw SwaziError("SystemError",
+                    "fs.setTimes failed: " + err,
+                    token.loc);
+            }
+            return Value{true};
+#else
+            // Windows implementation using SetFileTime
+            HANDLE hFile = CreateFileA(
+                path.c_str(),
+                FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                NULL,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                NULL);
+
+            if (hFile == INVALID_HANDLE_VALUE) {
+                throw SwaziError("SystemError",
+                    "fs.setTimes: failed to open file for attribute modification",
+                    token.loc);
+            }
+
+            // If only one is set, read current values
+            if (!set_atime || !set_mtime) {
+                FILETIME ftCreate, ftAccess, ftWrite;
+                if (!GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
+                    CloseHandle(hFile);
+                    throw SwaziError("SystemError",
+                        "fs.setTimes: failed to read current timestamps",
+                        token.loc);
+                }
+
+                // Convert FILETIME to time_t
+                auto filetime_to_unix = [](const FILETIME& ft) -> std::time_t {
+                    ULARGE_INTEGER uli;
+                    uli.LowPart = ft.dwLowDateTime;
+                    uli.HighPart = ft.dwHighDateTime;
+                    const uint64_t EPOCH_DIFF = 116444736000000000ULL;
+                    uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
+                    return static_cast<std::time_t>(timestamp);
+                };
+
+                if (!set_atime) atime = filetime_to_unix(ftAccess);
+                if (!set_mtime) mtime = filetime_to_unix(ftWrite);
+            }
+
+            // Convert Unix timestamp to Windows FILETIME
+            auto unix_to_filetime = [](std::time_t t) -> FILETIME {
+                const uint64_t EPOCH_DIFF = 116444736000000000ULL;
+                uint64_t temp = (static_cast<uint64_t>(t) * 10000000ULL) + EPOCH_DIFF;
+                FILETIME ft;
+                ft.dwLowDateTime = static_cast<DWORD>(temp);
+                ft.dwHighDateTime = static_cast<DWORD>(temp >> 32);
+                return ft;
+            };
+
+            FILETIME ft_atime = unix_to_filetime(atime);
+            FILETIME ft_mtime = unix_to_filetime(mtime);
+
+            BOOL result = SetFileTime(hFile, NULL, &ft_atime, &ft_mtime);
+            CloseHandle(hFile);
+
+            if (!result) {
+                throw SwaziError("SystemError",
+                    "fs.setTimes: SetFileTime failed",
+                    token.loc);
+            }
+            return Value{true};
+#endif
+        },
+            env);
+        obj->properties["setTimes"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.ensureFile(path, mode?) -> bool
+    {
+        auto fn = make_native_fn("fs.ensureFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+            if (args.empty()) {
+                throw SwaziError("RuntimeError", 
+                    "fs.ensureFile requires a path argument. Usage: ensureFile(path, mode?) -> bool", 
+                    token.loc);
+            }
+            
+            std::string path = value_to_string_simple(args[0]);
+            
+            // Parse mode (only used if creating)
+            uint32_t mode = 0666;  // Default: rw-rw-rw- (subject to umask)
+            if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                mode = static_cast<uint32_t>(std::get<double>(args[1]));
+            }
+            
+            try {
+                // Check if path exists
+                if (fs::exists(path)) {
+                    // Path exists - verify it's a regular file
+                    auto status = fs::status(path);
+                    
+                    if (fs::is_directory(status)) {
+                        throw SwaziError("FilesystemError", 
+                            "fs.ensureFile: path exists but is a directory: " + path, 
+                            token.loc);
+                    }
+                    
+                    if (fs::is_symlink(path)) {
+                        throw SwaziError("FilesystemError", 
+                            "fs.ensureFile: path exists but is a symlink: " + path, 
+                            token.loc);
+                    }
+                    
+                    if (!fs::is_regular_file(status)) {
+                        throw SwaziError("FilesystemError", 
+                            "fs.ensureFile: path exists but is not a regular file: " + path, 
+                            token.loc);
+                    }
+                    
+                    // File exists and is regular - idempotent success, no mutation
+                    return Value{false};  // false = already existed
+                }
+                
+                // File doesn't exist - need to create it
+                // First check parent directory exists
+                fs::path file_path(path);
+                fs::path parent = file_path.parent_path();
+                
+                if (!parent.empty() && !fs::exists(parent)) {
+                    throw SwaziError("FilesystemError", 
+                        "fs.ensureFile: parent directory does not exist: " + parent.string(), 
+                        token.loc);
+                }
+                
+                // Create the file
+                std::ofstream file(path, std::ios::binary);
+                if (!file.is_open()) {
+                    throw SwaziError("IOError", 
+                        "fs.ensureFile: failed to create file: " + path, 
+                        token.loc);
+                }
+                file.close();
+
+                // Set permissions if on Unix
+#ifndef _WIN32
+                if (chmod(path.c_str(), mode) != 0) {
+                    // File created but permission setting failed
+                    // Don't roll back - file exists now
+                    std::string err = std::strerror(errno);
+                    throw SwaziError("SystemError", 
+                        "fs.ensureFile: file created but chmod failed: " + err, 
+                        token.loc);
+                }
+#endif
+                
+                return Value{true};  // true = created new file
+                
+            } catch (const fs::filesystem_error& e) {
+                throw SwaziError("FilesystemError", 
+                    std::string("fs.ensureFile failed: ") + e.what(), 
+                    token.loc);
+            } }, env);
+        obj->properties["ensureFile"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // ============= fs.watch() =============
@@ -1805,6 +2044,271 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
       
               return Value{promise}; }, env);
             promises_obj->properties["mkfifo"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.setTimes(path, atime, mtime) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.setTimes", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if (args.size() < 3) {
+                    throw SwaziError("RuntimeError", 
+                        "fs.promises.setTimes requires three arguments: path, atime, and mtime.", 
+                        token.loc);
+                }
+                
+                std::string path = value_to_string_simple(args[0]);
+                Value atime_val = args[1];
+                Value mtime_val = args[2];
+                
+                // Helper to convert Value to time_t
+                auto value_to_time_t = [](const Value& v) -> std::time_t {
+                    if (std::holds_alternative<double>(v)) {
+                        double millis = std::get<double>(v);
+                        return static_cast<std::time_t>(millis / 1000.0);
+                    } else if (std::holds_alternative<DateTimePtr>(v)) {
+                        DateTimePtr dt = std::get<DateTimePtr>(v);
+                        return static_cast<std::time_t>(dt->epochNanoseconds / 1'000'000'000ULL);
+                    } else {
+                        throw std::runtime_error("Invalid time type");
+                    }
+                };
+                
+                auto promise = std::make_shared<PromiseValue>();
+                promise->state = PromiseValue::State::PENDING;
+                
+                scheduler_run_on_loop([promise, path, atime_val, mtime_val, value_to_time_t]() {
+                    try {
+                        if (!fs::exists(path)) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("File does not exist: ") + path};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        bool set_atime = !std::holds_alternative<std::monostate>(atime_val);
+                        bool set_mtime = !std::holds_alternative<std::monostate>(mtime_val);
+                        
+                        if (!set_atime && !set_mtime) {
+                            promise->state = PromiseValue::State::FULFILLED;
+                            promise->result = Value{true};
+                            for (auto& cb : promise->then_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        std::time_t atime = 0;
+                        std::time_t mtime = 0;
+                        
+                        if (set_atime) atime = value_to_time_t(atime_val);
+                        if (set_mtime) mtime = value_to_time_t(mtime_val);
+
+#ifndef _WIN32
+                        // If only one is set, read current values
+                        if (!set_atime || !set_mtime) {
+                            struct stat st;
+                            if (stat(path.c_str(), &st) != 0) {
+                                promise->state = PromiseValue::State::REJECTED;
+                                promise->result = Value{std::string("Failed to read current timestamps: ") + std::strerror(errno)};
+                                for (auto& cb : promise->catch_callbacks) {
+                                    try { cb(promise->result); } catch(...) {}
+                                }
+                                return;
+                            }
+                            if (!set_atime) atime = st.st_atime;
+                            if (!set_mtime) mtime = st.st_mtime;
+                        }
+                        
+                        struct timeval times[2];
+                        times[0].tv_sec = atime;
+                        times[0].tv_usec = 0;
+                        times[1].tv_sec = mtime;
+                        times[1].tv_usec = 0;
+                        
+                        if (utimes(path.c_str(), times) != 0) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("utimes failed: ") + std::strerror(errno)};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+#else
+                        // Windows implementation
+                        HANDLE hFile = CreateFileA(path.c_str(), FILE_WRITE_ATTRIBUTES,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                        
+                        if (hFile == INVALID_HANDLE_VALUE) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("Failed to open file")};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        if (!set_atime || !set_mtime) {
+                            FILETIME ftCreate, ftAccess, ftWrite;
+                            if (!GetFileTime(hFile, &ftCreate, &ftAccess, &ftWrite)) {
+                                CloseHandle(hFile);
+                                promise->state = PromiseValue::State::REJECTED;
+                                promise->result = Value{std::string("Failed to read current timestamps")};
+                                for (auto& cb : promise->catch_callbacks) {
+                                    try { cb(promise->result); } catch(...) {}
+                                }
+                                return;
+                            }
+                            
+                            auto filetime_to_unix = [](const FILETIME& ft) -> std::time_t {
+                                ULARGE_INTEGER uli;
+                                uli.LowPart = ft.dwLowDateTime;
+                                uli.HighPart = ft.dwHighDateTime;
+                                const uint64_t EPOCH_DIFF = 116444736000000000ULL;
+                                uint64_t timestamp = (uli.QuadPart - EPOCH_DIFF) / 10000000ULL;
+                                return static_cast<std::time_t>(timestamp);
+                            };
+                            
+                            if (!set_atime) atime = filetime_to_unix(ftAccess);
+                            if (!set_mtime) mtime = filetime_to_unix(ftWrite);
+                        }
+                        
+                        auto unix_to_filetime = [](std::time_t t) -> FILETIME {
+                            const uint64_t EPOCH_DIFF = 116444736000000000ULL;
+                            uint64_t temp = (static_cast<uint64_t>(t) * 10000000ULL) + EPOCH_DIFF;
+                            FILETIME ft;
+                            ft.dwLowDateTime = static_cast<DWORD>(temp);
+                            ft.dwHighDateTime = static_cast<DWORD>(temp >> 32);
+                            return ft;
+                        };
+                        
+                        FILETIME ft_atime = unix_to_filetime(atime);
+                        FILETIME ft_mtime = unix_to_filetime(mtime);
+                        SetFileTime(hFile, NULL, &ft_atime, &ft_mtime);
+                        CloseHandle(hFile);
+#endif
+                        
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{true};
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("setTimes error: ") + e.what()};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    }
+                });
+                
+                return Value{promise}; }, env);
+            promises_obj->properties["setTimes"] = PropertyDescriptor{fn, false, false, false, Token()};
+        }
+
+        // promises.ensureFile(path, mode?) -> Promise<bool>
+        {
+            auto fn = make_native_fn("fs.promises.ensureFile", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                if (args.empty()) {
+                    throw SwaziError("RuntimeError", 
+                        "fs.promises.ensureFile requires a path argument", 
+                        token.loc);
+                }
+                
+                std::string path = value_to_string_simple(args[0]);
+                uint32_t mode = 0666;
+                
+                if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                    mode = static_cast<uint32_t>(std::get<double>(args[1]));
+                }
+                
+                auto promise = std::make_shared<PromiseValue>();
+                promise->state = PromiseValue::State::PENDING;
+                
+                scheduler_run_on_loop([promise, path, mode]() {
+                    try {
+                        if (fs::exists(path)) {
+                            auto status = fs::status(path);
+                            
+                            if (fs::is_directory(status)) {
+                                promise->state = PromiseValue::State::REJECTED;
+                                promise->result = Value{std::string("Path is a directory: ") + path};
+                                for (auto& cb : promise->catch_callbacks) {
+                                    try { cb(promise->result); } catch(...) {}
+                                }
+                                return;
+                            }
+                            
+                            if (fs::is_symlink(path)) {
+                                promise->state = PromiseValue::State::REJECTED;
+                                promise->result = Value{std::string("Path is a symlink: ") + path};
+                                for (auto& cb : promise->catch_callbacks) {
+                                    try { cb(promise->result); } catch(...) {}
+                                }
+                                return;
+                            }
+                            
+                            if (!fs::is_regular_file(status)) {
+                                promise->state = PromiseValue::State::REJECTED;
+                                promise->result = Value{std::string("Path is not a regular file: ") + path};
+                                for (auto& cb : promise->catch_callbacks) {
+                                    try { cb(promise->result); } catch(...) {}
+                                }
+                                return;
+                            }
+                            
+                            promise->state = PromiseValue::State::FULFILLED;
+                            promise->result = Value{false};  // Already existed
+                            for (auto& cb : promise->then_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        fs::path file_path(path);
+                        fs::path parent = file_path.parent_path();
+                        
+                        if (!parent.empty() && !fs::exists(parent)) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("Parent directory does not exist: ") + parent.string()};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        
+                        std::ofstream file(path, std::ios::binary);
+                        if (!file.is_open()) {
+                            promise->state = PromiseValue::State::REJECTED;
+                            promise->result = Value{std::string("Failed to create file: ") + path};
+                            for (auto& cb : promise->catch_callbacks) {
+                                try { cb(promise->result); } catch(...) {}
+                            }
+                            return;
+                        }
+                        file.close();
+
+#ifndef _WIN32
+                        chmod(path.c_str(), mode);
+#endif
+                        
+                        promise->state = PromiseValue::State::FULFILLED;
+                        promise->result = Value{true};  // Created
+                        for (auto& cb : promise->then_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    } catch (const std::exception& e) {
+                        promise->state = PromiseValue::State::REJECTED;
+                        promise->result = Value{std::string("ensureFile error: ") + e.what()};
+                        for (auto& cb : promise->catch_callbacks) {
+                            try { cb(promise->result); } catch(...) {}
+                        }
+                    }
+                });
+                
+                return Value{promise}; }, env);
+            promises_obj->properties["ensureFile"] = PropertyDescriptor{fn, false, false, false, Token()};
         }
 
         // Attach promises sub-object to main fs object
