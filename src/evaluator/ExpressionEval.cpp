@@ -3615,9 +3615,9 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 prop == "shift" || prop == "removeAll" || prop == "pop" || prop == "push" ||
                 prop == "urefu" || prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" ||
                 prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
-                prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" || prop == "panua" ||
+                prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" || prop == "clear" ||
                 prop == "badili" || prop == "tafuta" || prop == "kuna" || prop == "panga" ||
-                prop == "geuza" || prop == "futa" || prop == "chambua" || prop == "punguza" ||
+                prop == "geuza" || prop == "chambua" || prop == "punguza" ||
                 prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach" || prop == "fill" || prop == "every" || prop == "some" || prop == "baadhi") {
                 auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (!arr) return std::monostate{};
