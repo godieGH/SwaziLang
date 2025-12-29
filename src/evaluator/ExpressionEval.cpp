@@ -3721,14 +3721,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         return Value{static_cast<double>(arr->elements.size())};
                     }
 
-                    // clear: futa()
-                    if (prop == "futa") {
+                    // clear: clear()
+                    if (prop == "clear") {
                         arr->elements.clear();
                         return std::monostate{};
                     }
 
                     // extend: panua(otherArray)
-                    if (prop == "panua" || prop == "extend") {
+                    if (prop == "extend") {
                         if (args.empty() || !std::holds_alternative<ArrayPtr>(args[0])) {
                             throw std::runtime_error(
                                 "TypeError at " + token.loc.to_string() +
