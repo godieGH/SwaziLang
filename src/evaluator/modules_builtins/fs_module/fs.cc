@@ -475,6 +475,7 @@ static Value build_stat_object(const std::string& path, bool use_lstat, const To
             raw_obj->properties["dev"] = PropertyDescriptor{Value{static_cast<double>(st.st_dev)}, false, false, true, Token()};
             raw_obj->properties["ino"] = PropertyDescriptor{Value{static_cast<double>(st.st_ino)}, false, false, true, Token()};
             raw_obj->properties["nlink"] = PropertyDescriptor{Value{static_cast<double>(st.st_nlink)}, false, false, true, Token()};
+            raw_obj->properties["mode"] = PropertyDescriptor{Value{static_cast<double>(st.st_mode)}, false, false, true, Token()};
             raw_obj->properties["uid"] = PropertyDescriptor{Value{static_cast<double>(st.st_uid)}, false, false, true, Token()};
             raw_obj->properties["gid"] = PropertyDescriptor{Value{static_cast<double>(st.st_gid)}, false, false, true, Token()};
             raw_obj->properties["rdev"] = PropertyDescriptor{Value{static_cast<double>(st.st_rdev)}, false, false, true, Token()};
