@@ -460,6 +460,7 @@ static Value build_stat_object(const std::string& path, bool use_lstat, const To
         // Deprecated boolean fields (for compatibility)
         obj->properties["isFile"] = PropertyDescriptor{Value{isFile}, false, false, true, Token()};
         obj->properties["isDir"] = PropertyDescriptor{Value{isDir}, false, false, true, Token()};
+        obj->properties["isSymlink"] = PropertyDescriptor{Value{isSymlink}, false, false, true, Token()};
 
         // New boolean fields for special types
         obj->properties["isSocket"] = PropertyDescriptor{Value{isSocket}, false, false, true, Token()};
