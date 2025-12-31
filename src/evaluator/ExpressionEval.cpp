@@ -75,6 +75,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         return Value{dateTimeVal};
     }
 
+    if (auto rl = dynamic_cast<RegexLiteralNode*>(expr)) {
+        auto regex = std::make_shared<RegexValue>(rl->pattern, rl->flags);
+        return Value{regex};
+    }
+
     // --- await expression (suspends current async frame) ---
     if (auto awaitNode = dynamic_cast<AwaitExpressionNode*>(expr)) {
         // Use stable await_id as the key (assigned by parser). Cloning AST will preserve await_id.

@@ -76,6 +76,25 @@ struct DateTimeLiteralNode : public ExpressionNode {
     }
 };
 
+struct RegexLiteralNode : public ExpressionNode {
+    std::string pattern;
+    std::string flags;
+
+    RegexLiteralNode() = default;
+
+    std::string to_string() const override {
+        return "/" + pattern + "/" + flags;
+    }
+
+    std::unique_ptr<ExpressionNode> clone() const override {
+        auto n = std::make_unique<RegexLiteralNode>();
+        n->token = token;
+        n->pattern = pattern;
+        n->flags = flags;
+        return n;
+    }
+};
+
 struct NumericLiteralNode : public ExpressionNode {
     double value;
     std::string to_string() const override {

@@ -1235,6 +1235,24 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         return node;
     }
 
+    if (t.type == TokenType::REGEX_LITERAL) {
+        Token regexTok = consume();
+        auto node = std::make_unique<RegexLiteralNode>();
+        node->token = regexTok;
+
+        // Parse "pattern|flags" from token value
+        size_t separator = regexTok.value.find('|');
+        if (separator != std::string::npos) {
+            node->pattern = regexTok.value.substr(0, separator);
+            node->flags = regexTok.value.substr(separator + 1);
+        } else {
+            node->pattern = regexTok.value;
+            node->flags = "";
+        }
+
+        return node;
+    }
+
     if (t.type == TokenType::BLOCK_DU) {
         return std::make_unique<NullNode>(consume());
     }

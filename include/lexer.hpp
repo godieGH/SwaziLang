@@ -26,6 +26,8 @@ class Lexer {
     // parentheses level (suppress NEWLINE inside parentheses)
     int paren_level = 0;
 
+    bool regex_allowed;
+
     // helpers
     bool eof() const;
     char peek(size_t offset = 0) const;
@@ -39,6 +41,7 @@ class Lexer {
     bool handle_non_decimal_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
     void scan_number(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
     void scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
+    void scan_regex_literal(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
 
     // scan quoted (single/double) string (handles escapes)
     void scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index, char quote);
@@ -54,6 +57,7 @@ class Lexer {
     bool try_scan_datetime(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
 
     void skip_line_comment();
+    void update_regex_allowed(TokenType type);
     void handle_newline(std::vector<Token>& out);
     void emit_remaining_dedents(std::vector<Token>& out);
 };

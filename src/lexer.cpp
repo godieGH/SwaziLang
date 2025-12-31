@@ -9,7 +9,7 @@
 
 // Constructor
 Lexer::Lexer(const std::string& source, const std::string& filename, const SourceManager* mgr)
-    : src(source), filename(filename), i(0), line(1), col(1), src_mgr(mgr) {
+    : src(source), filename(filename), i(0), line(1), col(1), src_mgr(mgr), regex_allowed(true) {
     indent_stack.push_back(0);
 }
 
@@ -42,12 +42,92 @@ void Lexer::add_token(std::vector<Token>& out, TokenType type, const std::string
     TokenLocation loc(filename.empty() ? "<repl>" : filename, tok_line, tok_col, len, src_mgr);
     Token t{type, value, loc};
     out.push_back(std::move(t));
+    update_regex_allowed(type);
 }
 
 void Lexer::skip_line_comment() {
     while (!eof() && peek() != '\n') advance();
 }
 
+void Lexer::update_regex_allowed(TokenType type) {
+    switch (type) {
+        // Tokens that END an expression -> next '/' is division
+        case TokenType::IDENTIFIER:
+        case TokenType::NUMBER:
+        case TokenType::STRING:
+        case TokenType::SINGLE_QUOTED_STRING:
+        case TokenType::TEMPLATE_END:
+        case TokenType::CLOSEPARENTHESIS:
+        case TokenType::CLOSEBRACKET:
+        case TokenType::CLOSEBRACE:
+        case TokenType::BOOLEAN:
+        case TokenType::NULL_LITERAL:
+        case TokenType::NAN_LITERAL:
+        case TokenType::INF_LITERAL:
+        case TokenType::SELF:
+        case TokenType::DATETIME_LITERAL:
+        case TokenType::INCREMENT:  // treating as postfix for now
+        case TokenType::DECREMENT:  // treating as postfix for now
+            regex_allowed = false;
+            break;
+
+        // Tokens that EXPECT an expression -> next '/' starts regex
+        case TokenType::ASSIGN:
+        case TokenType::PLUS:
+        case TokenType::MINUS:
+        case TokenType::STAR:
+        case TokenType::PERCENT:
+        case TokenType::POWER:
+        case TokenType::EQUALITY:
+        case TokenType::NOTEQUAL:
+        case TokenType::STRICT_EQUALITY:
+        case TokenType::STRICT_NOTEQUAL:
+        case TokenType::LESSTHAN:
+        case TokenType::GREATERTHAN:
+        case TokenType::LESSOREQUALTHAN:
+        case TokenType::GREATEROREQUALTHAN:
+        case TokenType::AND:
+        case TokenType::OR:
+        case TokenType::NOT:
+        case TokenType::COMMA:
+        case TokenType::COLON:
+        case TokenType::SEMICOLON:
+        case TokenType::OPENPARENTHESIS:
+        case TokenType::OPENBRACKET:
+        case TokenType::OPENBRACE:
+        case TokenType::PLUS_ASSIGN:
+        case TokenType::MINUS_ASSIGN:
+        case TokenType::TIMES_ASSIGN:
+        case TokenType::SLASH_ASSIGN:
+        case TokenType::PERCENT_ASSIGN:
+        case TokenType::RUDISHA:  // return
+        case TokenType::KAMA:     // if
+        case TokenType::IKIWA:
+        case TokenType::LAMBDA:
+        case TokenType::QUESTIONMARK:
+        case TokenType::NULLISH:
+        case TokenType::BIT_OR:
+        case TokenType::BIT_XOR:
+        case TokenType::AMPERSAND:
+        case TokenType::BIT_SHIFT_LEFT:
+        case TokenType::BIT_SHIFT_RIGHT:
+        case TokenType::BIT_TRIPLE_RSHIFT:
+            regex_allowed = true;
+            break;
+
+        // Layout tokens don't change the state
+        case TokenType::NEWLINE:
+        case TokenType::INDENT:
+        case TokenType::DEDENT:
+            // keep current state
+            break;
+
+        default:
+            // Default to allowing regex (safer)
+            regex_allowed = true;
+            break;
+    }
+}
 // scan quoted string with basic escapes; supports single and double quotes
 // start_index points to the opening quote position in src
 void Lexer::scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index, char quote) {
@@ -1024,6 +1104,90 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         add_token(out, TokenType::IDENTIFIER, id, tok_line, tok_col, tok_length);
     }
 }
+void Lexer::scan_regex_literal(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
+    // consume opening '/'
+    advance();
+
+    std::string pattern;
+    bool escaped = false;
+    bool in_char_class = false;
+
+    while (!eof()) {
+        char c = peek();
+
+        // Handle escape sequences
+        if (escaped) {
+            pattern.push_back(c);
+            advance();
+            escaped = false;
+            continue;
+        }
+
+        if (c == '\\') {
+            pattern.push_back(advance());
+            escaped = true;
+            continue;
+        }
+
+        // Track character classes [...]
+        if (c == '[' && !in_char_class) {
+            in_char_class = true;
+            pattern.push_back(advance());
+            continue;
+        }
+
+        if (c == ']' && in_char_class) {
+            in_char_class = false;
+            pattern.push_back(advance());
+            continue;
+        }
+
+        // End of regex (not inside character class)
+        if (c == '/' && !in_char_class) {
+            advance();  // consume closing '/'
+
+            // Scan optional flags (g, i, m, s, u, y)
+            std::string flags;
+            while (!eof() && std::isalpha((unsigned char)peek())) {
+                char flag = peek();
+                if (flag == 'g' || flag == 'i' || flag == 'm' ||
+                    flag == 's' || flag == 'u' || flag == 'y') {
+                    flags.push_back(advance());
+                } else {
+                    break;
+                }
+            }
+
+            // Store pattern and flags in token value
+            std::string value = pattern;
+            if (!flags.empty()) {
+                value += "|" + flags;
+            }
+
+            int tok_length = static_cast<int>(i - start_index);
+            add_token(out, TokenType::REGEX_LITERAL, value, tok_line, tok_col, tok_length);
+            return;
+        }
+
+        // Newline in regex (without escape) is an error
+        if (c == '\n' && !in_char_class) {
+            std::ostringstream ss;
+            ss << "Unterminated regex literal at "
+               << (filename.empty() ? "<repl>" : filename)
+               << " line " << tok_line << ", col " << tok_col;
+            throw std::runtime_error(ss.str());
+        }
+
+        pattern.push_back(advance());
+    }
+
+    // Reached EOF without closing /
+    std::ostringstream ss;
+    ss << "Unterminated regex literal at "
+       << (filename.empty() ? "<repl>" : filename)
+       << " line " << tok_line << ", col " << tok_col;
+    throw std::runtime_error(ss.str());
+}
 
 void Lexer::handle_newline(std::vector<Token>& out) {
     // consume newline (supports CRLF)
@@ -1545,10 +1709,18 @@ void Lexer::scan_token(std::vector<Token>& out) {
             add_token(out, TokenType::STAR, "*", line, col, 1);
             advance();
             return;
-        case '/':
+        case '/': {
+            if (regex_allowed) {
+                size_t start_index = i;
+                int start_line = line;
+                int start_col = col;
+                scan_regex_literal(out, start_line, start_col, start_index);
+                return;
+            }
             add_token(out, TokenType::SLASH, "/", line, col, 1);
             advance();
             return;
+        }
         case '%':
             add_token(out, TokenType::PERCENT, "%", line, col, 1);
             advance();

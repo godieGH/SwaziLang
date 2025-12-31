@@ -374,7 +374,7 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         if (!dt) return "[nullDateTime]";
 
         // Return literalText by default
-        return dt->literalText;
+        return use_color ? (Color::magenta + dt->literalText + Color::reset) : dt->literalText;
     }
 
     if (std::holds_alternative<RegexPtr>(v)) {
@@ -1283,7 +1283,7 @@ std::string Evaluator::print_value(
 
             std::ostringstream ss;
 
-            ss << "[ORDERED]";
+            ss << "Ordered";
 
             if (size == 0) {
                 ss << " {}";
@@ -1514,7 +1514,7 @@ std::string Evaluator::print_value(
 
         // Pretty print with color
         std::string dtStr = dt->literalText;
-        return use_color ? (Color::bright_cyan + dtStr + Color::reset) : dtStr;
+        return use_color ? (Color::magenta + dtStr + Color::reset) : dtStr;
     }
 
     if (std::holds_alternative<RegexPtr>(v)) {
