@@ -373,10 +373,29 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<RegexPtr>(v)) {
         auto re = std::get<RegexPtr>(v);
         std::ostringstream ss;
-        ss << "/";
-        ss << re->pattern;
-        ss << "/";
-        ss << re->flags;
+        if (use_color) {
+            ss << Color::bright_black + "/" + Color::reset;
+        } else {
+            ss << "/";
+        }
+
+        if (use_color) {
+            ss << Color::green + re->pattern + Color::reset;
+        } else {
+            ss << re->pattern;
+        }
+
+        if (use_color) {
+            ss << Color::bright_black + "/" + Color::reset;
+        } else {
+            ss << "/";
+        }
+
+        if (use_color) {
+            ss << Color::yellow + re->flags + Color::reset;
+        } else {
+            ss << re->flags;
+        }
         return ss.str();
     }
 
@@ -1420,7 +1439,33 @@ std::string Evaluator::print_value(
     }
 
     if (std::holds_alternative<RegexPtr>(v)) {
-        return Color::bright_black + "[RegexPattern]" + Color::reset;
+        auto re = std::get<RegexPtr>(v);
+        std::ostringstream ss;
+
+        if (use_color) {
+            ss << Color::bright_black + "/" + Color::reset;
+        } else {
+            ss << "/";
+        }
+
+        if (use_color) {
+            ss << Color::green + re->pattern + Color::reset;
+        } else {
+            ss << re->pattern;
+        }
+
+        if (use_color) {
+            ss << Color::bright_black + "/" + Color::reset;
+        } else {
+            ss << "/";
+        }
+
+        if (use_color) {
+            ss << Color::yellow + re->flags + Color::reset;
+        } else {
+            ss << re->flags;
+        }
+        return ss.str();
     }
 
     return "<?>";  // fallback
