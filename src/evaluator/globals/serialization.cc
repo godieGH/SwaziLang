@@ -26,7 +26,8 @@ enum class SerializeType : uint8_t {
     DATETIME = 0x08,
     RANGE = 0x09,
     HOLE = 0x0A,
-    REFERENCE = 0x0B  // For circular references
+    REFERENCE = 0x0B,  // For circular references
+    REGEX = 0x0C
 };
 
 // Helper to write bytes
@@ -426,6 +427,18 @@ static void serialize_value(const Value& val, ByteWriter& writer, SerializeConte
         return;
     }
 
+    // Handle Regex
+    if (std::holds_alternative<RegexPtr>(val)) {
+        RegexPtr regex = std::get<RegexPtr>(val);
+        if (!regex) {
+            throw SwaziError("SerializeError", "Cannot serialize null Regex", token.loc);
+        }
+        writer.write_u8(static_cast<uint8_t>(SerializeType::REGEX));
+        writer.write_string(regex->pattern);
+        writer.write_string(regex->flags);
+        return;
+    }
+
     // Unsupported types
     std::string type_name;
     if (std::holds_alternative<FunctionPtr>(val))
@@ -580,6 +593,13 @@ static Value deserialize_value(ByteReader& reader, DeserializeContext& ctx,
         case SerializeType::REFERENCE: {
             uint32_t ref_id = reader.read_u32(token);
             return ctx.get_ref(ref_id, token);
+        }
+
+        case SerializeType::REGEX: {
+            std::string pattern = reader.read_string(token);
+            std::string flags = reader.read_string(token);
+            auto regex = std::make_shared<RegexValue>(pattern, flags);
+            return Value{regex};
         }
 
         default:

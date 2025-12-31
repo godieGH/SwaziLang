@@ -1454,6 +1454,303 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
         }
 
+        // Regex instance methods and properties
+        {
+            if (std::holds_alternative<RegexPtr>(objVal)) {
+                RegexPtr regex = std::get<RegexPtr>(objVal);
+                const std::string& prop = mem->property;
+
+                // Helper to create methods
+                auto make_fn = [this, regex, env, mem](auto impl) -> Value {
+                    auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                        return impl(args, callEnv, token);
+                    };
+                    return Value{std::make_shared<FunctionValue>(
+                        "regex." + mem->property, native_impl, env, mem->token)};
+                };
+
+                // Properties
+                if (prop == "pattern") return Value{regex->pattern};
+                if (prop == "flags") return Value{regex->flags};
+                if (prop == "global") return Value{regex->global};
+                if (prop == "ignoreCase") return Value{regex->ignoreCase};
+                if (prop == "multiline") return Value{regex->multiline};
+                if (prop == "source") return Value{regex->pattern};  // JS compat
+
+                // test(str) -> bool
+                if (prop == "test") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.test() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+                        std::smatch match;
+
+                        try {
+                            bool result = std::regex_search(str, match, regex->getCompiled());
+                            return Value{result};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // match(str) -> array of matches or null
+                // With global flag: returns all matches
+                // Without global: returns first match with capture groups
+                if (prop == "match") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.match() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+
+                        try {
+                            if (regex->global) {
+                                // Global: return all matches (no capture groups)
+                                auto arr = std::make_shared<ArrayValue>();
+                                std::sregex_iterator it(str.begin(), str.end(), regex->getCompiled());
+                                std::sregex_iterator end;
+
+                                for (; it != end; ++it) {
+                                    arr->elements.push_back(Value{it->str()});
+                                }
+
+                                return arr->elements.empty() ? Value{std::monostate{}} : Value{arr};
+                            } else {
+                                // Non-global: return first match with capture groups
+                                std::smatch match;
+                                if (!std::regex_search(str, match, regex->getCompiled())) {
+                                    return Value{std::monostate{}};
+                                }
+
+                                auto arr = std::make_shared<ArrayValue>();
+                                for (size_t i = 0; i < match.size(); ++i) {
+                                    arr->elements.push_back(Value{match[i].str()});
+                                }
+
+                                // Add index and input properties (JS-like)
+                                auto result = std::make_shared<ObjectValue>();
+                                result->properties["matches"] = PropertyDescriptor{Value{arr}, false, false, true, token};
+                                result->properties["index"] = PropertyDescriptor{
+                                    Value{static_cast<double>(match.position())}, false, false, true, token};
+                                result->properties["input"] = PropertyDescriptor{Value{str}, false, false, true, token};
+
+                                return Value{result};
+                            }
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // fullmatch(str) -> bool
+                // Tests if the entire string matches the pattern
+                if (prop == "fullmatch" || prop == "fullMatch") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.fullmatch() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+
+                        try {
+                            std::smatch match;
+                            bool result = std::regex_match(str, match, regex->getCompiled());
+                            return Value{result};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // search(str) -> number (index of first match) or -1
+                if (prop == "search") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.search() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+
+                        try {
+                            std::smatch match;
+                            if (std::regex_search(str, match, regex->getCompiled())) {
+                                return Value{static_cast<double>(match.position())};
+                            }
+                            return Value{-1.0};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // findall(str) -> array of all matches (always returns array)
+                // Similar to global match but always returns array (even empty)
+                if (prop == "findall" || prop == "findAll") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.findall() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+                        auto arr = std::make_shared<ArrayValue>();
+
+                        try {
+                            std::sregex_iterator it(str.begin(), str.end(), regex->getCompiled());
+                            std::sregex_iterator end;
+
+                            for (; it != end; ++it) {
+                                // If there are capture groups, return array of groups
+                                if (it->size() > 1) {
+                                    auto groups = std::make_shared<ArrayValue>();
+                                    for (size_t i = 0; i < it->size(); ++i) {
+                                        groups->elements.push_back(Value{(*it)[i].str()});
+                                    }
+                                    arr->elements.push_back(Value{groups});
+                                } else {
+                                    // No capture groups, just the match
+                                    arr->elements.push_back(Value{it->str()});
+                                }
+                            }
+
+                            return Value{arr};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // exec(str) -> match object or null (stateful for global regex)
+                // Returns detailed match info with groups
+                if (prop == "exec") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.exec() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+
+                        try {
+                            std::smatch match;
+                            if (!std::regex_search(str, match, regex->getCompiled())) {
+                                return Value{std::monostate{}};
+                            }
+
+                            // Create match result object
+                            auto result = std::make_shared<ObjectValue>();
+
+                            // Add matched groups as array
+                            auto groups = std::make_shared<ArrayValue>();
+                            for (size_t i = 0; i < match.size(); ++i) {
+                                groups->elements.push_back(Value{match[i].str()});
+                            }
+                            result->properties["groups"] = PropertyDescriptor{Value{groups}, false, false, true, token};
+
+                            // Add metadata
+                            result->properties["index"] = PropertyDescriptor{
+                                Value{static_cast<double>(match.position())}, false, false, true, token};
+                            result->properties["input"] = PropertyDescriptor{Value{str}, false, false, true, token};
+                            result->properties["length"] = PropertyDescriptor{
+                                Value{static_cast<double>(match.length())}, false, false, true, token};
+
+                            return Value{result};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // replace(str, replacement) -> string
+                if (prop == "replace") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.size() < 2) {
+                            throw SwaziError("TypeError",
+                                "regex.replace() requires 2 arguments: str and replacement",
+                                token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+                        std::string replacement = to_string_value(args[1], true);
+
+                        try {
+                            if (regex->global) {
+                                return Value{std::regex_replace(str, regex->getCompiled(), replacement)};
+                            } else {
+                                // Replace only first match
+                                std::smatch match;
+                                if (std::regex_search(str, match, regex->getCompiled())) {
+                                    return Value{match.prefix().str() + replacement + match.suffix().str()};
+                                }
+                                return Value{str};
+                            }
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // replaceAll(str, replacement) -> string
+                // Always replaces all matches regardless of global flag
+                if (prop == "replaceAll") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.size() < 2) {
+                            throw SwaziError("TypeError",
+                                "regex.replaceAll() requires 2 arguments: str and replacement",
+                                token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0]);
+                        std::string replacement = to_string_value(args[1], true);
+
+                        try {
+                            return Value{std::regex_replace(str, regex->getCompiled(), replacement)};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                // split(str, limit?) -> array
+                if (prop == "split") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.split() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+                        auto arr = std::make_shared<ArrayValue>();
+
+                        // Optional limit parameter
+                        int limit = -1;
+                        if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                            limit = static_cast<int>(std::get<double>(args[1]));
+                        }
+
+                        try {
+                            std::sregex_token_iterator it(str.begin(), str.end(), regex->getCompiled(), -1);
+                            std::sregex_token_iterator end;
+
+                            int count = 0;
+                            for (; it != end && (limit < 0 || count < limit); ++it, ++count) {
+                                arr->elements.push_back(Value{it->str()});
+                            }
+
+                            return Value{arr};
+                        } catch (const std::regex_error& e) {
+                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        }
+                    });
+                }
+
+                throw SwaziError("ReferenceError",
+                    "Unknown property '" + prop + "' on regex",
+                    mem->token.loc);
+            }
+        }
+
         // --- Universal properties ---
         const std::string& prop = mem->property;
 

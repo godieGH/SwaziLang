@@ -5,6 +5,7 @@
 #include <functional>
 #include <iomanip>
 #include <memory>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -159,6 +160,9 @@ using DateTimePtr = std::shared_ptr<DateTimeValue>;
 struct MapStorage;
 using MapStoragePtr = std::shared_ptr<MapStorage>;
 
+struct RegexValue;
+using RegexPtr = std::shared_ptr<RegexValue>;
+
 using Value = std::variant<
     std::monostate,
     double,
@@ -176,7 +180,8 @@ using Value = std::variant<
     RangePtr,
     DateTimePtr,
     MapStoragePtr,
-    ProxyPtr>;
+    ProxyPtr,
+    RegexPtr>;
 
 struct ValueHash {
     std::size_t operator()(const Value& v) const {
@@ -261,6 +266,11 @@ struct ValueHash {
             return std::hash<const void*>{}(ptr);
         }
 
+        if (std::holds_alternative<RegexPtr>(v)) {
+            auto ptr = std::get<RegexPtr>(v).get();
+            return std::hash<const void*>{}(ptr);
+        }
+
         // Fallback
         return 0;
     }
@@ -338,11 +348,64 @@ struct ValueEqual {
             return std::get<ProxyPtr>(a).get() == std::get<ProxyPtr>(b).get();
         }
 
+        if (std::holds_alternative<RegexPtr>(a)) {
+            return std::get<RegexPtr>(a).get() == std::get<RegexPtr>(b).get();
+        }
+
         return false;
     }
 };
 struct MapStorage {
     std::unordered_map<Value, Value, ValueHash, ValueEqual> data;
+};
+
+struct RegexValue {
+    std::string pattern;
+    std::string flags;
+    bool global = false;
+    bool ignoreCase = false;
+    bool multiline = false;
+    bool dotAll = false;
+    bool unicode = false;
+
+    // Cached compiled regex (we'll use std::regex for runtime patterns)
+    mutable std::unique_ptr<std::regex> compiled;
+
+    RegexValue(const std::string& pat, const std::string& flgs = "")
+        : pattern(pat), flags(flgs) {
+        parseFlags();
+    }
+
+    void parseFlags() {
+        for (char c : flags) {
+            switch (c) {
+                case 'g':
+                    global = true;
+                    break;
+                case 'i':
+                    ignoreCase = true;
+                    break;
+                case 'm':
+                    multiline = true;
+                    break;
+                case 's':
+                    dotAll = true;
+                    break;
+                case 'u':
+                    unicode = true;
+                    break;
+            }
+        }
+    }
+
+    std::regex& getCompiled() const {
+        if (!compiled) {
+            std::regex_constants::syntax_option_type opts = std::regex_constants::ECMAScript;
+            if (ignoreCase) opts |= std::regex_constants::icase;
+            compiled = std::make_unique<std::regex>(pattern, opts);
+        }
+        return *compiled;
+    }
 };
 
 struct DateTimeValue {

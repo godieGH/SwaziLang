@@ -61,6 +61,7 @@ static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<FilePtr>(v)) return "file";
     if (std::holds_alternative<RangePtr>(v)) return "range";
     if (std::holds_alternative<DateTimePtr>(v)) return "datetime";
+    if (std::holds_alternative<RegexPtr>(v)) return "regex";
     return "unknown";
 }
 
@@ -352,6 +353,16 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         return dt->literalText;
     }
 
+    if (std::holds_alternative<RegexPtr>(v)) {
+        auto re = std::get<RegexPtr>(v);
+        std::ostringstream ss;
+        ss << "/";
+        ss << re->pattern;
+        ss << "/";
+        ss << re->flags;
+        return ss.str();
+    }
+
     return "";
 }
 
@@ -381,6 +392,7 @@ bool Evaluator::to_bool(const Value& v) {
     if (std::holds_alternative<RangePtr>(v)) return true;
     if (std::holds_alternative<PromisePtr>(v)) return true;
     if (std::holds_alternative<DateTimePtr>(v)) return true;
+    if (std::holds_alternative<RegexPtr>(v)) return true;
     return false;
 }
 
@@ -1243,6 +1255,10 @@ std::string Evaluator::print_value(
         // Pretty print with color
         std::string dtStr = dt->literalText;
         return use_color ? (Color::bright_cyan + dtStr + Color::reset) : dtStr;
+    }
+
+    if (std::holds_alternative<RegexPtr>(v)) {
+        return Color::bright_black + "[RegexPattern]" + Color::reset;
     }
 
     return "<?>";  // fallback
