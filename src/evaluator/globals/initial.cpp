@@ -617,12 +617,11 @@ static Value builtin_sleep(const std::vector<Value>& args, EnvPtr, const Token& 
 // --------------------
 // Ordered map factory: Object.ordered([plainObject])
 // --------------------
-// Add this after builtin_object_entry in this file.
-static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
-    // internal ordered store
+static Value built_object_ordered_with_eval(const std::vector<Value>& args, EnvPtr env, const Token& tok, Evaluator* evaluator) {
+    // Internal ordered store
     auto store = std::make_shared<std::vector<std::pair<std::string, Value>>>();
 
-    // helper: canonicalize a Value -> property key string (reuse simple rules)
+    // Helper: canonicalize a Value -> property key string
     auto key_to_string = [](const Value& v) -> std::string {
         if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
         if (std::holds_alternative<double>(v)) {
@@ -636,22 +635,147 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         throw SwaziError("TypeError", "Cannot convert value to property key", TokenLocation{"<builtin>", 0, 0, 0});
     };
 
-    // If caller provided a plain object as first argument, copy its properties into store
+    // Order specification (array of keys OR function)
+    std::vector<std::string> order_keys;
+    bool has_custom_order = false;
+    FunctionPtr order_fn = nullptr;
+    bool has_order_fn = false;
+
+    // Parse second argument (order specification)
+    if (args.size() >= 2) {
+        const Value& order_arg = args[1];
+
+        if (std::holds_alternative<ArrayPtr>(order_arg)) {
+            // Array of keys specifying order
+            ArrayPtr arr = std::get<ArrayPtr>(order_arg);
+            if (arr) {
+                has_custom_order = true;
+                for (const auto& key_val : arr->elements) {
+                    order_keys.push_back(key_to_string(key_val));
+                }
+            }
+        } else if (std::holds_alternative<FunctionPtr>(order_arg)) {
+            // Function-based ordering
+            order_fn = std::get<FunctionPtr>(order_arg);
+            has_order_fn = true;
+        }
+    }
+
+    // If caller provided a plain object as first argument
     if (!args.empty() && std::holds_alternative<ObjectPtr>(args[0])) {
         ObjectPtr src = std::get<ObjectPtr>(args[0]);
         if (src) {
-            // copy properties in the map's iteration order (note: plain object iteration order is
-            // whatever the runtime's map yields; this merely constructs an ordered snapshot)
-            for (const auto& kv : src->properties) {
-                store->emplace_back(kv.first, kv.second.value);
+            if (has_order_fn && order_fn) {
+                // FUNCTION-BASED ORDERING: decorate-sort-undecorate
+                struct WeightedEntry {
+                    std::string key;
+                    Value value;
+                    double weight;
+                    size_t original_index;
+                };
+
+                std::vector<WeightedEntry> weighted_entries;
+                size_t idx = 0;
+
+                // Step 1: Decorate - call function for each key to get weight
+                for (const auto& kv : src->properties) {
+                    if (kv.second.is_private) continue;
+
+                    // Call order_fn(key, value) to get numeric weight
+                    double weight = 0.0;
+
+                    std::vector<Value> fn_args = {Value{kv.first}, kv.second.value};
+
+                    try {
+                        if (order_fn->is_native && order_fn->native_impl) {
+                            // Native function - call directly
+                            Value weight_val = order_fn->native_impl(fn_args, env, tok);
+                            weight = value_to_number(weight_val);
+                        } else if (evaluator) {
+                            // Non-native function - use evaluator to call it properly
+                            Value weight_val = evaluator->invoke_function(order_fn, fn_args, env, tok);
+                            weight = value_to_number(weight_val);
+                        } else {
+                            throw SwaziError("TypeError",
+                                "Object.ordered with non-native function ordering requires evaluator context",
+                                tok.loc);
+                        }
+                    } catch (const std::exception& e) {
+                        throw SwaziError("TypeError",
+                            std::string("Error in ordering function: ") + e.what(),
+                            tok.loc);
+                    }
+
+                    weighted_entries.push_back({kv.first,
+                        kv.second.value,
+                        weight,
+                        idx++});
+                }
+
+                // Step 2: Sort by weight (stable sort preserves insertion order for ties)
+                std::stable_sort(weighted_entries.begin(), weighted_entries.end(),
+                    [](const WeightedEntry& a, const WeightedEntry& b) {
+                        return a.weight < b.weight;
+                    });
+
+                // Step 3: Undecorate - extract ordered entries into store
+                for (const auto& entry : weighted_entries) {
+                    store->emplace_back(entry.key, entry.value);
+                }
+            } else if (has_custom_order && !order_keys.empty()) {
+                // ARRAY-BASED ORDERING
+                std::unordered_map<std::string, Value> temp_map;
+
+                // Collect all properties
+                for (const auto& kv : src->properties) {
+                    if (kv.second.is_private) continue;
+                    temp_map[kv.first] = kv.second.value;
+                }
+
+                // Add keys in specified order
+                for (const auto& key : order_keys) {
+                    auto it = temp_map.find(key);
+                    if (it != temp_map.end()) {
+                        store->emplace_back(key, it->second);
+                        temp_map.erase(it);
+                    }
+                }
+
+                // Add remaining keys
+                for (const auto& kv : temp_map) {
+                    store->emplace_back(kv.first, kv.second);
+                }
+
+            } else {
+                // No custom order - use insertion order
+                for (const auto& kv : src->properties) {
+                    if (kv.second.is_private) continue;
+                    store->emplace_back(kv.first, kv.second.value);
+                }
             }
         }
     }
 
-    // Create the returned object that exposes methods which operate on 'store'
+    // Create the returned object
     auto ret = std::make_shared<ObjectValue>();
 
-    // Helper to create native methods easily (each method uses env as closure)
+    // Helper to sync internal store to __ordered_store__ property
+    auto sync_ordered_store = [ret](const std::shared_ptr<std::vector<std::pair<std::string, Value>>>& s) {
+        auto internal_array = std::make_shared<ArrayValue>();
+        for (const auto& pair : *s) {
+            auto kv_pair = std::make_shared<ArrayValue>();
+            kv_pair->elements.push_back(Value{pair.first});
+            kv_pair->elements.push_back(pair.second);
+            internal_array->elements.push_back(Value{kv_pair});
+        }
+        ret->properties["__ordered_store__"] = PropertyDescriptor{
+            Value{internal_array}, true, true, true, Token{}};
+    };
+
+    // Initialize __ordered_store__
+    sync_ordered_store(store);
+
+    // Helper to create native methods
     auto make_native_fn = [&](const std::string& name,
                               std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> impl) -> Value {
         auto fn = std::make_shared<FunctionValue>(name, impl, env, Token{});
@@ -660,25 +784,28 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
 
     // set(key, value)
     {
-        auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
+        auto impl = [store, ret, key_to_string, sync_ordered_store](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
             if (a.empty()) throw SwaziError("TypeError", "map.set needs (key, value)", callTok.loc);
             std::string k = key_to_string(a[0]);
             Value val = (a.size() >= 2) ? a[1] : std::monostate{};
+
+            // Check if key exists
             for (auto& p : *store) {
                 if (p.first == k) {
                     p.second = val;
+                    sync_ordered_store(store);
                     return val;
                 }
             }
+
+            // New key
             store->emplace_back(k, val);
+            sync_ordered_store(store);
             return val;
         };
         ret->properties["set"] = {
             std::get<FunctionPtr>(make_native_fn("map.set", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
     // get(key)
@@ -692,10 +819,7 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["get"] = {
             std::get<FunctionPtr>(make_native_fn("map.get", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
     // has(key)
@@ -709,20 +833,18 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["has"] = {
             std::get<FunctionPtr>(make_native_fn("map.has", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
-    // delete(key) -> bool
+    // delete(key)
     {
-        auto impl = [store, key_to_string](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
+        auto impl = [store, ret, key_to_string, sync_ordered_store](const std::vector<Value>& a, EnvPtr, const Token& callTok) -> Value {
             if (a.empty()) throw SwaziError("TypeError", "map.delete needs (key)", callTok.loc);
             std::string k = key_to_string(a[0]);
             for (size_t i = 0; i < store->size(); ++i) {
                 if ((*store)[i].first == k) {
                     store->erase(store->begin() + static_cast<long long>(i));
+                    sync_ordered_store(store);
                     return true;
                 }
             }
@@ -730,13 +852,10 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["delete"] = {
             std::get<FunctionPtr>(make_native_fn("map.delete", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
-    // keys() -> Array of strings in insertion order
+    // keys()
     {
         auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             auto arr = std::make_shared<ArrayValue>();
@@ -745,13 +864,10 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["keys"] = {
             std::get<FunctionPtr>(make_native_fn("map.keys", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
-    // values() -> Array of Values in insertion order
+    // values()
     {
         auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             auto arr = std::make_shared<ArrayValue>();
@@ -760,13 +876,10 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["values"] = {
             std::get<FunctionPtr>(make_native_fn("map.values", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
-    // entries() -> Array of [key, value] arrays
+    // entries()
     {
         auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             auto arr = std::make_shared<ArrayValue>();
@@ -780,26 +893,20 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["entries"] = {
             std::get<FunctionPtr>(make_native_fn("map.entries", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
-    // size() -> number
+    // size()
     {
         auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             return static_cast<double>(store->size());
         };
         ret->properties["size"] = {
             std::get<FunctionPtr>(make_native_fn("map.size", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
-    // toPlain() -> convert to a normal ObjectValue snapshot (unordered map of the current entries)
+    // toPlain()
     {
         auto impl = [store](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             auto out = std::make_shared<ObjectValue>();
@@ -816,15 +923,11 @@ static Value built_object_ordered(const std::vector<Value>& args, EnvPtr env, co
         };
         ret->properties["toPlain"] = {
             std::get<FunctionPtr>(make_native_fn("map.toPlain", impl)),
-            false,
-            false,
-            true,
-            Token{}};
+            false, false, true, Token{}};
     }
 
     return ret;
 }
-
 // --------------------
 // rangeE and rangeI
 // --------------------
@@ -995,13 +1098,14 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
             Token{}};
     }
     {
-        auto fn = std::make_shared<FunctionValue>("ordered", built_object_ordered, env, Token{});
-        objectVal->properties["ordered"] = {
-            fn,
-            false,
-            false,
-            true,
-            Token{}};
+        auto fn = std::make_shared<FunctionValue>(
+            "ordered",
+            [evaluator](const std::vector<Value>& a, EnvPtr e, const Token& t) -> Value {
+                return built_object_ordered_with_eval(a, e, t, evaluator);
+            },
+            env,
+            Token{});
+        objectVal->properties["ordered"] = {fn, false, false, true, Token{}};
     }
     {
         auto fn = std::make_shared<FunctionValue>("freeze", built_object_freeze, env, Token{});

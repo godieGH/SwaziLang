@@ -240,6 +240,13 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             return print_value(proxy_it->second.value);
         }
 
+        auto ordered_store_it = op->properties.find("__ordered_store__");
+        if (ordered_store_it != op->properties.end() &&
+            ordered_store_it->second.is_private &&
+            std::holds_alternative<ArrayPtr>(ordered_store_it->second.value)) {
+            return print_value(v);
+        }
+
         return print_object(op, 0, visited);  // <- you write this pretty-printer
     }
     if (std::holds_alternative<ClassPtr>(v)) {
@@ -1264,6 +1271,78 @@ std::string Evaluator::print_value(
             proxy_it->second.is_private &&
             std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
             return print_value(proxy_it->second.value, depth, visited, arrvisited);
+        }
+
+        // === CHECK FOR ORDERED OBJECT ===
+        auto ordered_store_it = op->properties.find("__ordered_store__");
+        if (ordered_store_it != op->properties.end() &&
+            ordered_store_it->second.is_private &&
+            std::holds_alternative<ArrayPtr>(ordered_store_it->second.value)) {
+            ArrayPtr store_array = std::get<ArrayPtr>(ordered_store_it->second.value);
+            size_t size = store_array ? store_array->elements.size() : 0;
+
+            std::ostringstream ss;
+
+            ss << "[ORDERED]";
+
+            if (size == 0) {
+                ss << " {}";
+                return ss.str();
+            }
+
+            // Collect entries for printing
+            std::vector<std::pair<std::string, Value>> entries;
+            entries.reserve(size);
+
+            for (const auto& elem : store_array->elements) {
+                if (std::holds_alternative<ArrayPtr>(elem)) {
+                    ArrayPtr pair = std::get<ArrayPtr>(elem);
+                    if (pair && pair->elements.size() == 2) {
+                        std::string key = value_to_string(pair->elements[0]);
+                        Value val = pair->elements[1];
+                        entries.emplace_back(key, val);
+                    }
+                }
+            }
+
+            // Check if can inline
+            bool can_inline = (entries.size() <= 5);
+            if (can_inline) {
+                for (const auto& e : entries) {
+                    if (!is_simple_value(e.second)) {
+                        can_inline = false;
+                        break;
+                    }
+                }
+            }
+
+            if (can_inline) {
+                ss << " {";
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (i > 0) ss << ", ";
+                    if (use_color) ss << Color::white;
+                    ss << entries[i].first;
+                    if (use_color) ss << Color::reset;
+                    ss << ": " << print_value(entries[i].second, depth + 1, visited, arrvisited);
+                }
+                ss << "}";
+            } else {
+                // Multi-line
+                ss << " {\n";
+                std::string ind(depth + 2, ' ');
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    ss << ind;
+                    if (use_color) ss << Color::white;
+                    ss << entries[i].first;
+                    if (use_color) ss << Color::reset;
+                    ss << ": " << print_value(entries[i].second, depth + 2, visited, arrvisited);
+                    if (i + 1 < entries.size()) ss << ",\n";
+                }
+                ss << "\n"
+                   << std::string(depth, ' ') << "}";
+            }
+
+            return ss.str();
         }
 
         return print_object(op, depth, visited);
