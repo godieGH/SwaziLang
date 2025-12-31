@@ -179,6 +179,23 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         if (!op) return "{}";
         std::unordered_set<const ObjectValue*> visited;
 
+        // === ADD SET CHECK ===
+        auto items_it = op->properties.find("__items__");
+        if (items_it != op->properties.end() &&
+            items_it->second.is_private &&
+            std::holds_alternative<ArrayPtr>(items_it->second.value)) {
+            return print_value(v);
+        }
+
+        // === ADD HASHMAP CHECK ===
+        auto map_it = op->properties.find("__map__");
+        if (map_it != op->properties.end() &&
+            map_it->second.is_private &&
+            std::holds_alternative<MapStoragePtr>(map_it->second.value)) {
+            MapStoragePtr storage = std::get<MapStoragePtr>(map_it->second.value);
+            return print_value(v);
+        }
+
         auto gen_it = op->properties.find("__generator__");
         if (gen_it != op->properties.end() &&
             gen_it->second.is_private &&
@@ -1041,6 +1058,129 @@ std::string Evaluator::print_value(
     if (std::holds_alternative<ObjectPtr>(v)) {
         ObjectPtr op = std::get<ObjectPtr>(v);
         if (!op) return "{}";
+
+        // === ADD FOR SET ===
+        auto items_it = op->properties.find("__items__");
+        if (items_it != op->properties.end() &&
+            items_it->second.is_private &&
+            std::holds_alternative<ArrayPtr>(items_it->second.value)) {
+            // This is likely a Set or Stack/Queue
+            // Distinguish Set by checking if there's no other telltale methods
+            // or just treat all __items__ as Set-like for now
+            // Better: check for Set-specific behavior or just print as Set
+
+            ArrayPtr items = std::get<ArrayPtr>(items_it->second.value);
+            size_t size = items ? items->elements.size() : 0;
+
+            std::ostringstream ss;
+
+            ss << "Set(" << size << ") {";
+
+            if (items && size > 0) {
+                // Try inline if small and all simple values
+                bool can_inline = (size <= 8);
+                if (can_inline) {
+                    for (const auto& elem : items->elements) {
+                        if (!is_simple_value(elem)) {
+                            can_inline = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (can_inline) {
+                    for (size_t i = 0; i < size; ++i) {
+                        if (i > 0) ss << ", ";
+                        ss << print_value(items->elements[i], depth + 1, visited, arrvisited);
+                    }
+                    ss << "}";
+                } else {
+                    // Multi-line
+                    ss << "\n";
+                    std::string ind(depth + 2, ' ');
+                    for (size_t i = 0; i < size; ++i) {
+                        ss << ind << print_value(items->elements[i], depth + 2, visited, arrvisited);
+                        if (i + 1 < size) ss << ",\n";
+                    }
+                    ss << "\n"
+                       << std::string(depth, ' ') << "}";
+                }
+            } else {
+                ss << "}";
+            }
+
+            return ss.str();
+        }
+
+        // === FOR HASHMAP ===
+        auto map_it = op->properties.find("__map__");
+        if (map_it != op->properties.end() &&
+            map_it->second.is_private &&
+            std::holds_alternative<MapStoragePtr>(map_it->second.value)) {
+            MapStoragePtr storage = std::get<MapStoragePtr>(map_it->second.value);
+            size_t size = storage ? storage->data.size() : 0;
+
+            std::ostringstream ss;
+
+            ss << "HashMap(" << size << ")";
+
+            if (!storage || size == 0) {
+                ss << " {}";
+                return ss.str();
+            }
+
+            // Collect entries
+            std::vector<std::pair<Value, Value>> entries;
+            entries.reserve(size);
+            for (const auto& kv : storage->data) {
+                entries.emplace_back(kv.first, kv.second);
+            }
+
+            // Check if can inline (small size, simple keys and values)
+            bool can_inline = (size <= 5);
+            if (can_inline) {
+                for (const auto& entry : entries) {
+                    if (!is_simple_value(entry.first) || !is_simple_value(entry.second)) {
+                        can_inline = false;
+                        break;
+                    }
+                }
+            }
+
+            if (can_inline) {
+                ss << " {";
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (i > 0) ss << ", ";
+                    ss << print_value(entries[i].first, depth + 1, visited, arrvisited);
+                    if (use_color) {
+                        ss << Color::bright_black << " => " << Color::reset;
+                    } else {
+                        ss << " => ";
+                    }
+                    ss << print_value(entries[i].second, depth + 1, visited, arrvisited);
+                }
+                ss << "}";
+            } else {
+                // Multi-line
+                ss << " {\n";
+                std::string ind(depth + 2, ' ');
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    ss << ind;
+                    ss << print_value(entries[i].first, depth + 2, visited, arrvisited);
+                    if (use_color) {
+                        ss << Color::bright_black << " => " << Color::reset;
+                    } else {
+                        ss << " => ";
+                    }
+                    ss << print_value(entries[i].second, depth + 2, visited, arrvisited);
+                    if (i + 1 < entries.size()) ss << ",\n";
+                }
+                ss << "\n"
+                   << std::string(depth, ' ') << "}";
+            }
+
+            return ss.str();
+        }
 
         auto gen_it = op->properties.find("__generator__");
         if (gen_it != op->properties.end() &&
