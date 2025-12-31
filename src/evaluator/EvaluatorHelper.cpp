@@ -1059,25 +1059,42 @@ std::string Evaluator::print_value(
         ObjectPtr op = std::get<ObjectPtr>(v);
         if (!op) return "{}";
 
-        // === ADD FOR SET ===
         auto items_it = op->properties.find("__items__");
         if (items_it != op->properties.end() &&
             items_it->second.is_private &&
             std::holds_alternative<ArrayPtr>(items_it->second.value)) {
-            // This is likely a Set or Stack/Queue
-            // Distinguish Set by checking if there's no other telltale methods
-            // or just treat all __items__ as Set-like for now
-            // Better: check for Set-specific behavior or just print as Set
-
             ArrayPtr items = std::get<ArrayPtr>(items_it->second.value);
             size_t size = items ? items->elements.size() : 0;
 
-            std::ostringstream ss;
+            // Determine which collection type this is
+            std::string collection_type;
 
-            ss << "Set(" << size << ") {";
+            // Check for Stack-specific methods
+            auto peek_it = op->properties.find("peek");
+            auto pop_it = op->properties.find("pop");
+            auto push_it = op->properties.find("push");
+
+            // Check for Queue-specific methods
+            auto enqueue_it = op->properties.find("enqueue");
+            auto dequeue_it = op->properties.find("dequeue");
+            auto front_it = op->properties.find("front");
+
+            if (enqueue_it != op->properties.end() &&
+                dequeue_it != op->properties.end() &&
+                front_it != op->properties.end()) {
+                collection_type = "Queue";
+            } else if (peek_it != op->properties.end() &&
+                pop_it != op->properties.end() &&
+                push_it != op->properties.end()) {
+                collection_type = "Stack";
+            } else {
+                collection_type = "Set";
+            }
+
+            std::ostringstream ss;
+            ss << collection_type << "(" << size << ")";
 
             if (items && size > 0) {
-                // Try inline if small and all simple values
                 bool can_inline = (size <= 8);
                 if (can_inline) {
                     for (const auto& elem : items->elements) {
@@ -1088,12 +1105,18 @@ std::string Evaluator::print_value(
                     }
                 }
 
+                // Use [...] for Stack/Queue, {...} for Set
+                char open_bracket = (collection_type == "Set") ? '{' : '[';
+                char close_bracket = (collection_type == "Set") ? '}' : ']';
+
+                ss << " " << open_bracket;
+
                 if (can_inline) {
                     for (size_t i = 0; i < size; ++i) {
                         if (i > 0) ss << ", ";
                         ss << print_value(items->elements[i], depth + 1, visited, arrvisited);
                     }
-                    ss << "}";
+                    ss << close_bracket;
                 } else {
                     // Multi-line
                     ss << "\n";
@@ -1103,15 +1126,14 @@ std::string Evaluator::print_value(
                         if (i + 1 < size) ss << ",\n";
                     }
                     ss << "\n"
-                       << std::string(depth, ' ') << "}";
+                       << std::string(depth, ' ') << close_bracket;
                 }
             } else {
-                ss << "}";
+                ss << (collection_type == "Set" ? " {}" : " []");
             }
 
             return ss.str();
         }
-
         // === FOR HASHMAP ===
         auto map_it = op->properties.find("__map__");
         if (map_it != op->properties.end() &&
