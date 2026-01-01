@@ -1,6 +1,9 @@
+#include <re2/re2.h>
+
 #include <algorithm>
-#include <regex>
+#include <map>
 #include <sstream>
+#include <vector>
 
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
@@ -33,61 +36,60 @@ void validateFlags(const std::string& flags, const Token& token) {
     for (char c : flags) {
         if (c != 'g' && c != 'i' && c != 'm' && c != 's' && c != 'u') {
             throw SwaziError("SyntaxError",
-                std::string("Invalid regex flag '") + c + "'. Valid flags: g, i, m, s, u",
+                std::string("Invalid regex flag '") + c +
+                    "'. Valid flags: g (global), i (ignoreCase), m (multiline), s (dotAll), u (unicode)",
                 token.loc);
         }
     }
 }
 
-// Helper to extract pattern and flags from RegexValue or string
-struct PatternInfo {
-    std::string pattern;
-    std::string flags;
-    bool global;
-    bool ignoreCase;
-    bool multiline;
-    std::regex compiled;
-};
+// Create a match result object with proper structure
+ObjectPtr createMatchResult(
+    const std::vector<re2::StringPiece>& groups,
+    size_t matchPos,
+    const std::string& input,
+    const std::vector<std::string>& groupNames,
+    const std::map<std::string, int>& nameToIndex,
+    const Token& token) {
+    auto result = std::make_shared<ObjectValue>();
 
-PatternInfo get_pattern_info(const Value& pattern_arg, const std::string& flags_arg, const Token& token) {
-    PatternInfo info;
-
-    // If it's a RegexValue, use its pattern and flags (ignore flags_arg)
-    if (std::holds_alternative<RegexPtr>(pattern_arg)) {
-        RegexPtr regex = std::get<RegexPtr>(pattern_arg);
-        info.pattern = regex->pattern;
-        info.flags = regex->flags;
-        info.global = regex->global;
-        info.ignoreCase = regex->ignoreCase;
-        info.multiline = regex->multiline;
-        info.compiled = regex->getCompiled();
-        return info;
+    // Add numeric indices: "0" (full match), "1", "2", etc. (capture groups)
+    for (size_t i = 0; i < groups.size(); ++i) {
+        std::string captured = std::string(groups[i].data(), groups[i].size());
+        result->properties[std::to_string(i)] = PropertyDescriptor{
+            Value{captured}, false, false, true, token};
     }
 
-    // Otherwise it's a string pattern with separate flags
-    info.pattern = value_to_string_simple(pattern_arg);
-    info.flags = flags_arg;
-    info.global = info.flags.find('g') != std::string::npos;
-    info.ignoreCase = info.flags.find('i') != std::string::npos;
-    info.multiline = info.flags.find('m') != std::string::npos;
+    // Add metadata
+    result->properties["index"] = PropertyDescriptor{
+        Value{static_cast<double>(matchPos)}, false, false, true, token};
 
-    validateFlags(info.flags, token);
+    result->properties["input"] = PropertyDescriptor{
+        Value{input}, false, false, true, token};
 
-    // Compile regex
-    std::regex_constants::syntax_option_type opts = std::regex_constants::ECMAScript;
-    if (info.ignoreCase) {
-        opts |= std::regex_constants::icase;
+    result->properties["length"] = PropertyDescriptor{
+        Value{static_cast<double>(groups[0].length())}, false, false, true, token};
+
+    // Add named groups object (if any named groups exist)
+    if (!groupNames.empty()) {
+        auto groupsObj = std::make_shared<ObjectValue>();
+
+        for (const auto& [name, idx] : nameToIndex) {
+            if (idx >= 0 && static_cast<size_t>(idx) < groups.size()) {
+                groupsObj->properties[name] = PropertyDescriptor{
+                    Value{std::string(groups[idx].data(), groups[idx].size())},
+                    false, false, true, token};
+            }
+        }
+
+        result->properties["groups"] = PropertyDescriptor{
+            Value{groupsObj}, false, false, true, token};
+    } else {
+        result->properties["groups"] = PropertyDescriptor{
+            Value{std::monostate{}}, false, false, true, token};
     }
 
-    try {
-        info.compiled = std::regex(info.pattern, opts);
-    } catch (const std::regex_error& e) {
-        throw SwaziError("SyntaxError",
-            std::string("Invalid regex pattern: ") + e.what(),
-            token.loc);
-    }
-
-    return info;
+    return result;
 }
 
 }  // anonymous namespace
@@ -95,337 +97,75 @@ PatternInfo get_pattern_info(const Value& pattern_arg, const std::string& flags_
 std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
 
-    // ==================== NEW API (Constructor) ====================
+    // ==================== Constructor ====================
 
     // regex(pattern, flags?) -> RegexValue
     {
         auto fn = make_native_fn("regex", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.empty()) {
-                throw SwaziError("TypeError", 
-                    "regex() requires a pattern string. Usage: regex(pattern, flags?)", 
-                    token.loc);
-            }
-            
-            std::string pattern = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 2 ? value_to_string_simple(args[1]) : "";
-            
-            validateFlags(flags, token);
-            
-            // Test if pattern is valid
-            try {
-                std::regex_constants::syntax_option_type opts = std::regex_constants::ECMAScript;
-                if (flags.find('i') != std::string::npos) {
-                    opts |= std::regex_constants::icase;
+                if (args.empty()) {
+                    throw SwaziError("TypeError", 
+                        "regex() requires a pattern string. Usage: regex(pattern, flags?)", 
+                        token.loc);
                 }
-                std::regex test(pattern, opts);
-            } catch (const std::regex_error& e) {
-                throw SwaziError("SyntaxError", 
-                    std::string("Invalid regex pattern: ") + e.what(), 
-                    token.loc);
-            }
-            
-            auto regex = std::make_shared<RegexValue>(pattern, flags);
-            return Value{regex}; }, env);
+                
+                std::string pattern = value_to_string_simple(args[0]);
+                std::string flags = args.size() >= 2 ? value_to_string_simple(args[1]) : "";
+                
+                validateFlags(flags, token);
+                
+                // Create regex (validation happens in getCompiled())
+                auto regex = std::make_shared<RegexValue>(pattern, flags);
+                
+                // Force compilation to catch errors early
+                try {
+                    regex->getCompiled();
+                } catch (const std::exception& e) {
+                    throw SwaziError("SyntaxError", 
+                        std::string("Invalid regex pattern: ") + e.what(), 
+                        token.loc);
+                }
+                
+                return Value{regex}; }, env);
 
         obj->properties["regex"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
+    // ==================== Utility Functions ====================
+
     // escape(str) -> escaped string for use in regex
     {
         auto fn = make_native_fn("escape", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.empty()) {
-                throw SwaziError("TypeError", 
-                    "regex.escape() requires a string argument", 
-                    token.loc);
-            }
-            
-            std::string str = value_to_string_simple(args[0]);
-            std::string escaped;
-            
-            // Escape special regex characters
-            const std::string special = R"(\.^$*+?()[]{}|)";
-            for (char c : str) {
-                if (special.find(c) != std::string::npos) {
-                    escaped += '\\';
+                if (args.empty()) {
+                    throw SwaziError("TypeError", 
+                        "regex.escape() requires a string argument", 
+                        token.loc);
                 }
-                escaped += c;
-            }
-            
-            return Value{escaped}; }, env);
+                
+                std::string str = value_to_string_simple(args[0]);
+                return Value{re2::RE2::QuoteMeta(str)}; }, env);
 
         obj->properties["escape"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
-    // ==================== OLD API (Standalone Functions) ====================
-
-    // test(str, pattern, flags?) -> bool
+    // isValid(pattern, flags?) -> bool
     {
-        auto fn = make_native_fn("test", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.test() requires at least 2 arguments: str and pattern. Usage: test(str, pattern, flags?) -> bool",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-            
-            try {
-                std::smatch match;
-                return Value{static_cast<bool>(std::regex_search(str, match, info.compiled))};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["test"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // match(str, pattern, flags?) -> array|null
-    {
-        auto fn = make_native_fn("match", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.match() requires at least 2 arguments: str and pattern. Usage: match(str, pattern, flags?) -> array|null",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            try {
-                if (info.global) {
-                    // Global: return all matches (no capture groups)
-                    auto arr = std::make_shared<ArrayValue>();
-                    std::sregex_iterator it(str.begin(), str.end(), info.compiled);
-                    std::sregex_iterator end;
-
-                    for (; it != end; ++it) {
-                        arr->elements.push_back(Value{it->str()});
-                    }
-
-                    return arr->elements.empty() ? Value{std::monostate{}} : Value{arr};
-                } else {
-                    // Non-global: return first match with capture groups
-                    std::smatch match;
-                    if (!std::regex_search(str, match, info.compiled)) {
-                        return Value{std::monostate{}};
-                    }
-
-                    auto arr = std::make_shared<ArrayValue>();
-                    for (size_t i = 0; i < match.size(); ++i) {
-                        arr->elements.push_back(Value{match[i].str()});
-                    }
-                    return Value{arr};
-                }
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["match"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // fullmatch(str, pattern, flags?) -> bool
-    {
-        auto fn = make_native_fn("fullmatch", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.fullmatch() requires at least 2 arguments: str and pattern. Usage: fullmatch(str, pattern, flags?) -> bool",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            try {
-                std::smatch match;
-                return Value{static_cast<bool>(std::regex_match(str, match, info.compiled))};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["fullmatch"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // search(str, pattern, flags?) -> number (index) or -1
-    {
-        auto fn = make_native_fn("search", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.search() requires at least 2 arguments: str and pattern. Usage: search(str, pattern, flags?) -> number",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            try {
-                std::smatch match;
-                if (std::regex_search(str, match, info.compiled)) {
-                    return Value{static_cast<double>(match.position())};
-                }
-                return Value{-1.0};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["search"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // replace(str, pattern, replacement, flags?) -> string
-    {
-        auto fn = make_native_fn("replace", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 3) {
-                throw SwaziError("TypeError",
-                    "regex.replace() requires at least 3 arguments: str, pattern, replacement. Usage: replace(str, pattern, replacement, flags?) -> string",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string replacement = value_to_string_simple(args[2]);
-            std::string flags = args.size() >= 4 ? value_to_string_simple(args[3]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            try {
-                if (info.global) {
-                    // Replace all occurrences
-                    return Value{std::regex_replace(str, info.compiled, replacement)};
-                } else {
-                    // Replace only first match
-                    std::smatch match;
-                    if (std::regex_search(str, match, info.compiled)) {
-                        return Value{match.prefix().str() + replacement + match.suffix().str()};
-                    }
-                    return Value{str};
-                }
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["replace"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // replaceAll(str, pattern, replacement, flags?) -> string
-    {
-        auto fn = make_native_fn("replaceAll", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 3) {
-                throw SwaziError("TypeError",
-                    "regex.replaceAll() requires at least 3 arguments: str, pattern, replacement",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string replacement = value_to_string_simple(args[2]);
-            std::string flags = args.size() >= 4 ? value_to_string_simple(args[3]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            try {
-                return Value{std::regex_replace(str, info.compiled, replacement)};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["replaceAll"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // split(str, pattern, flags?) -> array
-    {
-        auto fn = make_native_fn("split", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.split() requires at least 2 arguments: str and pattern. Usage: split(str, pattern, flags?) -> array",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            auto arr = std::make_shared<ArrayValue>();
-            
-            try {
-                std::sregex_token_iterator it(str.begin(), str.end(), info.compiled, -1);
-                std::sregex_token_iterator end;
-
-                for (; it != end; ++it) {
-                    arr->elements.push_back(Value{it->str()});
+        auto fn = make_native_fn("isValid", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                if (args.empty()) {
+                    return Value{false};
                 }
 
-                return Value{arr};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["split"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
+                std::string pattern = value_to_string_simple(args[0]);
+                std::string flags = args.size() >= 2 ? value_to_string_simple(args[1]) : "";
 
-    // findall(str, pattern, flags?) -> array (always returns array, even empty)
-    {
-        auto fn = make_native_fn("findall", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.findall() requires at least 2 arguments: str and pattern",
-                    token.loc);
-            }
+                try {
+                    auto regex = std::make_shared<RegexValue>(pattern, flags);
+                    regex->getCompiled();
+                    return Value{true};
+                } catch (...) {
+                    return Value{false};
+                } }, env);
 
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-            
-            auto arr = std::make_shared<ArrayValue>();
-
-            try {
-                std::sregex_iterator it(str.begin(), str.end(), info.compiled);
-                std::sregex_iterator end;
-
-                for (; it != end; ++it) {
-                    // If there are capture groups, return array of groups
-                    if (it->size() > 1) {
-                        auto groups = std::make_shared<ArrayValue>();
-                        for (size_t i = 0; i < it->size(); ++i) {
-                            groups->elements.push_back(Value{(*it)[i].str()});
-                        }
-                        arr->elements.push_back(Value{groups});
-                    } else {
-                        // No capture groups, just the match
-                        arr->elements.push_back(Value{it->str()});
-                    }
-                }
-
-                return Value{arr};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["findall"] = PropertyDescriptor{fn, false, false, false, Token()};
-    }
-
-    // count(str, pattern, flags?) -> number (count of matches)
-    {
-        auto fn = make_native_fn("count", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            if (args.size() < 2) {
-                throw SwaziError("TypeError",
-                    "regex.count() requires at least 2 arguments: str and pattern",
-                    token.loc);
-            }
-
-            std::string str = value_to_string_simple(args[0]);
-            std::string flags = args.size() >= 3 ? value_to_string_simple(args[2]) : "";
-            
-            PatternInfo info = get_pattern_info(args[1], flags, token);
-
-            try {
-                std::sregex_iterator it(str.begin(), str.end(), info.compiled);
-                std::sregex_iterator end;
-                size_t count = std::distance(it, end);
-                return Value{static_cast<double>(count)};
-            } catch (const std::regex_error& e) {
-                throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-            } }, env);
-        obj->properties["count"] = PropertyDescriptor{fn, false, false, false, Token()};
+        obj->properties["isValid"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
     return obj;

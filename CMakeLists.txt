@@ -53,14 +53,14 @@ add_custom_command(
 add_custom_target(generate_builtins DEPENDS "${GENERATED_BUILTIN_CPP}")
 # --- END embed builtins ---
 
-# Fetch link ctre
+# Fetch link re2
 include(FetchContent)
 FetchContent_Declare(
-  ctre
-  GIT_REPOSITORY https://github.com/hanickadot/compile-time-regular-expressions.git
-  GIT_TAG        v3.10.0
+  re2
+  GIT_REPOSITORY https://github.com/google/re2.git
+  GIT_TAG        2023-11-01  # Use latest stable
 )
-FetchContent_MakeAvailable(ctre)
+FetchContent_MakeAvailable(re2)
 
 # --- libsodium Setup ---
 include(ExternalProject)
@@ -128,8 +128,10 @@ target_link_libraries(swazi_lib PUBLIC
     uv
     sodium
     nlohmann_json::nlohmann_json
-    ctre::ctre
+    re2::re2
 )
+
+target_link_libraries(swazi_net PUBLIC re2::re2)
 
 add_dependencies(swazi_lib generate_builtins)
 

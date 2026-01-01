@@ -1,5 +1,7 @@
 #pragma once
 
+#include <re2/re2.h>
+
 #include <chrono>
 #include <ctime>
 #include <functional>
@@ -365,11 +367,19 @@ struct RegexValue {
     bool global = false;
     bool ignoreCase = false;
     bool multiline = false;
-    bool dotAll = false;
-    bool unicode = false;
+    bool dotAll = false;   // 's' flag
+    bool unicode = false;  // 'u' flag
 
-    // Cached compiled regex (we'll use std::regex for runtime patterns)
-    mutable std::unique_ptr<std::regex> compiled;
+    mutable size_t lastIndex = 0;
+
+    // Store compiled RE2 pattern
+    struct CompiledPattern {
+        std::unique_ptr<re2::RE2> compiled;
+        std::vector<std::string> groupNames;
+        std::map<std::string, int> nameToIndex;  // RE2 uses int for group indices
+        int numGroups = 0;
+    };
+    mutable std::unique_ptr<CompiledPattern> runtimePattern;
 
     RegexValue(const std::string& pat, const std::string& flgs = "")
         : pattern(pat), flags(flgs) {
@@ -394,17 +404,63 @@ struct RegexValue {
                 case 'u':
                     unicode = true;
                     break;
+                default:
+                    // Invalid flag will be caught during compilation
+                    break;
             }
         }
     }
 
-    std::regex& getCompiled() const {
-        if (!compiled) {
-            std::regex_constants::syntax_option_type opts = std::regex_constants::ECMAScript;
-            if (ignoreCase) opts |= std::regex_constants::icase;
-            compiled = std::make_unique<std::regex>(pattern, opts);
+    re2::RE2& getCompiled() const {
+        if (!runtimePattern) {
+            runtimePattern = std::make_unique<CompiledPattern>();
+
+            // Configure RE2 options
+            re2::RE2::Options opts;
+            opts.set_case_sensitive(!ignoreCase);
+            opts.set_dot_nl(dotAll);        // '.' matches newline if 's' flag
+            opts.set_one_line(!multiline);  // '^' and '$' behavior
+            opts.set_posix_syntax(false);   // Use Perl syntax
+            opts.set_longest_match(false);  // First match (like JS)
+            opts.set_log_errors(false);     // We'll handle errors
+
+            // Create the compiled regex
+            runtimePattern->compiled = std::make_unique<re2::RE2>(pattern, opts);
+
+            // Check if compilation succeeded
+            if (!runtimePattern->compiled->ok()) {
+                throw std::runtime_error("Regex compilation failed: " +
+                    runtimePattern->compiled->error());
+            }
+
+            // Extract named groups using RE2's API
+            const std::map<std::string, int>& groups =
+                runtimePattern->compiled->NamedCapturingGroups();
+
+            runtimePattern->nameToIndex = groups;
+            runtimePattern->numGroups = runtimePattern->compiled->NumberOfCapturingGroups();
+
+            // Build groupNames vector for iteration
+            for (const auto& [name, idx] : groups) {
+                runtimePattern->groupNames.push_back(name);
+            }
         }
-        return *compiled;
+        return *runtimePattern->compiled;
+    }
+
+    const std::vector<std::string>& getGroupNames() const {
+        getCompiled();  // ensure compiled
+        return runtimePattern->groupNames;
+    }
+
+    const std::map<std::string, int>& getNameToIndex() const {
+        getCompiled();  // ensure compiled
+        return runtimePattern->nameToIndex;
+    }
+
+    int getNumGroups() const {
+        getCompiled();
+        return runtimePattern->numGroups;
     }
 };
 

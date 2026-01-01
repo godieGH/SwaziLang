@@ -14,6 +14,110 @@
 #include "evaluator.hpp"
 #include "proxy_class.hpp"
 
+namespace {
+
+// Helper: convert Value -> string
+std::string value_to_string_simple(const Value& v) {
+    if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
+    if (std::holds_alternative<double>(v)) {
+        std::ostringstream ss;
+        ss << std::get<double>(v);
+        return ss.str();
+    }
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
+    return std::string();
+}
+
+// Create a match result object with proper structure
+ObjectPtr createMatchResult(
+    const std::vector<re2::StringPiece>& groups,
+    size_t matchPos,
+    const std::string& input,
+    const std::vector<std::string>& groupNames,
+    const std::map<std::string, int>& nameToIndex,
+    const Token& token) {
+    auto result = std::make_shared<ObjectValue>();
+
+    // Add numeric indices: "0" (full match), "1", "2", etc. (capture groups)
+    for (size_t i = 0; i < groups.size(); ++i) {
+        std::string captured = std::string(groups[i].data(), groups[i].size());
+        result->properties[std::to_string(i)] = PropertyDescriptor{
+            Value{captured}, false, false, true, token};
+    }
+
+    // Add metadata
+    result->properties["index"] = PropertyDescriptor{
+        Value{static_cast<double>(matchPos)}, false, false, true, token};
+
+    result->properties["input"] = PropertyDescriptor{
+        Value{input}, false, false, true, token};
+
+    result->properties["length"] = PropertyDescriptor{
+        Value{static_cast<double>(groups[0].length())}, false, false, true, token};
+
+    // Add named groups object (if any named groups exist)
+    if (!groupNames.empty()) {
+        auto groupsObj = std::make_shared<ObjectValue>();
+
+        for (const auto& [name, idx] : nameToIndex) {
+            if (idx >= 0 && static_cast<size_t>(idx) < groups.size()) {
+                groupsObj->properties[name] = PropertyDescriptor{
+                    Value{std::string(groups[idx].data(), groups[idx].size())},
+                    false, false, true, token};
+            }
+        }
+
+        result->properties["groups"] = PropertyDescriptor{
+            Value{groupsObj}, false, false, true, token};
+    } else {
+        result->properties["groups"] = PropertyDescriptor{
+            Value{std::monostate{}}, false, false, true, token};
+    }
+
+    return result;
+}
+
+std::string to_property_key(const Value& v, const Token& token) {
+    // string first
+    if (auto ps = std::get_if<std::string>(&v)) {
+        return *ps;
+    }
+
+    // number -> canonical integer if whole, otherwise decimal string
+    if (auto pd = std::get_if<double>(&v)) {
+        double d = *pd;
+        if (!std::isfinite(d)) {
+            throw SwaziError(
+                "TypeError",
+                "Invalid number for property key — must be finite.",
+                token.loc);
+        }
+        double floor_d = std::floor(d);
+        if (d == floor_d) {
+            // whole number — print as integer to match object property storage
+            return std::to_string(static_cast<long long>(d));
+        }
+        return std::to_string(d);
+    }
+
+    // boolean
+    if (auto pb = std::get_if<bool>(&v)) {
+        return *pb ? "kweli" : "sikweli";
+    }
+
+    // null/undefined
+    if (std::holds_alternative<std::monostate>(v)) {
+        return "null";
+    }
+
+    throw SwaziError(
+        "TypeError",
+        "Cannot convert value to a property key — unsupported type.",
+        token.loc);
+}
+
+}  // anonymous namespace
+
 inline uint32_t to_uint32(double d) {
     // Handle NaN and infinity
     if (!std::isfinite(d)) return 0;
@@ -1459,7 +1563,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             }
         }
 
-        // Regex instance methods and properties
+        // Regex instance methods and properties (in ExpressionEval.cpp)
         {
             if (std::holds_alternative<RegexPtr>(objVal)) {
                 RegexPtr regex = std::get<RegexPtr>(objVal);
@@ -1474,13 +1578,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         "regex." + mem->property, native_impl, env, mem->token)};
                 };
 
-                // Properties
-                if (prop == "pattern") return Value{regex->pattern};
+                // ==================== Properties ====================
+
+                if (prop == "pattern" || prop == "source") return Value{regex->pattern};
                 if (prop == "flags") return Value{regex->flags};
                 if (prop == "global") return Value{regex->global};
                 if (prop == "ignoreCase") return Value{regex->ignoreCase};
                 if (prop == "multiline") return Value{regex->multiline};
-                if (prop == "source") return Value{regex->pattern};  // JS compat
+                if (prop == "dotAll") return Value{regex->dotAll};
+                if (prop == "unicode") return Value{regex->unicode};
+                if (prop == "lastIndex") return Value{static_cast<double>(regex->lastIndex)};
+
+                // ==================== Methods ====================
 
                 // test(str) -> bool
                 if (prop == "test") {
@@ -1490,146 +1599,37 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
 
                         std::string str = to_string_value(args[0], true);
-                        std::smatch match;
+                        re2::RE2& re = regex->getCompiled();
 
-                        try {
-                            bool result = std::regex_search(str, match, regex->getCompiled());
-                            return Value{result};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-                        }
-                    });
-                }
+                        if (regex->global) {
+                            // Stateful: search from lastIndex
+                            if (regex->lastIndex >= str.size()) {
+                                regex->lastIndex = 0;
+                                return Value{false};
+                            }
 
-                // match(str) -> array of matches or null
-                // With global flag: returns all matches
-                // Without global: returns first match with capture groups
-                if (prop == "match") {
-                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                        if (args.empty()) {
-                            throw SwaziError("TypeError", "regex.match() requires a string argument", token.loc);
-                        }
+                            re2::StringPiece input(str);
+                            input.remove_prefix(regex->lastIndex);
 
-                        std::string str = to_string_value(args[0], true);
-
-                        try {
-                            if (regex->global) {
-                                // Global: return all matches (no capture groups)
-                                auto arr = std::make_shared<ArrayValue>();
-                                std::sregex_iterator it(str.begin(), str.end(), regex->getCompiled());
-                                std::sregex_iterator end;
-
-                                for (; it != end; ++it) {
-                                    arr->elements.push_back(Value{it->str()});
+                            if (re2::RE2::PartialMatch(input, re)) {
+                                // Find match position to update lastIndex
+                                re2::StringPiece match;
+                                if (re2::RE2::FindAndConsume(&input, re, &match)) {
+                                    regex->lastIndex = str.size() - input.size();
                                 }
-
-                                return arr->elements.empty() ? Value{std::monostate{}} : Value{arr};
+                                return Value{true};
                             } else {
-                                // Non-global: return first match with capture groups
-                                std::smatch match;
-                                if (!std::regex_search(str, match, regex->getCompiled())) {
-                                    return Value{std::monostate{}};
-                                }
-
-                                auto arr = std::make_shared<ArrayValue>();
-                                for (size_t i = 0; i < match.size(); ++i) {
-                                    arr->elements.push_back(Value{match[i].str()});
-                                }
-
-                                // Add index and input properties (JS-like)
-                                auto result = std::make_shared<ObjectValue>();
-                                result->properties["matches"] = PropertyDescriptor{Value{arr}, false, false, true, token};
-                                result->properties["index"] = PropertyDescriptor{
-                                    Value{static_cast<double>(match.position())}, false, false, true, token};
-                                result->properties["input"] = PropertyDescriptor{Value{str}, false, false, true, token};
-
-                                return Value{result};
+                                regex->lastIndex = 0;
+                                return Value{false};
                             }
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        } else {
+                            // Non-global: just test once from beginning
+                            return Value{re2::RE2::PartialMatch(str, re)};
                         }
                     });
                 }
 
-                // fullmatch(str) -> bool
-                // Tests if the entire string matches the pattern
-                if (prop == "fullmatch" || prop == "fullMatch") {
-                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                        if (args.empty()) {
-                            throw SwaziError("TypeError", "regex.fullmatch() requires a string argument", token.loc);
-                        }
-
-                        std::string str = to_string_value(args[0], true);
-
-                        try {
-                            std::smatch match;
-                            bool result = std::regex_match(str, match, regex->getCompiled());
-                            return Value{result};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-                        }
-                    });
-                }
-
-                // search(str) -> number (index of first match) or -1
-                if (prop == "search") {
-                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                        if (args.empty()) {
-                            throw SwaziError("TypeError", "regex.search() requires a string argument", token.loc);
-                        }
-
-                        std::string str = to_string_value(args[0], true);
-
-                        try {
-                            std::smatch match;
-                            if (std::regex_search(str, match, regex->getCompiled())) {
-                                return Value{static_cast<double>(match.position())};
-                            }
-                            return Value{-1.0};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-                        }
-                    });
-                }
-
-                // findall(str) -> array of all matches (always returns array)
-                // Similar to global match but always returns array (even empty)
-                if (prop == "findall" || prop == "findAll") {
-                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                        if (args.empty()) {
-                            throw SwaziError("TypeError", "regex.findall() requires a string argument", token.loc);
-                        }
-
-                        std::string str = to_string_value(args[0], true);
-                        auto arr = std::make_shared<ArrayValue>();
-
-                        try {
-                            std::sregex_iterator it(str.begin(), str.end(), regex->getCompiled());
-                            std::sregex_iterator end;
-
-                            for (; it != end; ++it) {
-                                // If there are capture groups, return array of groups
-                                if (it->size() > 1) {
-                                    auto groups = std::make_shared<ArrayValue>();
-                                    for (size_t i = 0; i < it->size(); ++i) {
-                                        groups->elements.push_back(Value{(*it)[i].str()});
-                                    }
-                                    arr->elements.push_back(Value{groups});
-                                } else {
-                                    // No capture groups, just the match
-                                    arr->elements.push_back(Value{it->str()});
-                                }
-                            }
-
-                            return Value{arr};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-                        }
-                    });
-                }
-
-                // exec(str) -> match object or null (stateful for global regex)
-                // Returns detailed match info with groups
+                // exec(str) -> match object | null
                 if (prop == "exec") {
                     return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                         if (args.empty()) {
@@ -1637,33 +1637,85 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
 
                         std::string str = to_string_value(args[0], true);
+                        re2::RE2& re = regex->getCompiled();
 
-                        try {
-                            std::smatch match;
-                            if (!std::regex_search(str, match, regex->getCompiled())) {
+                        int numGroups = regex->getNumGroups();
+                        std::vector<re2::StringPiece> groups(numGroups + 1);  // +1 for full match
+
+                        re2::StringPiece input(str);
+                        size_t searchStart = 0;
+
+                        if (regex->global) {
+                            // Stateful execution using lastIndex
+                            if (regex->lastIndex >= str.size()) {
+                                regex->lastIndex = 0;
                                 return Value{std::monostate{}};
                             }
+                            searchStart = regex->lastIndex;
+                            input.remove_prefix(searchStart);
+                        }
 
-                            // Create match result object
-                            auto result = std::make_shared<ObjectValue>();
-
-                            // Add matched groups as array
-                            auto groups = std::make_shared<ArrayValue>();
-                            for (size_t i = 0; i < match.size(); ++i) {
-                                groups->elements.push_back(Value{match[i].str()});
+                        // Perform the match
+                        if (!re.Match(input, 0, input.size(), re2::RE2::UNANCHORED,
+                                groups.data(), groups.size())) {
+                            if (regex->global) {
+                                regex->lastIndex = 0;
                             }
-                            result->properties["groups"] = PropertyDescriptor{Value{groups}, false, false, true, token};
+                            return Value{std::monostate{}};
+                        }
 
-                            // Add metadata
-                            result->properties["index"] = PropertyDescriptor{
-                                Value{static_cast<double>(match.position())}, false, false, true, token};
-                            result->properties["input"] = PropertyDescriptor{Value{str}, false, false, true, token};
-                            result->properties["length"] = PropertyDescriptor{
-                                Value{static_cast<double>(match.length())}, false, false, true, token};
+                        // Calculate actual position in original string
+                        size_t matchPos = searchStart + (groups[0].data() - input.data());
 
-                            return Value{result};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        if (regex->global) {
+                            regex->lastIndex = matchPos + groups[0].length();
+                        }
+
+                        // Create match result
+                        return Value{createMatchResult(
+                            groups, matchPos, str,
+                            regex->getGroupNames(),
+                            regex->getNameToIndex(),
+                            token)};
+                    });
+                }
+
+                // match(str) -> array of all matches | null
+                if (prop == "match") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.match() requires a string argument", token.loc);
+                        }
+
+                        std::string str = to_string_value(args[0], true);
+                        re2::RE2& re = regex->getCompiled();
+
+                        auto result = std::make_shared<ArrayValue>();
+
+                        if (regex->global) {
+                            // Find all matches
+                            re2::StringPiece input(str);
+                            re2::StringPiece match;
+
+                            while (re2::RE2::FindAndConsume(&input, re, &match)) {
+                                result->elements.push_back(Value{std::string(match.data(), match.size())});
+                            }
+
+                            return result->elements.empty() ? Value{std::monostate{}} : Value{result};
+                        } else {
+                            // Single match - return array with one element or null
+                            int numGroups = regex->getNumGroups();
+                            std::vector<re2::StringPiece> groups(numGroups + 1);
+
+                            if (re.Match(str, 0, str.size(), re2::RE2::UNANCHORED,
+                                    groups.data(), groups.size())) {
+                                for (const auto& g : groups) {
+                                    result->elements.push_back(Value{std::string(g.data(), g.size())});
+                                }
+                                return Value{result};
+                            }
+
+                            return Value{std::monostate{}};
                         }
                     });
                 }
@@ -1679,42 +1731,19 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                         std::string str = to_string_value(args[0], true);
                         std::string replacement = to_string_value(args[1], true);
+                        re2::RE2& re = regex->getCompiled();
 
-                        try {
-                            if (regex->global) {
-                                return Value{std::regex_replace(str, regex->getCompiled(), replacement)};
-                            } else {
-                                // Replace only first match
-                                std::smatch match;
-                                if (std::regex_search(str, match, regex->getCompiled())) {
-                                    return Value{match.prefix().str() + replacement + match.suffix().str()};
-                                }
-                                return Value{str};
-                            }
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-                        }
-                    });
-                }
+                        std::string result = str;
 
-                // replaceAll(str, replacement) -> string
-                // Always replaces all matches regardless of global flag
-                if (prop == "replaceAll") {
-                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                        if (args.size() < 2) {
-                            throw SwaziError("TypeError",
-                                "regex.replaceAll() requires 2 arguments: str and replacement",
-                                token.loc);
+                        if (regex->global) {
+                            // Replace all matches
+                            re2::RE2::GlobalReplace(&result, re, replacement);
+                        } else {
+                            // Replace only first match
+                            re2::RE2::Replace(&result, re, replacement);
                         }
 
-                        std::string str = to_string_value(args[0]);
-                        std::string replacement = to_string_value(args[1], true);
-
-                        try {
-                            return Value{std::regex_replace(str, regex->getCompiled(), replacement)};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
-                        }
+                        return Value{result};
                     });
                 }
 
@@ -1726,32 +1755,57 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
 
                         std::string str = to_string_value(args[0], true);
-                        auto arr = std::make_shared<ArrayValue>();
+                        int limit = args.size() >= 2 ? static_cast<int>(to_number(args[1], token)) : -1;
 
-                        // Optional limit parameter
-                        int limit = -1;
-                        if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
-                            limit = static_cast<int>(std::get<double>(args[1]));
+                        re2::RE2& re = regex->getCompiled();
+                        auto result = std::make_shared<ArrayValue>();
+
+                        re2::StringPiece input(str);
+                        re2::StringPiece match;
+                        size_t lastPos = 0;
+                        int count = 0;
+
+                        while ((limit < 0 || count < limit) &&
+                            re2::RE2::FindAndConsume(&input, re, &match)) {
+                            // Add the text before the match
+                            size_t matchStart = match.data() - str.data();
+                            result->elements.push_back(Value{str.substr(lastPos, matchStart - lastPos)});
+                            lastPos = matchStart + match.length();
+                            count++;
                         }
 
-                        try {
-                            std::sregex_token_iterator it(str.begin(), str.end(), regex->getCompiled(), -1);
-                            std::sregex_token_iterator end;
-
-                            int count = 0;
-                            for (; it != end && (limit < 0 || count < limit); ++it, ++count) {
-                                arr->elements.push_back(Value{it->str()});
-                            }
-
-                            return Value{arr};
-                        } catch (const std::regex_error& e) {
-                            throw SwaziError("RegexError", std::string("Regex error: ") + e.what(), token.loc);
+                        // Add remaining text
+                        if (limit < 0 || count < limit) {
+                            result->elements.push_back(Value{str.substr(lastPos)});
                         }
+
+                        return Value{result};
+                    });
+                }
+
+                // setLastIndex(index) -> regex (for chaining)
+                if (prop == "setLastIndex") {
+                    return make_fn([this, regex](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (args.empty()) {
+                            throw SwaziError("TypeError", "regex.setLastIndex() requires a numeric argument", token.loc);
+                        }
+
+                        if (!regex->global) {
+                            throw SwaziError("RegexError",
+                                "Cannot set lastIndex on non-global regex (missing 'g' flag)",
+                                token.loc);
+                        }
+
+                        double raw = to_number(args[0], token);
+                        size_t idx = (raw < 0) ? 0 : static_cast<size_t>(raw);
+                        regex->lastIndex = idx;
+
+                        return Value{regex};
                     });
                 }
 
                 throw SwaziError("ReferenceError",
-                    "Unknown property '" + prop + "' on regex",
+                    "Unknown property '" + prop + "' on regex. Available: pattern, flags, global, ignoreCase, multiline, dotAll, unicode, lastIndex, test(), exec(), match(), replace(), split(), setLastIndex()",
                     mem->token.loc);
             }
         }
@@ -4795,7 +4849,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (std::holds_alternative<ObjectPtr>(objVal)) {
             ObjectPtr op = std::get<ObjectPtr>(objVal);
             if (!op) return std::monostate{};
-            std::string key = to_string_value(indexVal);
+            std::string key = to_property_key(indexVal, idx->token);
             return get_object_property(op, key, env, idx->token);
         }
 
