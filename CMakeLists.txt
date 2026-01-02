@@ -53,6 +53,10 @@ add_custom_command(
 add_custom_target(generate_builtins DEPENDS "${GENERATED_BUILTIN_CPP}")
 # --- END embed builtins ---
 
+# Build llhttp as a shared library
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS OFF CACHE BOOL "" FORCE)
+
 # Fetch link re2
 include(FetchContent)
 FetchContent_Declare(
@@ -99,6 +103,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# build llhttp
+add_subdirectory(thirdparty/llhttp)
+
 # --- CORE LIBRARY (compile everything once here) ---
 file(GLOB_RECURSE LIB_SOURCES "src/*.cpp" "src/*.cc" "src/*.c")
 list(FILTER LIB_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
@@ -129,9 +136,10 @@ target_link_libraries(swazi_lib PUBLIC
     sodium
     nlohmann_json::nlohmann_json
     re2::re2
+    llhttp::llhttp
 )
 
-target_link_libraries(swazi_net PUBLIC re2::re2)
+target_link_libraries(swazi_net PUBLIC re2::re2 llhttp::llhttp)
 
 add_dependencies(swazi_lib generate_builtins)
 
