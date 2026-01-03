@@ -1724,8 +1724,8 @@ std::string Evaluator::print_object(
                 std::ostringstream label;
 
                 if (desc.is_readonly) {
-                    label << "[getter]";
-                    if (use_color) oss << Color::bright_magenta;
+                    label << "[Getter]";
+                    if (use_color) oss << Color::cyan;
                 } else {
                     label << "[" << (f->is_async ? "Async->" : "") << "tabia " << nm << "]";
                     if (use_color) oss << Color::bright_cyan;
