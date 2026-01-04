@@ -163,6 +163,15 @@ else()
     message(WARNING "zlib not found: archiver will use stubs for compression")
 endif()
 
+find_package(OpenSSL QUIET)
+if (OpenSSL_FOUND)
+    message(STATUS "OpenSSL found: enabling TLS/crypto support")
+    target_compile_definitions(swazi_lib PUBLIC HAVE_OPENSSL=1)
+    target_link_libraries(swazi_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(WARNING "OpenSSL not found: TLS features disabled")
+endif()
+
 # --- MAIN EXECUTABLE (just main.cpp, links to library) ---
 add_executable(swazi src/main.cpp)
 target_link_libraries(swazi PRIVATE swazi_lib)

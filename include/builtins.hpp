@@ -7,7 +7,7 @@
 // The EnvPtr is supplied so native functions can capture a module environment if needed.
 std::shared_ptr<ObjectValue> make_regex_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env);
-std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env, Evaluator* evaluator);
 
 std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env);
@@ -36,6 +36,7 @@ std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);
+void native_http_exetended(const ObjectPtr& http_module, Evaluator* evaluator, EnvPtr env);
 
 // Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)
 ObjectPtr create_network_readable_stream_object(uv_tcp_t* socket);
@@ -52,6 +53,7 @@ bool unix_has_active_work();
 bool streams_have_active_work();
 bool fs_has_active_work();
 bool ipc_has_active_work();
+bool http_has_active_work();
 
 struct SignalInfo {
     std::string name;

@@ -85,7 +85,7 @@ static size_t curl_header_cb(char* buffer, size_t size, size_t nitems, void* use
 #endif
 
 // ----------------- HTTP module (uses libcurl if available; supports GET and POST) -----------------
-std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
+std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
 
     // METHODS : [.....]
@@ -702,6 +702,13 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env) {
         obj->properties["fetch"] = PropertyDescriptor{fn, false, false, false, Token()};
         obj->properties["request"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
+
+    {
+        auto obj_extended = std::make_shared<ObjectValue>();
+        native_http_exetended(obj_extended, evaluator, env);
+        obj->properties["client"] = PropertyDescriptor{Value{obj_extended}, false, false, false, Token()};
+    }
+
     return obj;
 }
 

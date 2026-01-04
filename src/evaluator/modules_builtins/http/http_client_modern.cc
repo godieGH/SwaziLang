@@ -1,0 +1,1214 @@
+// http_client_modern.cc
+// Modern event-driven HTTP/HTTPS client with streaming support
+// Supports: GET, POST, PUT, DELETE, PATCH, upload/download streaming, pause/resume, HTTPS
+
+#include <llhttp.h>
+
+#include <atomic>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <regex>
+#include <string>
+#include <vector>
+
+#include "AsyncBridge.hpp"
+#include "Scheduler.hpp"
+#include "SwaziError.hpp"
+#include "builtins.hpp"
+#include "evaluator.hpp"
+#include "uv.h"
+
+// OpenSSL includes for HTTPS
+#ifdef HAVE_OPENSSL
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#endif
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+struct StreamEventHandlers {
+    FunctionPtr on_response;
+    FunctionPtr on_data;
+    FunctionPtr on_end;
+    FunctionPtr on_error;
+    FunctionPtr on_progress;
+    FunctionPtr on_connect;
+    FunctionPtr on_close;
+    FunctionPtr on_drain;
+    FunctionPtr on_upload_progress;
+    EnvPtr env;
+    Evaluator* evaluator;
+    std::mutex mutex;
+};
+
+struct WriteRequest {
+    std::vector<uint8_t> data;
+    FunctionPtr callback;
+};
+
+struct HttpClientRequest {
+    uv_tcp_t socket;
+    uv_connect_t connect_req;
+
+    llhttp_t parser;
+    llhttp_settings_t settings;
+
+    std::string host;
+    int port = 80;
+    std::string method;
+    std::string path;
+    std::map<std::string, std::string> request_headers;
+
+    std::shared_ptr<std::map<std::string, std::string>> response_headers;
+    long status_code = 0;
+    std::shared_ptr<std::string> status_text;
+
+    std::string url;
+    std::string current_header_field;
+
+    std::atomic<bool> paused{false};
+    std::atomic<bool> connected{false};
+    std::atomic<bool> closed{false};
+    std::atomic<bool> headers_sent{false};
+    std::atomic<bool> request_complete{false};
+    std::atomic<bool> response_headers_received{false};
+
+    size_t total_bytes_received = 0;
+    size_t content_length = 0;
+    size_t total_bytes_sent = 0;
+    size_t upload_size = 0;
+
+    std::shared_ptr<StreamEventHandlers> handlers;
+    Evaluator* evaluator = nullptr;
+
+    // Upload queue
+    std::deque<WriteRequest> write_queue;
+    std::atomic<bool> writing{false};
+    std::mutex write_mutex;
+
+    // HTTPS support
+    bool use_ssl = false;
+#ifdef HAVE_OPENSSL
+    SSL* ssl = nullptr;
+    SSL_CTX* ssl_ctx = nullptr;
+    BIO* bio_read = nullptr;
+    BIO* bio_write = nullptr;
+#endif
+};
+
+static std::atomic<int> g_active_http_requests{0};
+
+bool http_has_active_work() {
+    return g_active_http_requests.load() > 0;
+}
+
+// ============================================================================
+// HELPER: String conversions
+// ============================================================================
+
+static std::string value_to_string_simple(const Value& v) {
+    if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
+    if (std::holds_alternative<double>(v)) {
+        std::ostringstream ss;
+        ss << std::get<double>(v);
+        return ss.str();
+    }
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
+    return std::string();
+}
+
+// ============================================================================
+// EVENT EMISSION
+// ============================================================================
+
+static void emit_event(std::shared_ptr<StreamEventHandlers> handlers,
+    const std::string& event,
+    const Value& data = std::monostate{}) {
+    if (!handlers) return;
+
+    FunctionPtr fn = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(handlers->mutex);
+        if (event == "response")
+            fn = handlers->on_response;
+        else if (event == "data")
+            fn = handlers->on_data;
+        else if (event == "end")
+            fn = handlers->on_end;
+        else if (event == "error")
+            fn = handlers->on_error;
+        else if (event == "progress")
+            fn = handlers->on_progress;
+        else if (event == "connect")
+            fn = handlers->on_connect;
+        else if (event == "close")
+            fn = handlers->on_close;
+        else if (event == "drain")
+            fn = handlers->on_drain;
+        else if (event == "uploadProgress")
+            fn = handlers->on_upload_progress;
+    }
+
+    if (!fn) return;
+
+    std::vector<Value> args;
+    if (!std::holds_alternative<std::monostate>(data)) {
+        args.push_back(data);
+    }
+
+    scheduler_run_on_loop([fn, args]() {
+        try {
+            CallbackPayload* payload = new CallbackPayload(fn, args);
+            enqueue_callback_global(static_cast<void*>(payload));
+        } catch (...) {}
+    });
+}
+
+// ============================================================================
+// SSL/TLS SUPPORT
+// ============================================================================
+
+#ifdef HAVE_OPENSSL
+static void init_openssl() {
+    static bool initialized = false;
+    if (!initialized) {
+        SSL_library_init();
+        SSL_load_error_strings();
+        OpenSSL_add_all_algorithms();
+        initialized = true;
+    }
+}
+
+static bool setup_ssl(HttpClientRequest* req) {
+    init_openssl();
+
+    req->ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if (!req->ssl_ctx) {
+        return false;
+    }
+
+    SSL_CTX_set_verify(req->ssl_ctx, SSL_VERIFY_NONE, nullptr);
+    SSL_CTX_set_options(req->ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
+
+    req->ssl = SSL_new(req->ssl_ctx);
+    if (!req->ssl) {
+        SSL_CTX_free(req->ssl_ctx);
+        return false;
+    }
+
+    req->bio_read = BIO_new(BIO_s_mem());
+    req->bio_write = BIO_new(BIO_s_mem());
+
+    SSL_set_bio(req->ssl, req->bio_read, req->bio_write);
+    SSL_set_connect_state(req->ssl);
+    SSL_set_tlsext_host_name(req->ssl, req->host.c_str());
+
+    return true;
+}
+
+static void cleanup_ssl(HttpClientRequest* req) {
+    if (req->ssl) {
+        SSL_free(req->ssl);
+        req->ssl = nullptr;
+    }
+    if (req->ssl_ctx) {
+        SSL_CTX_free(req->ssl_ctx);
+        req->ssl_ctx = nullptr;
+    }
+}
+
+static int do_ssl_handshake(HttpClientRequest* req) {
+    int ret = SSL_do_handshake(req->ssl);
+    if (ret == 1) {
+        return 1;  // Success
+    }
+
+    int err = SSL_get_error(req->ssl, ret);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        return 0;  // Need more data
+    }
+
+    return -1;  // Error
+}
+#endif
+
+// ============================================================================
+// LLHTTP CALLBACKS
+// ============================================================================
+
+static int on_status(llhttp_t* parser, const char* at, size_t length) {
+    auto* req = static_cast<HttpClientRequest*>(parser->data);
+    req->status_code = parser->status_code;
+    req->status_text->assign(at, length);
+    return 0;
+}
+
+static int on_header_field(llhttp_t* parser, const char* at, size_t length) {
+    auto* req = static_cast<HttpClientRequest*>(parser->data);
+    req->current_header_field.assign(at, length);
+    for (auto& c : req->current_header_field) c = std::tolower(c);
+    return 0;
+}
+
+static int on_header_value(llhttp_t* parser, const char* at, size_t length) {
+    auto* req = static_cast<HttpClientRequest*>(parser->data);
+    (*req->response_headers)[req->current_header_field].assign(at, length);
+
+    if (req->current_header_field == "content-length") {
+        try {
+            req->content_length = std::stoull(std::string(at, length));
+        } catch (...) {
+            req->content_length = 0;
+        }
+    }
+
+    return 0;
+}
+
+static int on_headers_complete(llhttp_t* parser) {
+    auto* req = static_cast<HttpClientRequest*>(parser->data);
+    req->response_headers_received.store(true);
+
+    // Build ResponseMeta object
+    auto meta = std::make_shared<ObjectValue>();
+    meta->properties["status"] = PropertyDescriptor{
+        Value{static_cast<double>(req->status_code)}, false, false, true, Token{}};
+    meta->properties["statusText"] = PropertyDescriptor{
+        Value{*req->status_text}, false, false, true, Token{}};
+    meta->properties["url"] = PropertyDescriptor{
+        Value{req->url}, false, false, true, Token{}};
+
+    auto headers_obj = std::make_shared<ObjectValue>();
+    for (const auto& kv : *req->response_headers) {
+        headers_obj->properties[kv.first] = PropertyDescriptor{
+            Value{kv.second}, false, false, true, Token{}};
+    }
+    meta->properties["headers"] = PropertyDescriptor{
+        Value{headers_obj}, false, false, true, Token{}};
+
+    emit_event(req->handlers, "response", Value{meta});
+
+    return 0;
+}
+
+static int on_body(llhttp_t* parser, const char* at, size_t length) {
+    auto* req = static_cast<HttpClientRequest*>(parser->data);
+
+    req->total_bytes_received += length;
+
+    // Emit data chunk
+    auto chunk = std::make_shared<BufferValue>();
+    chunk->data.assign(at, at + length);
+    chunk->encoding = "binary";
+
+    emit_event(req->handlers, "data", Value{chunk});
+
+    // Emit progress if we know content length
+    if (req->content_length > 0) {
+        auto progress = std::make_shared<ObjectValue>();
+        progress->properties["loaded"] = PropertyDescriptor{
+            Value{static_cast<double>(req->total_bytes_received)}, false, false, true, Token{}};
+        progress->properties["total"] = PropertyDescriptor{
+            Value{static_cast<double>(req->content_length)}, false, false, true, Token{}};
+        progress->properties["percentage"] = PropertyDescriptor{
+            Value{(static_cast<double>(req->total_bytes_received) / req->content_length) * 100.0},
+            false, false, true, Token{}};
+
+        emit_event(req->handlers, "progress", Value{progress});
+    }
+
+    return 0;
+}
+
+static int on_message_complete(llhttp_t* parser) {
+    auto* req = static_cast<HttpClientRequest*>(parser->data);
+
+    g_active_http_requests.fetch_sub(1);
+
+    emit_event(req->handlers, "end");
+
+    scheduler_run_on_loop([req]() {
+        if (!req->closed.exchange(true)) {
+#ifdef HAVE_OPENSSL
+            cleanup_ssl(req);
+#endif
+            uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
+                auto* req = static_cast<HttpClientRequest*>(handle->data);
+                emit_event(req->handlers, "close");
+                delete req;
+            });
+        }
+    });
+
+    return 0;
+}
+
+// ============================================================================
+// WRITE OPERATIONS
+// ============================================================================
+
+static void process_write_queue(HttpClientRequest* req);
+
+static void on_write_complete(uv_write_t* write_req, int status) {
+    auto* req = static_cast<HttpClientRequest*>(write_req->data);
+
+    if (write_req->bufs) {
+        if (write_req->bufs->base) free(write_req->bufs->base);
+        delete write_req->bufs;
+    }
+    delete write_req;
+
+    if (status < 0) {
+        std::string error = std::string("Write error: ") + uv_strerror(status);
+        emit_event(req->handlers, "error", Value{error});
+
+        if (!req->closed.exchange(true)) {
+            uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* h) {
+                auto* req = static_cast<HttpClientRequest*>(h->data);
+                delete req;
+            });
+        }
+        return;
+    }
+
+    req->writing.store(false);
+
+    // Process next item in queue
+    process_write_queue(req);
+}
+
+static void process_write_queue(HttpClientRequest* req) {
+    if (req->closed.load() || req->writing.load()) return;
+
+    WriteRequest wr;
+    {
+        std::lock_guard<std::mutex> lock(req->write_mutex);
+        if (req->write_queue.empty()) {
+            emit_event(req->handlers, "drain");
+            return;
+        }
+        wr = std::move(req->write_queue.front());
+        req->write_queue.pop_front();
+    }
+
+    req->writing.store(true);
+    req->total_bytes_sent += wr.data.size();
+
+    // Emit upload progress
+    if (req->upload_size > 0) {
+        auto progress = std::make_shared<ObjectValue>();
+        progress->properties["loaded"] = PropertyDescriptor{
+            Value{static_cast<double>(req->total_bytes_sent)}, false, false, true, Token{}};
+        progress->properties["total"] = PropertyDescriptor{
+            Value{static_cast<double>(req->upload_size)}, false, false, true, Token{}};
+
+        emit_event(req->handlers, "uploadProgress", Value{progress});
+    }
+
+#ifdef HAVE_OPENSSL
+    if (req->use_ssl && req->ssl) {
+        // Write to SSL
+        int written = SSL_write(req->ssl, wr.data.data(), wr.data.size());
+
+        // Get encrypted data from BIO
+        char buf[16384];
+        int pending = BIO_pending(req->bio_write);
+        if (pending > 0) {
+            int read = BIO_read(req->bio_write, buf, std::min(pending, (int)sizeof(buf)));
+            if (read > 0) {
+                char* send_buf = (char*)malloc(read);
+                memcpy(send_buf, buf, read);
+
+                uv_write_t* write_req = new uv_write_t;
+                write_req->data = req;
+
+                uv_buf_t* uvbuf = new uv_buf_t;
+                *uvbuf = uv_buf_init(send_buf, read);
+                write_req->bufs = uvbuf;
+
+                uv_write(write_req, (uv_stream_t*)&req->socket, uvbuf, 1, on_write_complete);
+                return;
+            }
+        }
+
+        req->writing.store(false);
+        process_write_queue(req);
+        return;
+    }
+#endif
+
+    // Plain TCP write
+    char* send_buf = (char*)malloc(wr.data.size());
+    memcpy(send_buf, wr.data.data(), wr.data.size());
+
+    uv_write_t* write_req = new uv_write_t;
+    write_req->data = req;
+
+    uv_buf_t* uvbuf = new uv_buf_t;
+    *uvbuf = uv_buf_init(send_buf, (unsigned int)wr.data.size());
+    write_req->bufs = uvbuf;
+
+    int result = uv_write(write_req, (uv_stream_t*)&req->socket, uvbuf, 1, on_write_complete);
+
+    if (result < 0) {
+        free(send_buf);
+        delete uvbuf;
+        delete write_req;
+        req->writing.store(false);
+
+        std::string error = std::string("Write failed: ") + uv_strerror(result);
+        emit_event(req->handlers, "error", Value{error});
+    }
+
+    if (wr.callback) {
+        emit_event(req->handlers, "drain");  // Notify callback
+    }
+}
+
+static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data, FunctionPtr callback = nullptr) {
+    WriteRequest wr;
+    wr.data = data;
+    wr.callback = callback;
+
+    {
+        std::lock_guard<std::mutex> lock(req->write_mutex);
+        req->write_queue.push_back(std::move(wr));
+    }
+
+    if (!req->writing.load()) {
+        scheduler_run_on_loop([req]() {
+            process_write_queue(req);
+        });
+    }
+}
+
+// ============================================================================
+// READ OPERATIONS
+// ============================================================================
+
+static void alloc_buffer(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
+    buf->base = (char*)malloc(suggested_size);
+    buf->len = suggested_size;
+}
+
+static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+    auto* req = static_cast<HttpClientRequest*>(stream->data);
+
+    if (nread > 0) {
+#ifdef HAVE_OPENSSL
+        if (req->use_ssl && req->ssl) {
+            // Write received data to SSL input BIO
+            BIO_write(req->bio_read, buf->base, nread);
+
+            // Handle SSL handshake if not complete
+            if (!SSL_is_init_finished(req->ssl)) {
+                int hs_result = do_ssl_handshake(req);
+
+                if (hs_result < 0) {
+                    emit_event(req->handlers, "error", Value{std::string("SSL handshake failed")});
+                    uv_close((uv_handle_t*)stream, [](uv_handle_t* h) {
+                        auto* req = static_cast<HttpClientRequest*>(h->data);
+                        delete req;
+                    });
+                    if (buf->base) free(buf->base);
+                    return;
+                }
+
+                // Send any pending handshake data
+                char out_buf[16384];
+                int pending = BIO_pending(req->bio_write);
+                if (pending > 0) {
+                    int read = BIO_read(req->bio_write, out_buf, std::min(pending, (int)sizeof(out_buf)));
+                    if (read > 0) {
+                        std::vector<uint8_t> data(out_buf, out_buf + read);
+                        queue_write(req, data);
+                    }
+                }
+
+                if (hs_result == 1) {
+                    // Handshake complete - send request headers
+                    emit_event(req->handlers, "connect");
+
+                    // Build and send HTTP request
+                    std::ostringstream request_stream;
+                    request_stream << req->method << " " << req->path << " HTTP/1.1\r\n";
+                    request_stream << "Host: " << req->host << "\r\n";
+
+                    for (const auto& hdr : req->request_headers) {
+                        request_stream << hdr.first << ": " << hdr.second << "\r\n";
+                    }
+
+                    request_stream << "\r\n";
+
+                    std::string req_str = request_stream.str();
+                    std::vector<uint8_t> req_data(req_str.begin(), req_str.end());
+                    queue_write(req, req_data);
+                    req->headers_sent.store(true);
+                }
+
+                if (buf->base) free(buf->base);
+                return;
+            }
+
+            // Read decrypted data from SSL
+            char decrypt_buf[16384];
+            int bytes_read;
+
+            while ((bytes_read = SSL_read(req->ssl, decrypt_buf, sizeof(decrypt_buf))) > 0) {
+                llhttp_errno_t err = llhttp_execute(&req->parser, decrypt_buf, bytes_read);
+
+                if (err != HPE_OK) {
+                    std::string error = std::string("HTTP parse error: ") + llhttp_errno_name(err);
+                    emit_event(req->handlers, "error", Value{error});
+                    uv_close((uv_handle_t*)stream, [](uv_handle_t* h) {
+                        auto* req = static_cast<HttpClientRequest*>(h->data);
+                        delete req;
+                    });
+                    if (buf->base) free(buf->base);
+                    return;
+                }
+            }
+
+            if (buf->base) free(buf->base);
+            return;
+        }
+#endif
+
+        // Plain HTTP
+        llhttp_errno_t err = llhttp_execute(&req->parser, buf->base, nread);
+
+        if (err != HPE_OK) {
+            std::string error = std::string("HTTP parse error: ") + llhttp_errno_name(err);
+            emit_event(req->handlers, "error", Value{error});
+
+            uv_close((uv_handle_t*)stream, [](uv_handle_t* h) {
+                auto* req = static_cast<HttpClientRequest*>(h->data);
+                delete req;
+            });
+        }
+    } else if (nread < 0) {
+        if (nread != UV_EOF) {
+            std::string error = std::string("Read error: ") + uv_strerror(nread);
+            emit_event(req->handlers, "error", Value{error});
+        }
+
+        g_active_http_requests.fetch_sub(1);
+
+        uv_close((uv_handle_t*)stream, [](uv_handle_t* h) {
+            auto* req = static_cast<HttpClientRequest*>(h->data);
+            delete req;
+        });
+    }
+
+    if (buf->base) free(buf->base);
+}
+
+// ============================================================================
+// CONNECTION
+// ============================================================================
+
+static void send_initial_request(HttpClientRequest* req) {
+    if (req->use_ssl) {
+#ifdef HAVE_OPENSSL
+        // SSL handshake will trigger request send
+        char buf[16384];
+        int pending = BIO_pending(req->bio_write);
+        if (pending > 0) {
+            int read = BIO_read(req->bio_write, buf, std::min(pending, (int)sizeof(buf)));
+            if (read > 0) {
+                std::vector<uint8_t> data(buf, buf + read);
+                queue_write(req, data);
+            }
+        }
+#endif
+        return;
+    }
+
+    // Plain HTTP - send request immediately
+    emit_event(req->handlers, "connect");
+
+    std::ostringstream request_stream;
+    request_stream << req->method << " " << req->path << " HTTP/1.1\r\n";
+    request_stream << "Host: " << req->host << "\r\n";
+
+    for (const auto& hdr : req->request_headers) {
+        request_stream << hdr.first << ": " << hdr.second << "\r\n";
+    }
+
+    request_stream << "\r\n";
+
+    std::string req_str = request_stream.str();
+    std::vector<uint8_t> req_data(req_str.begin(), req_str.end());
+    queue_write(req, req_data);
+    req->headers_sent.store(true);
+}
+
+static void on_connect(uv_connect_t* connect_req, int status) {
+    auto* req = static_cast<HttpClientRequest*>(connect_req->data);
+
+    if (status < 0) {
+        g_active_http_requests.fetch_sub(1);
+
+        std::string error = std::string("Connection failed: ") + uv_strerror(status);
+        emit_event(req->handlers, "error", Value{error});
+
+        uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
+            auto* req = static_cast<HttpClientRequest*>(handle->data);
+            delete req;
+        });
+        return;
+    }
+
+    req->connected.store(true);
+
+    // Start reading
+    uv_read_start((uv_stream_t*)&req->socket, alloc_buffer, on_read);
+
+    // Send request
+    send_initial_request(req);
+}
+
+// ============================================================================
+// PUBLIC API: http.open(url, options)
+// ============================================================================
+
+Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Token& token, Evaluator* evaluator) {
+    if (args.empty()) {
+        throw SwaziError("TypeError", "http.open requires url", token.loc);
+    }
+
+    std::string url = value_to_string_simple(args[0]);
+
+    // Parse URL
+    std::regex url_regex(R"(^(https?)://([^/:]+)(?::(\d+))?(/.*)?$)");
+    std::smatch matches;
+
+    if (!std::regex_match(url, matches, url_regex)) {
+        throw SwaziError("TypeError", "Invalid URL format", token.loc);
+    }
+
+    std::string protocol = matches[1];
+    std::string host = matches[2];
+    int port = matches[3].length() > 0 ? std::stoi(matches[3]) : (protocol == "https" ? 443 : 80);
+    std::string path = matches[4].length() > 0 ? matches[4].str() : "/";
+
+    bool use_ssl = (protocol == "https");
+
+#ifndef HAVE_OPENSSL
+    if (use_ssl) {
+        throw SwaziError("NotImplementedError",
+            "HTTPS not available - rebuild with OpenSSL support", token.loc);
+    }
+#endif
+
+    // Parse options
+    std::string method = "GET";
+    std::map<std::string, std::string> headers;
+
+    if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+        ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+
+        auto method_it = opts->properties.find("method");
+        if (method_it != opts->properties.end()) {
+            method = value_to_string_simple(method_it->second.value);
+        }
+
+        auto headers_it = opts->properties.find("headers");
+        if (headers_it != opts->properties.end() &&
+            std::holds_alternative<ObjectPtr>(headers_it->second.value)) {
+            ObjectPtr hdrs = std::get<ObjectPtr>(headers_it->second.value);
+            for (const auto& kv : hdrs->properties) {
+                headers[kv.first] = value_to_string_simple(kv.second.value);
+            }
+        }
+    }
+
+    // Create request object
+    auto* req = new HttpClientRequest();
+    req->host = host;
+    req->port = port;
+    req->method = method;
+    req->path = path;
+    req->url = url;
+    req->use_ssl = use_ssl;
+    req->request_headers = headers;
+    req->evaluator = evaluator;
+
+    req->response_headers = std::make_shared<std::map<std::string, std::string>>();
+    req->status_text = std::make_shared<std::string>();
+
+    req->handlers = std::make_shared<StreamEventHandlers>();
+    req->handlers->env = callEnv;
+    req->handlers->evaluator = evaluator;
+
+    // Initialize llhttp
+    llhttp_settings_init(&req->settings);
+    req->settings.on_status = on_status;
+    req->settings.on_header_field = on_header_field;
+    req->settings.on_header_value = on_header_value;
+    req->settings.on_headers_complete = on_headers_complete;
+    req->settings.on_body = on_body;
+    req->settings.on_message_complete = on_message_complete;
+
+    llhttp_init(&req->parser, HTTP_RESPONSE, &req->settings);
+    req->parser.data = req;
+
+#ifdef HAVE_OPENSSL
+    if (use_ssl) {
+        if (!setup_ssl(req)) {
+            delete req;
+            throw SwaziError("SSLError", "Failed to initialize SSL", token.loc);
+        }
+    }
+#endif
+
+    // Build RequestStream object
+    auto stream_obj = std::make_shared<ObjectValue>();
+    Token tok{};
+    tok.loc = TokenLocation("<http>", 0, 0, 0);
+
+    // on(event, callback)
+    auto on_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0]) ||
+            !std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "on(event, callback) requires event name and function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr callback = std::get<FunctionPtr>(args[1]);
+
+        std::lock_guard<std::mutex> lock(req->handlers->mutex);
+        if (event == "response")
+            req->handlers->on_response = callback;
+        else if (event == "data")
+            req->handlers->on_data = callback;
+        else if (event == "end")
+            req->handlers->on_end = callback;
+        else if (event == "error")
+            req->handlers->on_error = callback;
+        else if (event == "progress")
+            req->handlers->on_progress = callback;
+        else if (event == "connect")
+            req->handlers->on_connect = callback;
+        else if (event == "close")
+            req->handlers->on_close = callback;
+        else if (event == "drain")
+            req->handlers->on_drain = callback;
+        else if (event == "uploadProgress")
+            req->handlers->on_upload_progress = callback;
+
+        return std::monostate{};
+    };
+    stream_obj->properties["on"] = {
+        Value{std::make_shared<FunctionValue>("request.on", on_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // write(data, [callback])
+    auto write_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "write() requires data argument", token.loc);
+        }
+
+        if (!req->headers_sent.load()) {
+            throw SwaziError("Error", "Cannot write before connection established", token.loc);
+        }
+
+        FunctionPtr callback = nullptr;
+        if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
+            callback = std::get<FunctionPtr>(args[1]);
+        }
+
+        std::vector<uint8_t> data;
+
+        if (std::holds_alternative<BufferPtr>(args[0])) {
+            BufferPtr buf = std::get<BufferPtr>(args[0]);
+            data = buf->data;
+        } else if (std::holds_alternative<std::string>(args[0])) {
+            std::string str = std::get<std::string>(args[0]);
+            data.assign(str.begin(), str.end());
+        } else {
+            std::string str = value_to_string_simple(args[0]);
+            data.assign(str.begin(), str.end());
+        }
+
+        if (!data.empty()) {
+            queue_write(req, data, callback);
+        }
+
+        return Value{true};
+    };
+    stream_obj->properties["write"] = {
+        Value{std::make_shared<FunctionValue>("request.write", write_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // end([data], [callback])
+    auto end_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (req->request_complete.load()) {
+            return std::monostate{};
+        }
+
+        FunctionPtr callback = nullptr;
+
+        // Write final data if provided
+        if (!args.empty() && !std::holds_alternative<std::monostate>(args[0])) {
+            if (std::holds_alternative<FunctionPtr>(args[0])) {
+                callback = std::get<FunctionPtr>(args[0]);
+            } else {
+                std::vector<uint8_t> data;
+
+                if (std::holds_alternative<BufferPtr>(args[0])) {
+                    BufferPtr buf = std::get<BufferPtr>(args[0]);
+                    data = buf->data;
+                } else if (std::holds_alternative<std::string>(args[0])) {
+                    std::string str = std::get<std::string>(args[0]);
+                    data.assign(str.begin(), str.end());
+                } else {
+                    std::string str = value_to_string_simple(args[0]);
+                    data.assign(str.begin(), str.end());
+                }
+
+                if (!data.empty()) {
+                    queue_write(req, data);
+                }
+            }
+        }
+
+        if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
+            callback = std::get<FunctionPtr>(args[1]);
+        }
+
+        req->request_complete.store(true);
+
+        if (callback) {
+            emit_event(req->handlers, "drain");
+        }
+
+        return std::monostate{};
+    };
+    stream_obj->properties["end"] = {
+        Value{std::make_shared<FunctionValue>("request.end", end_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // pause()
+    auto pause_impl = [req](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        scheduler_run_on_loop([req]() {
+            if (!req->paused.exchange(true)) {
+                uv_read_stop((uv_stream_t*)&req->socket);
+            }
+        });
+        return std::monostate{};
+    };
+    stream_obj->properties["pause"] = {
+        Value{std::make_shared<FunctionValue>("request.pause", pause_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // resume()
+    auto resume_impl = [req](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        scheduler_run_on_loop([req]() {
+            if (req->paused.exchange(false)) {
+                uv_read_start((uv_stream_t*)&req->socket, alloc_buffer, on_read);
+            }
+        });
+        return std::monostate{};
+    };
+    stream_obj->properties["resume"] = {
+        Value{std::make_shared<FunctionValue>("request.resume", resume_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // abort([reason])
+    auto abort_impl = [req](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        std::string reason = "aborted";
+        if (!args.empty() && std::holds_alternative<std::string>(args[0])) {
+            reason = std::get<std::string>(args[0]);
+        }
+
+        scheduler_run_on_loop([req, reason]() {
+            if (!req->closed.exchange(true)) {
+                g_active_http_requests.fetch_sub(1);
+
+                emit_event(req->handlers, "error", Value{reason});
+                emit_event(req->handlers, "close");
+
+#ifdef HAVE_OPENSSL
+                cleanup_ssl(req);
+#endif
+
+                uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
+                    auto* req = static_cast<HttpClientRequest*>(handle->data);
+                    delete req;
+                });
+            }
+        });
+
+        return std::monostate{};
+    };
+    stream_obj->properties["abort"] = {
+        Value{std::make_shared<FunctionValue>("request.abort", abort_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // setHeader(name, value)
+    auto setHeader_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "setHeader(name, value) requires both arguments", token.loc);
+        }
+
+        if (req->headers_sent.load()) {
+            throw SwaziError("Error", "Cannot set headers after they have been sent", token.loc);
+        }
+
+        std::string name = value_to_string_simple(args[0]);
+        std::string value = value_to_string_simple(args[1]);
+
+        req->request_headers[name] = value;
+
+        return std::monostate{};
+    };
+    stream_obj->properties["setHeader"] = {
+        Value{std::make_shared<FunctionValue>("request.setHeader", setHeader_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // getHeader(name)
+    auto getHeader_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "getHeader(name) requires name argument", token.loc);
+        }
+
+        std::string name = value_to_string_simple(args[0]);
+        auto it = req->request_headers.find(name);
+
+        if (it != req->request_headers.end()) {
+            return Value{it->second};
+        }
+
+        return std::monostate{};
+    };
+    stream_obj->properties["getHeader"] = {
+        Value{std::make_shared<FunctionValue>("request.getHeader", getHeader_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // removeHeader(name)
+    auto removeHeader_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "removeHeader(name) requires name argument", token.loc);
+        }
+
+        if (req->headers_sent.load()) {
+            throw SwaziError("Error", "Cannot remove headers after they have been sent", token.loc);
+        }
+
+        std::string name = value_to_string_simple(args[0]);
+        req->request_headers.erase(name);
+
+        return std::monostate{};
+    };
+    stream_obj->properties["removeHeader"] = {
+        Value{std::make_shared<FunctionValue>("request.removeHeader", removeHeader_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // Properties
+    stream_obj->properties["url"] = {Value{url}, false, false, true, tok};
+    stream_obj->properties["method"] = {Value{method}, false, false, true, tok};
+    stream_obj->properties["host"] = {Value{host}, false, false, true, tok};
+    stream_obj->properties["port"] = {Value{static_cast<double>(port)}, false, false, true, tok};
+    stream_obj->properties["path"] = {Value{path}, false, false, true, tok};
+    stream_obj->properties["protocol"] = {Value{protocol}, false, false, true, tok};
+
+    // Start connection on loop thread
+    uv_loop_t* loop = scheduler_get_loop();
+    if (!loop) {
+        delete req;
+        throw SwaziError("RuntimeError", "No event loop available", token.loc);
+    }
+
+    g_active_http_requests.fetch_add(1);
+
+    scheduler_run_on_loop([req, loop, host, port]() {
+        uv_tcp_init(loop, &req->socket);
+        req->socket.data = req;
+        req->connect_req.data = req;
+
+        uv_getaddrinfo_t* addrinfo_req = new uv_getaddrinfo_t;
+        addrinfo_req->data = req;
+
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        int r = uv_getaddrinfo(
+            loop,
+            addrinfo_req,
+            [](uv_getaddrinfo_t* addrinfo_req, int status, struct addrinfo* res) {
+                HttpClientRequest* req = static_cast<HttpClientRequest*>(addrinfo_req->data);
+
+                if (status != 0 || !res) {
+                    g_active_http_requests.fetch_sub(1);
+
+                    std::string error = std::string("DNS lookup failed: ") + uv_strerror(status);
+                    emit_event(req->handlers, "error", Value{error});
+
+                    uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
+                        HttpClientRequest* req = static_cast<HttpClientRequest*>(handle->data);
+                        delete req;
+                    });
+
+                    if (res) uv_freeaddrinfo(res);
+                    delete addrinfo_req;
+                    return;
+                }
+
+                struct sockaddr_in addr;
+                memcpy(&addr, res->ai_addr, sizeof(addr));
+                addr.sin_port = htons(req->port);
+
+                uv_tcp_connect(&req->connect_req, &req->socket,
+                    (const struct sockaddr*)&addr, on_connect);
+
+                uv_freeaddrinfo(res);
+                delete addrinfo_req;
+            },
+            host.c_str(),
+            nullptr,
+            &hints);
+
+        if (r != 0) {
+            g_active_http_requests.fetch_sub(1);
+
+            std::string error = std::string("Failed to start DNS lookup: ") + uv_strerror(r);
+            emit_event(req->handlers, "error", Value{error});
+
+            uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
+                HttpClientRequest* req = static_cast<HttpClientRequest*>(handle->data);
+                delete req;
+            });
+            delete addrinfo_req;
+        }
+    });
+
+    return Value{stream_obj};
+}
+
+// ============================================================================
+// CONVENIENCE WRAPPERS
+// ============================================================================
+
+// http.get(url, options?) -> RequestStream
+Value native_http_get(const std::vector<Value>& args, EnvPtr env, const Token& token, Evaluator* evaluator) {
+    std::vector<Value> modified_args = args;
+
+    if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+        // Options already provided
+    } else {
+        // Create options object with GET method
+        auto opts = std::make_shared<ObjectValue>();
+        opts->properties["method"] = PropertyDescriptor{Value{std::string("GET")}, false, false, false, Token{}};
+        modified_args.push_back(Value{opts});
+    }
+
+    return native_http_open(modified_args, env, token, evaluator);
+}
+
+// http.post(url, data, options?) -> RequestStream
+Value native_http_post(const std::vector<Value>& args, EnvPtr env, const Token& token, Evaluator* evaluator) {
+    if (args.size() < 2) {
+        throw SwaziError("TypeError", "http.post requires url and data", token.loc);
+    }
+
+    auto opts = std::make_shared<ObjectValue>();
+    opts->properties["method"] = PropertyDescriptor{Value{std::string("POST")}, false, false, false, Token{}};
+
+    // Merge user options if provided
+    if (args.size() >= 3 && std::holds_alternative<ObjectPtr>(args[2])) {
+        ObjectPtr user_opts = std::get<ObjectPtr>(args[2]);
+        for (const auto& kv : user_opts->properties) {
+            opts->properties[kv.first] = kv.second;
+        }
+    }
+
+    // Create request
+    std::vector<Value> req_args = {args[0], Value{opts}};
+    Value req_stream = native_http_open(req_args, env, token, evaluator);
+
+    if (!std::holds_alternative<ObjectPtr>(req_stream)) {
+        return req_stream;
+    }
+
+    ObjectPtr stream_obj = std::get<ObjectPtr>(req_stream);
+
+    // Auto-send data when connected
+    auto on_prop = stream_obj->properties.find("on");
+    auto write_prop = stream_obj->properties.find("write");
+    auto end_prop = stream_obj->properties.find("end");
+
+    if (on_prop != stream_obj->properties.end() &&
+        write_prop != stream_obj->properties.end() &&
+        end_prop != stream_obj->properties.end() &&
+        std::holds_alternative<FunctionPtr>(on_prop->second.value) &&
+        std::holds_alternative<FunctionPtr>(write_prop->second.value) &&
+        std::holds_alternative<FunctionPtr>(end_prop->second.value)) {
+        FunctionPtr on_fn = std::get<FunctionPtr>(on_prop->second.value);
+        FunctionPtr write_fn = std::get<FunctionPtr>(write_prop->second.value);
+        FunctionPtr end_fn = std::get<FunctionPtr>(end_prop->second.value);
+
+        // Create connect handler
+        auto connect_handler = [write_fn, end_fn, data = args[1]](
+                                   const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
+            // Write data
+            if (write_fn->is_native && write_fn->native_impl) {
+                write_fn->native_impl({data}, env, token);
+            }
+            // End request
+            if (end_fn->is_native && end_fn->native_impl) {
+                end_fn->native_impl({}, env, token);
+            }
+            return std::monostate{};
+        };
+
+        auto handler_fn = std::make_shared<FunctionValue>(
+            "post_connect_handler", connect_handler, nullptr, Token{});
+
+        // Register connect handler
+        if (on_fn->is_native && on_fn->native_impl) {
+            on_fn->native_impl({Value{std::string("connect")}, Value{handler_fn}}, env, token);
+        }
+    }
+
+    return req_stream;
+}
+
+// ============================================================================
+// EXPORTS REGISTRATION
+// ============================================================================
+
+void native_http_exetended(const ObjectPtr& http_module, Evaluator* evaluator, EnvPtr env) {
+    Token tok{};
+    tok.loc = TokenLocation("<http>", 0, 0, 0);
+
+    // http.open(url, options?)
+    auto open_fn = [evaluator](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        return native_http_open(args, env, token, evaluator);
+    };
+    http_module->properties["open"] = {
+        Value{std::make_shared<FunctionValue>("http.open", open_fn, env, tok)},
+        false, false, false, tok};
+
+    // http.get(url, options?)
+    auto get_fn = [evaluator](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        return native_http_get(args, env, token, evaluator);
+    };
+    http_module->properties["get"] = {
+        Value{std::make_shared<FunctionValue>("http.get", get_fn, env, tok)},
+        false, false, false, tok};
+
+    // http.post(url, data, options?)
+    auto post_fn = [evaluator](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        return native_http_post(args, env, token, evaluator);
+    };
+    http_module->properties["post"] = {
+        Value{std::make_shared<FunctionValue>("http.post", post_fn, env, tok)},
+        false, false, false, tok};
+}
