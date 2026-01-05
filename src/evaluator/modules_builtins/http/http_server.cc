@@ -1,5 +1,4 @@
 // http_server.cc
-// Production-ready HTTP server with llhttp and proper streaming
 
 #include <llhttp.h>
 #include <uv.h>
@@ -155,26 +154,7 @@ struct HttpResponse {
         if (finished) return;
         finished = true;
 
-        bool keep_alive = true;  // Default to keep-alive for HTTP/1.1
-        if (request_headers) {
-            auto conn_it = request_headers->find("connection");
-            if (conn_it != request_headers->end()) {
-                std::string conn = conn_it->second;
-                for (auto& c : conn) c = std::tolower(c);
-                // Explicit close requested
-                if (conn.find("close") != std::string::npos) {
-                    keep_alive = false;
-                }
-            }
-        }
-
-        // Set headers BEFORE sending them
-        if (keep_alive) {
-            headers["Connection"] = "keep-alive";
-            headers["Keep-Alive"] = "timeout=5, max=100";
-        } else {
-            headers["Connection"] = "close";
-        }
+        headers["Connection"] = "close";
 
         if (chunked_mode) {
             if (!headers_sent) {
@@ -365,41 +345,6 @@ struct HttpRequestState {
     size_t max_buffer_size = 16 * 1024 * 1024;  // 16MB max buffer
     size_t current_buffer_size = 0;
     bool backpressure_active = false;
-
-    int requests_on_connection = 0;
-    const int max_requests_per_connection = 100;
-    std::shared_ptr<std::map<std::string, std::string>> request_headers;  // Store request headers
-
-    void reset_for_next_request() {
-        // Reset state for keep-alive
-        method.clear();
-        url.clear();
-        path.clear();
-        query.clear();
-        headers.clear();
-        current_header_field.clear();
-
-        headers_complete = false;
-        message_complete = false;
-        handler_called = false;
-
-        buffered_chunks.clear();
-        draining_buffer = false;
-        current_buffer_size = 0;
-
-        data_listeners.clear();
-        end_listeners.clear();
-        error_listeners.clear();
-
-        // Reset parser
-        llhttp_init(&parser, HTTP_REQUEST, &settings);
-        parser.data = this;
-
-        // Create new response object
-        response = std::make_shared<HttpResponse>();
-        response->client = client;
-        response->request_headers = &headers;
-    }
 
     void check_backpressure() {
         if (!backpressure_active && current_buffer_size > max_buffer_size) {
@@ -835,7 +780,6 @@ static int on_body(llhttp_t* parser, const char* at, size_t length) {
 static int on_message_complete(llhttp_t* parser) {
     auto* state = static_cast<HttpRequestState*>(parser->data);
     state->message_complete = true;
-    state->requests_on_connection++;
 
     // Emit end event
     for (const auto& listener : state->end_listeners) {
@@ -846,27 +790,7 @@ static int on_message_complete(llhttp_t* parser) {
         }
     }
 
-    // Check if we should keep connection alive
-    bool keep_alive = false;
-    auto conn_it = state->headers.find("connection");
-    if (conn_it != state->headers.end()) {
-        std::string conn = conn_it->second;
-        for (auto& c : conn) c = std::tolower(c);
-        if (conn.find("keep-alive") != std::string::npos &&
-            state->requests_on_connection < state->max_requests_per_connection) {
-            keep_alive = true;
-        }
-    }
-
-    if (keep_alive && !state->response->finished) {
-        // Wait for response to be sent, then reset for next request
-        // The connection stays open
-        state->reset_for_next_request();
-    } else if (!keep_alive) {
-        // Close connection after response is sent
-        // (handled by end_response)
-    }
-
+    // Connection will close after response is sent (no keep-alive)
     return 0;
 }
 // ============================================================================
@@ -955,7 +879,6 @@ static void on_connection(uv_stream_t* server, int status) {
         state->evaluator = srv->evaluator;
         state->response = std::make_shared<HttpResponse>();
         state->response->client = (uv_stream_t*)client;
-        state->response->request_headers = &state->headers;
 
         llhttp_settings_init(&state->settings);
         state->settings.on_url = on_url;
