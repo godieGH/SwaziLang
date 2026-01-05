@@ -35,7 +35,7 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
-Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token);
+Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token, Evaluator* evaluator);
 void native_http_exetended(const ObjectPtr& http_module, Evaluator* evaluator, EnvPtr env);
 
 // Network stream helpers (defined in streams.cc, used by HttpAPI.cpp)

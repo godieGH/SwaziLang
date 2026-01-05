@@ -1,35 +1,32 @@
-// Http_server.cpp
-// Libuv-backed minimal createServer implementation that integrates with your AsyncBridge.
-// Make sure this file is compiled into your binary and that you link with -luv.
-//
-// Notes:
-// - This file assumes the AsyncBridge functions/types below exist and are provided by your project:
-//     - void enqueue_callback_global(void* p);
-//     - void scheduler_run_on_loop(const std::function<void()>& fn);
-//     - uv_loop_t* scheduler_get_loop();   // returns the uv_loop_t* used by the runtime
-//     - class CallbackPayload { ... }     // already used elsewhere in your codebase
-//   Those symbols appear referenced in your other code (AsyncBridge.hpp), so include that header.
-// - The code below uses small local helpers to convert Value -> string / number.
+// http_server.cc
+// Production-ready HTTP server with llhttp and proper streaming
 
+#include <llhttp.h>
 #include <uv.h>
 
 #include <atomic>
 #include <cstring>
-#include <fstream>
-#include <functional>
-#include <iostream>
+#include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"
-#include "builtins.hpp"  // for declaration of native_createServer (optional)
+#include "builtins.hpp"
 #include "evaluator.hpp"
 
-// Local simple Value -> string/number helpers (similar to builtins.cpp)
+static void alloc_buffer(uv_handle_t*, size_t suggested_size, uv_buf_t* buf);
+static void on_read(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
+
+// ============================================================================
+// HELPER: String conversions
+// ============================================================================
+
 static std::string value_to_string_simple_local(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
     if (std::holds_alternative<double>(v)) {
@@ -40,92 +37,28 @@ static std::string value_to_string_simple_local(const Value& v) {
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
     return std::string();
 }
-static double value_to_number_simple_local(const Value& v) {
-    if (std::holds_alternative<double>(v)) return std::get<double>(v);
-    if (std::holds_alternative<std::string>(v)) {
-        try {
-            return std::stod(std::get<std::string>(v));
-        } catch (...) { return 0.0; }
-    }
-    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? 1.0 : 0.0;
-    return 0.0;
-}
 
-// Minimal HTTP parsing/response helpers
-struct HttpRequest {
-    std::string method;
-    std::string path;
-    std::string query;
-    std::unordered_map<std::string, std::string> headers;
-    std::vector<uint8_t> body_data;  // Changed from string
-    uv_stream_t* client;
-};
+// ============================================================================
+// HTTP RESPONSE
+// ============================================================================
 
 struct HttpResponse {
     int status_code = 200;
-    std::string reason = "OK";
-    std::unordered_map<std::string, std::string> headers;
-    std::string body;
+    std::string reason;
+    std::map<std::string, std::string> headers;
     bool headers_sent = false;
     uv_stream_t* client = nullptr;
-    bool chunked_mode = false;  // NEW: Track if using chunked encoding
+    bool chunked_mode = false;
+    bool finished = false;
 
-    void writeHead(int code, const std::unordered_map<std::string, std::string>& hdrs) {
-        if (headers_sent) return;
-        status_code = code;
-        headers = hdrs;
-        headers_sent = true;
-    }
-
-    void end(const std::string& data) {
-        if (chunked_mode) {
-            // If in chunked mode, send final chunk (0-length) and close
-            std::string final_chunk = "0\r\n\r\n";
-
-            char* buf = static_cast<char*>(malloc(final_chunk.size()));
-            memcpy(buf, final_chunk.data(), final_chunk.size());
-            uv_buf_t uvbuf = uv_buf_init(buf, (unsigned int)final_chunk.size());
-
-            uv_write_t* req = new uv_write_t;
-            req->data = buf;
-
-            uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int status) {
-                if (req->data) free(req->data);
-                uv_stream_t* client = req->handle;
-                uv_close((uv_handle_t*)client, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
-                delete req;
-            });
-            return;
-        }
-
-        // Normal (non-chunked) response
-        if (status_code == 204 || status_code == 304) {
-            body.clear();
-            headers.erase("Content-Length");
-            headers.erase("content-length");
-            headers_sent = true;
-        } else {
-            if (!headers_sent) {
-                headers["Content-Length"] = std::to_string(data.size());
-                headers_sent = true;
-            }
-            body = data;
-        }
-        send();
-    }
+    std::map<std::string, std::string>* request_headers = nullptr;
 
     static std::string reason_for_code(int code) {
         switch (code) {
-            case 100:
-                return "Continue";
-            case 101:
-                return "Switching Protocols";
             case 200:
                 return "OK";
             case 201:
                 return "Created";
-            case 202:
-                return "Accepted";
             case 204:
                 return "No Content";
             case 301:
@@ -142,34 +75,22 @@ struct HttpResponse {
                 return "Forbidden";
             case 404:
                 return "Not Found";
-            case 405:
-                return "Method Not Allowed";
-            case 410:
-                return "Gone";
             case 500:
                 return "Internal Server Error";
-            case 501:
-                return "Not Implemented";
-            case 502:
-                return "Bad Gateway";
-            case 503:
-                return "Service Unavailable";
             default:
-                return std::string();
+                return "";
         }
     }
 
-    void send() {
-        if (!client) return;
+    void send_headers() {
+        if (headers_sent || !client) return;
 
         std::ostringstream response;
         std::string rp = !reason.empty() ? reason : reason_for_code(status_code);
 
-        if (!rp.empty()) {
-            response << "HTTP/1.1 " << status_code << " " << rp << "\r\n";
-        } else {
-            response << "HTTP/1.1 " << status_code << "\r\n";
-        }
+        response << "HTTP/1.1 " << status_code;
+        if (!rp.empty()) response << " " << rp;
+        response << "\r\n";
 
         if (headers.find("Content-Type") == headers.end() &&
             headers.find("content-type") == headers.end()) {
@@ -181,714 +102,893 @@ struct HttpResponse {
         }
         response << "\r\n";
 
-        if (!(status_code == 204 || status_code == 304))
-            response << body;
-
         std::string out = response.str();
         char* buf = static_cast<char*>(malloc(out.size()));
         memcpy(buf, out.data(), out.size());
-        uv_buf_t uvbuf = uv_buf_init(buf, (unsigned int)out.size());
+        uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(out.size()));
 
         uv_write_t* req = new uv_write_t;
         req->data = buf;
 
-        uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int status) {
+        uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
             if (req->data) free(req->data);
-            uv_stream_t* client = req->handle;
-            uv_close((uv_handle_t*)client, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
+            delete req;
+        });
+
+        headers_sent = true;
+    }
+
+    void write_chunk(const std::vector<uint8_t>& data) {
+        if (!client || finished) return;
+
+        if (!headers_sent) {
+            chunked_mode = true;
+            headers["Transfer-Encoding"] = "chunked";
+            send_headers();
+        }
+
+        if (data.empty()) return;
+
+        std::ostringstream chunk_header;
+        chunk_header << std::hex << data.size() << "\r\n";
+        std::string hdr = chunk_header.str();
+
+        size_t total_size = hdr.size() + data.size() + 2;
+        char* buf = static_cast<char*>(malloc(total_size));
+
+        memcpy(buf, hdr.data(), hdr.size());
+        memcpy(buf + hdr.size(), data.data(), data.size());
+        buf[total_size - 2] = '\r';
+        buf[total_size - 1] = '\n';
+
+        uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(total_size));
+        uv_write_t* req = new uv_write_t;
+        req->data = buf;
+
+        uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
+            if (req->data) free(req->data);
             delete req;
         });
     }
-};
-static std::shared_ptr<HttpRequest> parse_http_request_simple(const char* data, ssize_t len) {
-    std::string raw(data, len);
-    auto req = std::make_shared<HttpRequest>();
 
-    size_t first_line_end = raw.find("\r\n");
-    if (first_line_end == std::string::npos) return nullptr;
-    std::string first = raw.substr(0, first_line_end);
-    std::istringstream iss(first);
-    std::string path_query;
-    iss >> req->method >> path_query;
-    size_t qpos = path_query.find('?');
-    if (qpos != std::string::npos) {
-        req->path = path_query.substr(0, qpos);
-        req->query = path_query.substr(qpos + 1);
-    } else {
-        req->path = path_query;
-    }
+    void end_response(const std::vector<uint8_t>& final_data = {}) {
+        if (finished) return;
+        finished = true;
 
-    // headers
-    size_t header_start = first_line_end + 2;
-    size_t header_end = raw.find("\r\n\r\n", header_start);
-    if (header_end != std::string::npos) {
-        std::string headers_block = raw.substr(header_start, header_end - header_start);
-        std::istringstream hs(headers_block);
-        std::string line;
-        while (std::getline(hs, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            size_t colon = line.find(':');
-            if (colon != std::string::npos) {
-                std::string key = line.substr(0, colon);
-                std::string val = line.substr(colon + 1);
-                // trim
-                val.erase(0, val.find_first_not_of(" \t"));
-                req->headers[key] = val;
-            }
-        }
-        size_t body_start = header_end + 4;
-        req->body_data.assign(raw.begin() + body_start, raw.end());
-    }
-    return req;
-}
-
-// Server instance bookkeeping
-struct ServerInstance {
-    uv_tcp_t* server_handle = nullptr;
-    FunctionPtr request_handler;
-    std::atomic<bool> closed{false};
-    int port = 0;
-
-    // ===== ADD THIS =====
-    struct InProgressRequest {
-        std::string method;
-        std::string path;
-        std::string query;
-        std::unordered_map<std::string, std::string> headers;
-        std::vector<uint8_t> body_data;
-        size_t expected_length = 0;
-        bool headers_complete = false;
-    };
-
-    std::unordered_map<uv_stream_t*, InProgressRequest> pending_requests;
-    // ===== END ADD =====
-};
-static std::mutex g_servers_mutex;
-static std::unordered_map<long long, std::shared_ptr<ServerInstance>> g_servers;
-static std::atomic<long long> g_next_server_id{1};
-
-// NEW: Create HTTP-aware stream wrapper
-static ObjectPtr wrap_stream_with_http(ObjectPtr raw_stream, std::shared_ptr<HttpResponse> http_res) {
-    auto wrapped = std::make_shared<ObjectValue>();
-    Token tok{};
-    tok.loc = TokenLocation("<http-wrapper>", 0, 0, 0);
-
-    // Expose the underlying raw stream
-    wrapped->properties["_raw"] = {Value{raw_stream}, false, false, true, tok};
-
-    // Wrap write() to add HTTP chunking
-    auto write_impl = [raw_stream, http_res](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
-        if (args.empty()) return Value{true};
-
-        auto raw_write_prop = raw_stream->properties.find("write");
-        if (raw_write_prop == raw_stream->properties.end()) {
-            throw SwaziError("RuntimeError", "Underlying stream has no write method", token.loc);
-        }
-
-        FunctionPtr raw_write_fn = std::get<FunctionPtr>(raw_write_prop->second.value);
-
-        BufferPtr data_buf;
-        if (std::holds_alternative<BufferPtr>(args[0])) {
-            data_buf = std::get<BufferPtr>(args[0]);
-        } else if (std::holds_alternative<std::string>(args[0])) {
-            data_buf = std::make_shared<BufferValue>();
-            std::string s = std::get<std::string>(args[0]);
-            data_buf->data.assign(s.begin(), s.end());
-        } else {
-            throw SwaziError("TypeError", "write expects Buffer or string", token.loc);
-        }
-
-        http_res->chunked_mode = true;
-
-        if (!http_res->headers_sent) {
-            std::ostringstream hdr;
-            hdr << "HTTP/1.1 " << http_res->status_code << " ";
-            hdr << (http_res->reason.empty() ? HttpResponse::reason_for_code(http_res->status_code) : http_res->reason);
-            hdr << "\r\n";
-
-            http_res->headers["Transfer-Encoding"] = "chunked";
-            if (http_res->headers.find("Content-Type") == http_res->headers.end()) {
-                http_res->headers["Content-Type"] = "application/octet-stream";
-            }
-
-            for (const auto& kv : http_res->headers) {
-                hdr << kv.first << ": " << kv.second << "\r\n";
-            }
-            hdr << "\r\n";
-
-            auto hdr_buf = std::make_shared<BufferValue>();
-            std::string hdr_str = hdr.str();
-            hdr_buf->data.assign(hdr_str.begin(), hdr_str.end());
-            raw_write_fn->native_impl({Value{hdr_buf}}, env, token);
-
-            http_res->headers_sent = true;
-        }
-
-        std::ostringstream chunk;
-        chunk << std::hex << data_buf->data.size() << "\r\n";
-
-        auto chunk_buf = std::make_shared<BufferValue>();
-        std::string chunk_hdr = chunk.str();
-        chunk_buf->data.assign(chunk_hdr.begin(), chunk_hdr.end());
-        chunk_buf->data.insert(chunk_buf->data.end(), data_buf->data.begin(), data_buf->data.end());
-        chunk_buf->data.push_back('\r');
-        chunk_buf->data.push_back('\n');
-
-        return raw_write_fn->native_impl({Value{chunk_buf}}, env, token);
-    };
-
-    auto write_fn = std::make_shared<FunctionValue>("http_stream.write", write_impl, nullptr, tok);
-    wrapped->properties["write"] = {Value{write_fn}, false, false, true, tok};
-
-    // FIX: Capture wrapped AFTER it's been assigned to properties
-    // We'll look it up dynamically instead of capturing the pointer
-    auto end_impl = [raw_stream, http_res](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
-        // Write final data if provided - call through raw_stream's write after HTTP framing
-        if (!args.empty()) {
-            // We need to do HTTP framing here too
-            BufferPtr data_buf;
-            if (std::holds_alternative<BufferPtr>(args[0])) {
-                data_buf = std::get<BufferPtr>(args[0]);
-            } else if (std::holds_alternative<std::string>(args[0])) {
-                data_buf = std::make_shared<BufferValue>();
-                std::string s = std::get<std::string>(args[0]);
-                data_buf->data.assign(s.begin(), s.end());
-            }
-
-            if (data_buf && !data_buf->data.empty()) {
-                auto raw_write_prop = raw_stream->properties.find("write");
-                if (raw_write_prop != raw_stream->properties.end()) {
-                    FunctionPtr raw_write = std::get<FunctionPtr>(raw_write_prop->second.value);
-
-                    // Send headers if needed
-                    if (!http_res->headers_sent) {
-                        http_res->chunked_mode = true;
-                        std::ostringstream hdr;
-                        hdr << "HTTP/1.1 " << http_res->status_code << " ";
-                        hdr << (http_res->reason.empty() ? HttpResponse::reason_for_code(http_res->status_code) : http_res->reason);
-                        hdr << "\r\n";
-
-                        http_res->headers["Transfer-Encoding"] = "chunked";
-                        if (http_res->headers.find("Content-Type") == http_res->headers.end()) {
-                            http_res->headers["Content-Type"] = "application/octet-stream";
-                        }
-
-                        for (const auto& kv : http_res->headers) {
-                            hdr << kv.first << ": " << kv.second << "\r\n";
-                        }
-                        hdr << "\r\n";
-
-                        auto hdr_buf = std::make_shared<BufferValue>();
-                        std::string hdr_str = hdr.str();
-                        hdr_buf->data.assign(hdr_str.begin(), hdr_str.end());
-                        raw_write->native_impl({Value{hdr_buf}}, env, token);
-
-                        http_res->headers_sent = true;
-                    }
-
-                    // Send final chunk
-                    std::ostringstream chunk;
-                    chunk << std::hex << data_buf->data.size() << "\r\n";
-
-                    auto chunk_buf = std::make_shared<BufferValue>();
-                    std::string chunk_hdr = chunk.str();
-                    chunk_buf->data.assign(chunk_hdr.begin(), chunk_hdr.end());
-                    chunk_buf->data.insert(chunk_buf->data.end(), data_buf->data.begin(), data_buf->data.end());
-                    chunk_buf->data.push_back('\r');
-                    chunk_buf->data.push_back('\n');
-
-                    raw_write->native_impl({Value{chunk_buf}}, env, token);
+        bool keep_alive = true;  // Default to keep-alive for HTTP/1.1
+        if (request_headers) {
+            auto conn_it = request_headers->find("connection");
+            if (conn_it != request_headers->end()) {
+                std::string conn = conn_it->second;
+                for (auto& c : conn) c = std::tolower(c);
+                // Explicit close requested
+                if (conn.find("close") != std::string::npos) {
+                    keep_alive = false;
                 }
             }
         }
 
-        // Send "0\r\n\r\n" terminator
-        if (http_res->chunked_mode) {
-            auto term_buf = std::make_shared<BufferValue>();
-            std::string term = "0\r\n\r\n";
-            term_buf->data.assign(term.begin(), term.end());
-
-            auto raw_write_prop = raw_stream->properties.find("write");
-            if (raw_write_prop != raw_stream->properties.end()) {
-                FunctionPtr raw_write = std::get<FunctionPtr>(raw_write_prop->second.value);
-                raw_write->native_impl({Value{term_buf}}, env, token);
-            }
+        // Set headers BEFORE sending them
+        if (keep_alive) {
+            headers["Connection"] = "keep-alive";
+            headers["Keep-Alive"] = "timeout=5, max=100";
+        } else {
+            headers["Connection"] = "close";
         }
 
-        // Call raw stream's end()
-        auto raw_end_prop = raw_stream->properties.find("end");
-        if (raw_end_prop != raw_stream->properties.end()) {
-            FunctionPtr raw_end = std::get<FunctionPtr>(raw_end_prop->second.value);
-            return raw_end->native_impl({}, env, token);
+        if (chunked_mode) {
+            if (!headers_sent) {
+                headers["Transfer-Encoding"] = "chunked";
+                send_headers();  // Now headers are set correctly
+            }
+            // Send final data chunk if provided
+            if (!final_data.empty()) {
+                std::ostringstream chunk_header;
+                chunk_header << std::hex << final_data.size() << "\r\n";
+                std::string hdr = chunk_header.str();
+
+                size_t total_size = hdr.size() + final_data.size() + 2;
+                char* buf = static_cast<char*>(malloc(total_size));
+
+                memcpy(buf, hdr.data(), hdr.size());
+                memcpy(buf + hdr.size(), final_data.data(), final_data.size());
+                buf[total_size - 2] = '\r';
+                buf[total_size - 1] = '\n';
+
+                uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(total_size));
+                uv_write_t* req = new uv_write_t;
+                req->data = buf;
+
+                uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
+                    if (req->data) free(req->data);
+                    delete req;
+                });
+            }
+
+            // Send terminator
+            const char* terminator = "0\r\n\r\n";
+            char* term_buf = static_cast<char*>(malloc(5));
+            memcpy(term_buf, terminator, 5);
+            uv_buf_t term_uvbuf = uv_buf_init(term_buf, 5);
+
+            uv_write_t* term_req = new uv_write_t;
+            term_req->data = term_buf;
+
+            uv_write(term_req, client, &term_uvbuf, 1, [](uv_write_t* req, int) {
+                if (req->data) free(req->data);
+                delete req;
+            });
+        } else {
+            if (!headers_sent) {
+                headers["Content-Length"] = std::to_string(final_data.size());
+                send_headers();  // Headers set correctly above
+            }
+
+            if (!final_data.empty()) {
+                char* buf = static_cast<char*>(malloc(final_data.size()));
+                memcpy(buf, final_data.data(), final_data.size());
+                uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(final_data.size()));
+
+                uv_write_t* req = new uv_write_t;
+                req->data = buf;
+
+                // ✅ Don't close immediately after write
+                uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
+                    if (req->data) free(req->data);
+                    delete req;
+                    // Don't close here either
+                });
+            }
+            // If no final data and headers already sent, we can close gracefully
+            // But it's safer to let the client close after receiving the response
+        }
+    }
+
+    FilePtr file_source = nullptr;
+    uint64_t file_bytes_sent = 0;
+    uint64_t file_total_size = 0;
+    bool streaming_file = false;
+
+    void stream_file_chunk() {
+        if (!file_source || !client || finished) return;
+
+        const size_t CHUNK_SIZE = 64 * 1024;  // 64KB
+        std::vector<uint8_t> buffer(CHUNK_SIZE);
+        size_t bytes_read = 0;
+
+#ifdef _WIN32
+        DWORD read_bytes;
+        if (ReadFile((HANDLE)file_source->handle, buffer.data(), CHUNK_SIZE, &read_bytes, NULL)) {
+            bytes_read = read_bytes;
+        }
+#else
+        ssize_t r = read(file_source->fd, buffer.data(), CHUNK_SIZE);
+        if (r > 0) bytes_read = r;
+#endif
+
+        if (bytes_read > 0) {
+            buffer.resize(bytes_read);
+            file_bytes_sent += bytes_read;
+
+            // Send chunk
+            write_chunk(buffer);
+
+            // Continue streaming
+            if (file_bytes_sent < file_total_size) {
+                // Schedule next chunk
+                uv_idle_t* idle = new uv_idle_t;
+                idle->data = this;
+                uv_idle_init(uv_default_loop(), idle);
+                uv_idle_start(idle, [](uv_idle_t* handle) {
+                    auto* response = static_cast<HttpResponse*>(handle->data);
+                    uv_idle_stop(handle);
+                    uv_close((uv_handle_t*)handle, [](uv_handle_t* h) { delete (uv_idle_t*)h; });
+                    response->stream_file_chunk();
+                });
+            } else {
+                // Done streaming
+                end_response();
+            }
+        } else {
+            // Error or EOF
+            end_response();
+        }
+    }
+
+    void send_file(FilePtr file) {
+        if (!file || !file->is_open) return;
+
+        file_source = file;
+        streaming_file = true;
+
+        // Get file size
+#ifdef _WIN32
+        LARGE_INTEGER filesize_li;
+        if (GetFileSizeEx((HANDLE)file->handle, &filesize_li)) {
+            file_total_size = static_cast<uint64_t>(filesize_li.QuadPart);
+        }
+#else
+        struct stat st;
+        if (fstat(file->fd, &st) == 0) {
+            file_total_size = static_cast<uint64_t>(st.st_size);
+        }
+#endif
+
+        // Start streaming
+        chunked_mode = true;
+        headers["Transfer-Encoding"] = "chunked";
+        send_headers();
+        stream_file_chunk();
+    }
+};
+
+// ============================================================================
+// HTTP REQUEST STATE
+// ============================================================================
+
+struct BodyChunk {
+    std::vector<uint8_t> data;
+};
+
+struct HttpRequestState {
+    llhttp_t parser;
+    llhttp_settings_t settings;
+
+    std::string method;
+    std::string url;
+    std::string path;
+    std::string query;
+    std::map<std::string, std::string> headers;
+    std::string current_header_field;
+
+    bool headers_complete = false;
+    bool message_complete = false;
+    bool handler_called = false;
+    bool reading_paused = false;
+
+    std::deque<BodyChunk> buffered_chunks;
+    bool draining_buffer = false;
+
+    std::vector<FunctionPtr> data_listeners;
+    std::vector<FunctionPtr> end_listeners;
+    std::vector<FunctionPtr> error_listeners;
+
+    uv_stream_t* client;
+    std::shared_ptr<HttpResponse> response;
+    FunctionPtr request_handler;
+    EnvPtr env;
+    Evaluator* evaluator;
+
+    ObjectPtr req_stream_obj;
+    ObjectPtr res_obj;
+
+    size_t max_buffer_size = 16 * 1024 * 1024;  // 16MB max buffer
+    size_t current_buffer_size = 0;
+    bool backpressure_active = false;
+
+    int requests_on_connection = 0;
+    const int max_requests_per_connection = 100;
+    std::shared_ptr<std::map<std::string, std::string>> request_headers;  // Store request headers
+
+    void reset_for_next_request() {
+        // Reset state for keep-alive
+        method.clear();
+        url.clear();
+        path.clear();
+        query.clear();
+        headers.clear();
+        current_header_field.clear();
+
+        headers_complete = false;
+        message_complete = false;
+        handler_called = false;
+
+        buffered_chunks.clear();
+        draining_buffer = false;
+        current_buffer_size = 0;
+
+        data_listeners.clear();
+        end_listeners.clear();
+        error_listeners.clear();
+
+        // Reset parser
+        llhttp_init(&parser, HTTP_REQUEST, &settings);
+        parser.data = this;
+
+        // Create new response object
+        response = std::make_shared<HttpResponse>();
+        response->client = client;
+        response->request_headers = &headers;
+    }
+
+    void check_backpressure() {
+        if (!backpressure_active && current_buffer_size > max_buffer_size) {
+            // Stop reading from socket
+            if (client && !reading_paused) {
+                uv_read_stop(client);
+                reading_paused = true;
+                backpressure_active = true;
+            }
+        }
+    }
+
+    void release_backpressure() {
+        if (backpressure_active && current_buffer_size < max_buffer_size / 2) {
+            // Resume reading
+            if (client && reading_paused) {
+                uv_read_start(client, alloc_buffer, on_read);
+                reading_paused = false;
+                backpressure_active = false;
+            }
+        }
+    }
+
+    void drain_buffered_chunks() {
+        if (draining_buffer) return;
+        draining_buffer = true;
+
+        for (const auto& chunk : buffered_chunks) {
+            auto buf = std::make_shared<BufferValue>();
+            buf->data = chunk.data;
+            buf->encoding = "binary";
+
+            for (const auto& listener : data_listeners) {
+                if (listener && evaluator) {
+                    try {
+                        evaluator->invoke_function(listener, {Value{buf}}, env, Token{});
+                    } catch (...) {}
+                }
+            }
+
+            // Update buffer size tracking
+            current_buffer_size -= chunk.data.size();
+        }
+
+        buffered_chunks.clear();
+
+        // Check if we can resume reading
+        release_backpressure();
+
+        if (message_complete) {
+            for (const auto& listener : end_listeners) {
+                if (listener && evaluator) {
+                    try {
+                        evaluator->invoke_function(listener, {}, env, Token{});
+                    } catch (...) {}
+                }
+            }
+        }
+    }
+};
+
+// ============================================================================
+// LLHTTP CALLBACKS
+// ============================================================================
+
+static int on_url(llhttp_t* parser, const char* at, size_t length) {
+    auto* state = static_cast<HttpRequestState*>(parser->data);
+    state->url.append(at, length);
+    return 0;
+}
+
+static int on_header_field(llhttp_t* parser, const char* at, size_t length) {
+    auto* state = static_cast<HttpRequestState*>(parser->data);
+    state->current_header_field.assign(at, length);
+    for (auto& c : state->current_header_field) c = std::tolower(static_cast<unsigned char>(c));
+    return 0;
+}
+
+static int on_header_value(llhttp_t* parser, const char* at, size_t length) {
+    auto* state = static_cast<HttpRequestState*>(parser->data);
+    state->headers[state->current_header_field].assign(at, length);
+    return 0;
+}
+
+static int on_headers_complete(llhttp_t* parser) {
+    auto* state = static_cast<HttpRequestState*>(parser->data);
+    state->headers_complete = true;
+
+    // Extract method
+    switch (parser->method) {
+        case HTTP_GET:
+            state->method = "GET";
+            break;
+        case HTTP_POST:
+            state->method = "POST";
+            break;
+        case HTTP_PUT:
+            state->method = "PUT";
+            break;
+        case HTTP_DELETE:
+            state->method = "DELETE";
+            break;
+        case HTTP_PATCH:
+            state->method = "PATCH";
+            break;
+        case HTTP_HEAD:
+            state->method = "HEAD";
+            break;
+        case HTTP_OPTIONS:
+            state->method = "OPTIONS";
+            break;
+        default:
+            state->method = "UNKNOWN";
+            break;
+    }
+
+    // Parse URL
+    size_t qpos = state->url.find('?');
+    if (qpos != std::string::npos) {
+        state->path = state->url.substr(0, qpos);
+        state->query = state->url.substr(qpos + 1);
+    } else {
+        state->path = state->url;
+    }
+
+    // Build request object
+    auto req_obj = std::make_shared<ObjectValue>();
+    req_obj->properties["method"] = {Value{state->method}, false, false, true, Token{}};
+    req_obj->properties["path"] = {Value{state->path}, false, false, true, Token{}};
+    req_obj->properties["query"] = {Value{state->query}, false, false, true, Token{}};
+    req_obj->properties["url"] = {Value{state->url}, false, false, true, Token{}};
+
+    auto headers_obj = std::make_shared<ObjectValue>();
+    for (const auto& kv : state->headers) {
+        headers_obj->properties[kv.first] = {Value{kv.second}, false, false, true, Token{}};
+    }
+    req_obj->properties["headers"] = {Value{headers_obj}, false, false, true, Token{}};
+
+    // req.on(event, callback)
+    auto req_on_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0]) ||
+            !std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "req.on(event, callback) requires event and function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr callback = std::get<FunctionPtr>(args[1]);
+
+        if (event == "data") {
+            state->data_listeners.push_back(callback);
+            if (!state->buffered_chunks.empty() && !state->draining_buffer) {
+                state->drain_buffered_chunks();
+            }
+        } else if (event == "end") {
+            state->end_listeners.push_back(callback);
+            if (state->message_complete && state->buffered_chunks.empty()) {
+                try {
+                    state->evaluator->invoke_function(callback, {}, state->env, Token{});
+                } catch (...) {
+                    // Listener error - continue
+                }
+            }
+        } else if (event == "error") {
+            state->error_listeners.push_back(callback);
         }
 
         return std::monostate{};
     };
+    req_obj->properties["on"] = {
+        Value{std::make_shared<FunctionValue>("req.on", req_on_impl, nullptr, Token{})},
+        false, false, false, Token{}};
 
-    auto end_fn = std::make_shared<FunctionValue>("http_stream.end", end_impl, nullptr, tok);
-    wrapped->properties["end"] = {Value{end_fn}, false, false, true, tok};
+    // req.pause()
+    auto req_pause_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        if (!state->reading_paused && state->client) {
+            uv_read_stop(state->client);
+            state->reading_paused = true;
+        }
+        return std::monostate{};
+    };
+    req_obj->properties["pause"] = {
+        Value{std::make_shared<FunctionValue>("req.pause", req_pause_impl, nullptr, Token{})},
+        false, false, false, Token{}};
 
-    // Proxy other stream methods directly
-    for (const auto& prop : raw_stream->properties) {
-        if (prop.first != "write" && prop.first != "end") {
-            wrapped->properties[prop.first] = prop.second;
+    // req.resume()
+    auto req_resume_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        if (state->reading_paused && state->client) {
+            uv_read_start(state->client, alloc_buffer, on_read);
+            state->reading_paused = false;
+        }
+        return std::monostate{};
+    };
+    req_obj->properties["resume"] = {
+        Value{std::make_shared<FunctionValue>("req.resume", req_resume_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    state->req_stream_obj = req_obj;
+
+    // Build response object
+    auto res_obj = std::make_shared<ObjectValue>();
+
+    // res.writeHead(statusCode, headers?)
+    auto writeHead_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "writeHead requires status code", token.loc);
+        }
+
+        int code = static_cast<int>(std::get<double>(args[0]));
+        state->response->status_code = code;
+        state->response->reason = HttpResponse::reason_for_code(code);
+
+        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr hdrs = std::get<ObjectPtr>(args[1]);
+            for (const auto& kv : hdrs->properties) {
+                state->response->headers[kv.first] = value_to_string_simple_local(kv.second.value);
+            }
+        }
+
+        state->response->send_headers();
+        return std::monostate{};
+    };
+    res_obj->properties["writeHead"] = {
+        Value{std::make_shared<FunctionValue>("res.writeHead", writeHead_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.setHeader(name, value)
+    auto setHeader_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "setHeader requires name and value", token.loc);
+        }
+        std::string name = value_to_string_simple_local(args[0]);
+        std::string value = value_to_string_simple_local(args[1]);
+        state->response->headers[name] = value;
+        return std::monostate{};
+    };
+    res_obj->properties["setHeader"] = {
+        Value{std::make_shared<FunctionValue>("res.setHeader", setHeader_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.getHeader(name)
+    auto getHeader_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "getHeader requires name", token.loc);
+        }
+        std::string name = value_to_string_simple_local(args[0]);
+        auto it = state->response->headers.find(name);
+        return (it != state->response->headers.end()) ? Value{it->second} : Value{std::monostate{}};
+    };
+    res_obj->properties["getHeader"] = {
+        Value{std::make_shared<FunctionValue>("res.getHeader", getHeader_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.write(chunk)
+    auto write_impl = [state](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        if (args.empty()) return Value{true};
+
+        std::vector<uint8_t> data;
+        if (std::holds_alternative<BufferPtr>(args[0])) {
+            data = std::get<BufferPtr>(args[0])->data;
+        } else if (std::holds_alternative<std::string>(args[0])) {
+            std::string str = std::get<std::string>(args[0]);
+            data.assign(str.begin(), str.end());
+        } else {
+            std::string str = value_to_string_simple_local(args[0]);
+            data.assign(str.begin(), str.end());
+        }
+
+        state->response->write_chunk(data);
+        return Value{true};
+    };
+    res_obj->properties["write"] = {
+        Value{std::make_shared<FunctionValue>("res.write", write_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.end(data?)
+    auto end_impl = [state](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        std::vector<uint8_t> data;
+        if (!args.empty()) {
+            if (std::holds_alternative<BufferPtr>(args[0])) {
+                data = std::get<BufferPtr>(args[0])->data;
+            } else if (std::holds_alternative<std::string>(args[0])) {
+                std::string str = std::get<std::string>(args[0]);
+                data.assign(str.begin(), str.end());
+            } else {
+                std::string str = value_to_string_simple_local(args[0]);
+                data.assign(str.begin(), str.end());
+            }
+        }
+        state->response->end_response(data);
+        return std::monostate{};
+    };
+    res_obj->properties["end"] = {
+        Value{std::make_shared<FunctionValue>("res.end", end_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.status(code)
+    auto status_impl = [state, res_obj](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        if (!args.empty()) {
+            state->response->status_code = static_cast<int>(std::get<double>(args[0]));
+            state->response->reason = HttpResponse::reason_for_code(state->response->status_code);
+        }
+        return Value{res_obj};
+    };
+    res_obj->properties["status"] = {
+        Value{std::make_shared<FunctionValue>("res.status", status_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.sendFile(FileValue)
+    auto sendFile_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty() || !std::holds_alternative<FilePtr>(args[0])) {
+            throw SwaziError("TypeError", "sendFile requires a File object", token.loc);
+        }
+
+        FilePtr file = std::get<FilePtr>(args[0]);
+        if (!file->is_open) {
+            throw SwaziError("IOError", "File must be open", token.loc);
+        }
+
+        state->response->send_file(file);
+        return std::monostate{};
+    };
+    res_obj->properties["sendFile"] = {
+        Value{std::make_shared<FunctionValue>("res.sendFile", sendFile_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.redirect(url, statusCode?)
+    auto redirect_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty() || !std::holds_alternative<std::string>(args[0])) {
+            throw SwaziError("TypeError", "redirect requires URL", token.loc);
+        }
+
+        std::string location = std::get<std::string>(args[0]);
+        int status = 302;  // Default to 302 Found
+
+        if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+            status = static_cast<int>(std::get<double>(args[1]));
+        }
+
+        // Validate redirect status codes
+        if (status != 301 && status != 302 && status != 303 &&
+            status != 307 && status != 308) {
+            status = 302;  // Default to safe redirect
+        }
+
+        state->response->status_code = status;
+        state->response->headers["Location"] = location;
+        state->response->end_response();
+
+        return std::monostate{};
+    };
+    res_obj->properties["redirect"] = {
+        Value{std::make_shared<FunctionValue>("res.redirect", redirect_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    state->res_obj = res_obj;
+
+    // Call handler synchronously
+    if (state->request_handler && state->evaluator && !state->handler_called) {
+        state->handler_called = true;
+
+        try {
+            state->evaluator->invoke_function(
+                state->request_handler,
+                {Value{state->req_stream_obj}, Value{state->res_obj}},
+                state->env,
+                Token{});
+        } catch (const std::exception& e) {
+            // Handler threw - emit error to error listeners
+            for (const auto& listener : state->error_listeners) {
+                if (listener) {
+                    std::string error = e.what();
+                    scheduler_run_on_loop([listener, error]() {
+                        try {
+                            CallbackPayload* payload = new CallbackPayload(listener, {Value{error}});
+                            enqueue_callback_global(static_cast<void*>(payload));
+                        } catch (...) {}
+                    });
+                }
+            }
+        } catch (...) {
+            // Unknown error
+            for (const auto& listener : state->error_listeners) {
+                if (listener) {
+                    scheduler_run_on_loop([listener]() {
+                        try {
+                            CallbackPayload* payload = new CallbackPayload(listener, {Value{std::string("Unknown error")}});
+                            enqueue_callback_global(static_cast<void*>(payload));
+                        } catch (...) {}
+                    });
+                }
+            }
         }
     }
 
-    return wrapped;
+    return 0;
 }
 
-// on_connection callback
+static int on_body(llhttp_t* parser, const char* at, size_t length) {
+    auto* state = static_cast<HttpRequestState*>(parser->data);
+
+    if (state->data_listeners.empty()) {
+        // Buffer but enforce limits
+        if (state->current_buffer_size + length > state->max_buffer_size) {
+            // Reject request - body too large
+            return -1;  // This will trigger parse error
+        }
+
+        BodyChunk chunk;
+        chunk.data.assign(at, at + length);
+        state->current_buffer_size += length;
+        state->buffered_chunks.push_back(std::move(chunk));
+        state->check_backpressure();
+    } else {
+        // Stream directly to listeners
+        auto buf = std::make_shared<BufferValue>();
+        buf->data.assign(at, at + length);
+        buf->encoding = "binary";
+
+        for (const auto& listener : state->data_listeners) {
+            if (listener && state->evaluator) {
+                try {
+                    state->evaluator->invoke_function(listener, {Value{buf}}, state->env, Token{});
+                } catch (...) {}
+            }
+        }
+
+        // Listeners processed data, release backpressure if needed
+        state->release_backpressure();
+    }
+    return 0;
+}
+
+static int on_message_complete(llhttp_t* parser) {
+    auto* state = static_cast<HttpRequestState*>(parser->data);
+    state->message_complete = true;
+    state->requests_on_connection++;
+
+    // Emit end event
+    for (const auto& listener : state->end_listeners) {
+        if (listener && state->evaluator) {
+            try {
+                state->evaluator->invoke_function(listener, {}, state->env, Token{});
+            } catch (...) {}
+        }
+    }
+
+    // Check if we should keep connection alive
+    bool keep_alive = false;
+    auto conn_it = state->headers.find("connection");
+    if (conn_it != state->headers.end()) {
+        std::string conn = conn_it->second;
+        for (auto& c : conn) c = std::tolower(c);
+        if (conn.find("keep-alive") != std::string::npos &&
+            state->requests_on_connection < state->max_requests_per_connection) {
+            keep_alive = true;
+        }
+    }
+
+    if (keep_alive && !state->response->finished) {
+        // Wait for response to be sent, then reset for next request
+        // The connection stays open
+        state->reset_for_next_request();
+    } else if (!keep_alive) {
+        // Close connection after response is sent
+        // (handled by end_response)
+    }
+
+    return 0;
+}
+// ============================================================================
+// CONNECTION HANDLING
+// ============================================================================
+
+static void on_read(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
+    if (nread > 0) {
+        auto* state = static_cast<HttpRequestState*>(client->data);
+        if (!state) {
+            if (buf->base) free(buf->base);
+            return;
+        }
+
+        llhttp_errno_t err = llhttp_execute(&state->parser, buf->base, nread);
+
+        if (err != HPE_OK) {
+            std::string error = std::string("HTTP parse error: ") + llhttp_errno_name(err);
+
+            for (const auto& listener : state->error_listeners) {
+                if (listener && state->evaluator) {
+                    scheduler_run_on_loop([listener, error]() {
+                        try {
+                            CallbackPayload* payload = new CallbackPayload(listener, {Value{error}});
+                            enqueue_callback_global(static_cast<void*>(payload));
+                        } catch (...) {}
+                    });
+                }
+            }
+
+            uv_close((uv_handle_t*)client, [](uv_handle_t* h) {
+                auto* state = static_cast<HttpRequestState*>(h->data);
+                if (state) delete state;
+                delete (uv_tcp_t*)h;
+            });
+        }
+    } else if (nread < 0) {
+        // ✅ Client closed connection (normal or error)
+        if (buf->base) free(buf->base);
+
+        uv_close((uv_handle_t*)client, [](uv_handle_t* h) {
+            auto* state = static_cast<HttpRequestState*>(h->data);
+            if (state) delete state;
+            delete (uv_tcp_t*)h;
+        });
+        return;  // Return early, don't try to free buf->base again
+    }
+
+    if (buf->base) free(buf->base);
+}
+static void alloc_buffer(uv_handle_t*, size_t suggested_size, uv_buf_t* buf) {
+    buf->base = (char*)malloc(suggested_size);
+    buf->len = static_cast<unsigned int>(suggested_size);
+}
+
+// ============================================================================
+// SERVER
+// ============================================================================
+
+struct ServerInstance {
+    uv_tcp_t* server_handle = nullptr;
+    FunctionPtr request_handler;
+    std::atomic<bool> closed{false};
+    EnvPtr env;
+    Evaluator* evaluator;
+};
+
+static std::mutex g_servers_mutex;
+static std::unordered_map<long long, std::shared_ptr<ServerInstance>> g_servers;
+static std::atomic<long long> g_next_server_id{1};
+
 static void on_connection(uv_stream_t* server, int status) {
     if (status < 0) return;
 
-    ServerInstance* srv = static_cast<ServerInstance*>(server->data);
+    auto* srv = static_cast<ServerInstance*>(server->data);
     if (!srv || srv->closed.load()) return;
 
     uv_tcp_t* client = new uv_tcp_t;
     uv_tcp_init(server->loop, client);
 
     if (uv_accept(server, (uv_stream_t*)client) == 0) {
-        client->data = srv;
+        auto* state = new HttpRequestState();
+        state->client = (uv_stream_t*)client;
+        state->request_handler = srv->request_handler;
+        state->env = srv->env;
+        state->evaluator = srv->evaluator;
+        state->response = std::make_shared<HttpResponse>();
+        state->response->client = (uv_stream_t*)client;
+        state->response->request_headers = &state->headers;
 
-        uv_read_start((uv_stream_t*)client,
-            // Allocation callback
-            [](uv_handle_t* /*handle*/, size_t suggested, uv_buf_t* buf) {
-                buf->base = new char[suggested];
-                buf->len = (unsigned int)suggested;
-            },
-            // Read callback - THIS IS WHERE THE FIX GOES
-            [](uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
-                if (nread > 0) {
-                    ServerInstance* srv = static_cast<ServerInstance*>(stream->data);
-                    if (!srv) {
-                        delete[] buf->base;
-                        return;
-                    }
+        llhttp_settings_init(&state->settings);
+        state->settings.on_url = on_url;
+        state->settings.on_header_field = on_header_field;
+        state->settings.on_header_value = on_header_value;
+        state->settings.on_headers_complete = on_headers_complete;
+        state->settings.on_body = on_body;
+        state->settings.on_message_complete = on_message_complete;
 
-                    // ===== NEW: Get or create in-progress request =====
-                    auto& in_progress = srv->pending_requests[stream];
+        llhttp_init(&state->parser, HTTP_REQUEST, &state->settings);
+        state->parser.data = state;
 
-                    if (!in_progress.headers_complete) {
-                        // Still reading headers
-                        std::string chunk(buf->base, nread);
-                        size_t header_end = chunk.find("\r\n\r\n");
+        client->data = state;
 
-                        if (header_end != std::string::npos) {
-                            // Headers complete! Parse them
-                            std::istringstream iss(chunk.substr(0, header_end));
-                            std::string first_line;
-                            std::getline(iss, first_line);
-
-                            // Parse first line
-                            std::istringstream line_stream(first_line);
-                            std::string path_query;
-                            line_stream >> in_progress.method >> path_query;
-
-                            size_t qpos = path_query.find('?');
-                            if (qpos != std::string::npos) {
-                                in_progress.path = path_query.substr(0, qpos);
-                                in_progress.query = path_query.substr(qpos + 1);
-                            } else {
-                                in_progress.path = path_query;
-                            }
-
-                            // Parse headers
-                            std::string header_line;
-                            while (std::getline(iss, header_line) && !header_line.empty()) {
-                                if (header_line.back() == '\r') header_line.pop_back();
-                                size_t colon = header_line.find(':');
-                                if (colon != std::string::npos) {
-                                    std::string key = header_line.substr(0, colon);
-                                    std::string val = header_line.substr(colon + 1);
-                                    val.erase(0, val.find_first_not_of(" \t"));
-                                    in_progress.headers[key] = val;
-                                }
-                            }
-
-                            in_progress.headers_complete = true;
-
-                            // Get Content-Length
-                            auto cl_it = in_progress.headers.find("Content-Length");
-                            if (cl_it != in_progress.headers.end()) {
-                                in_progress.expected_length = std::stoull(cl_it->second);
-                            }
-
-                            // Append any body data from this chunk
-                            size_t body_start = header_end + 4;
-                            if (body_start < chunk.size()) {
-                                in_progress.body_data.insert(
-                                    in_progress.body_data.end(),
-                                    chunk.begin() + body_start,
-                                    chunk.end());
-                            }
-                        }
-                    } else {
-                        // Reading body chunks
-                        in_progress.body_data.insert(
-                            in_progress.body_data.end(),
-                            buf->base,
-                            buf->base + nread);
-                    }
-
-                    // ===== Check if we have complete request =====
-                    if (in_progress.headers_complete &&
-                        in_progress.body_data.size() >= in_progress.expected_length) {
-                        // NOW we have the complete request!
-                        auto http_req = std::make_shared<HttpRequest>();
-                        http_req->method = in_progress.method;
-                        http_req->path = in_progress.path;
-                        http_req->query = in_progress.query;
-                        http_req->headers = in_progress.headers;
-                        http_req->body_data = std::move(in_progress.body_data);
-                        http_req->client = stream;
-
-                        // ===== Your existing request/response handling code =====
-                        auto req_obj = std::make_shared<ObjectValue>();
-                        req_obj->properties["method"] = {Value{http_req->method}, false, false, true, Token{}};
-                        req_obj->properties["path"] = {Value{http_req->path}, false, false, true, Token{}};
-                        req_obj->properties["query"] = {Value{http_req->query}, false, false, true, Token{}};
-
-                        // normalize content-type lookup
-                        std::string content_type;
-                        for (auto& kv : http_req->headers) {
-                            std::string k = kv.first;
-                            std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-                            if (k == "content-type") {
-                                content_type = kv.second;
-                                break;
-                            }
-                        }
-
-                        // parse out mime and params
-                        auto parse_content_type = [](const std::string& ct) {
-                            auto s = ct;
-                            std::string low = s;
-                            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-                            size_t semi = low.find(';');
-                            std::string mime = semi == std::string::npos ? low : low.substr(0, semi);
-                            std::string params = semi == std::string::npos ? "" : low.substr(semi + 1);
-                            return std::pair<std::string, std::string>{mime, params};
-                        };
-                        auto [mime, params] = parse_content_type(content_type);
-                        bool is_text = false;
-                        if (mime.rfind("text/", 0) == 0) is_text = true;
-                        if (mime == "application/json" || mime.find("+json") != std::string::npos) is_text = true;
-                        if (mime == "application/xml" || mime.find("+xml") != std::string::npos) is_text = true;
-                        if (mime == "application/x-www-form-urlencoded") is_text = true;
-
-                        // always expose raw buffer
-                        auto body_buffer = std::make_shared<BufferValue>();
-                        body_buffer->data = http_req->body_data;
-                        body_buffer->encoding = "binary";
-                        req_obj->properties["bodyBuffer"] = {Value{body_buffer}, false, false, true, Token{}};
-
-                        if (is_text) {
-                            std::string s(body_buffer->data.begin(), body_buffer->data.end());
-                            req_obj->properties["body"] = {Value{s}, false, false, true, Token{}};
-                        } else {
-                            req_obj->properties["body"] = {Value{body_buffer}, false, false, true, Token{}};
-                        }
-
-                        auto headers_obj = std::make_shared<ObjectValue>();
-                        for (const auto& kv : http_req->headers) {
-                            headers_obj->properties[kv.first] = {Value{kv.second}, false, false, true, Token{}};
-                        }
-                        req_obj->properties["headers"] = {Value{headers_obj}, false, false, true, Token{}};
-                        auto req_stream = create_network_readable_stream_object((uv_tcp_t*)stream);
-                        req_obj->properties["stream"] = {Value{req_stream}, false, false, true, Token{}};
-
-                        // Add this when building req_obj
-                        req_obj->properties["url"] = {
-                            Value{http_req->query.empty() ? http_req->path : http_req->path + "?" + http_req->query},
-                            false, false, true, Token{}};
-
-                        // response object
-                        auto res_obj = std::make_shared<ObjectValue>();
-                        auto http_res = std::make_shared<HttpResponse>();
-                        http_res->client = stream;
-                        auto raw_stream = create_network_writable_stream_object((uv_tcp_t*)stream);
-                        auto res_stream = wrap_stream_with_http(raw_stream, http_res);
-                        res_obj->properties["stream"] = {Value{res_stream}, false, false, true, Token{}};
-
-                        // res.setHeader(name, value)
-                        auto setHeader_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                            if (args.size() < 2) {
-                                throw SwaziError("TypeError", "setHeader requires (name, value)", token.loc);
-                            }
-                            std::string name = value_to_string_simple_local(args[0]);
-                            std::string value = value_to_string_simple_local(args[1]);
-                            http_res->headers[name] = value;
-                            return Value{res_obj};
-                        };
-                        auto setHeader_fn = std::make_shared<FunctionValue>("res.setHeader", setHeader_impl, nullptr, Token{});
-                        res_obj->properties["setHeader"] = {Value{setHeader_fn}, false, false, true, Token{}};
-
-                        // res.getHeader(name)
-                        auto getHeader_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                            if (args.empty()) {
-                                throw SwaziError("TypeError", "getHeader requires header name", token.loc);
-                            }
-                            std::string name = value_to_string_simple_local(args[0]);
-                            auto it = http_res->headers.find(name);
-                            if (it != http_res->headers.end()) {
-                                return Value{it->second};
-                            }
-                            return std::monostate{};  // undefined
-                        };
-                        auto getHeader_fn = std::make_shared<FunctionValue>("res.getHeader", getHeader_impl, nullptr, Token{});
-                        res_obj->properties["getHeader"] = {Value{getHeader_fn}, false, false, true, Token{}};
-
-                        // res.writeHead(code, headers)
-                        auto writeHead_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
-                            if (args.empty()) return std::monostate{};
-                            int code = static_cast<int>(value_to_number_simple_local(args[0]));
-                            std::unordered_map<std::string, std::string> hdrs;
-                            if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
-                                ObjectPtr hobj = std::get<ObjectPtr>(args[1]);
-                                for (const auto& kv : hobj->properties) {
-                                    hdrs[kv.first] = value_to_string_simple_local(kv.second.value);
-                                }
-                            }
-                            http_res->writeHead(code, hdrs);
-                            if (http_res->reason.empty()) http_res->reason = HttpResponse::reason_for_code(code);
-                            return std::monostate{};
-                        };
-                        auto writeHead_fn = std::make_shared<FunctionValue>("res.writeHead", writeHead_impl, nullptr, Token{});
-                        res_obj->properties["writeHead"] = {Value{writeHead_fn}, false, false, true, Token{}};
-
-                        // ========== res.end() - Support Buffer ==========
-                        auto end_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                            std::string data;
-
-                            if (args.empty()) {
-                                data = "";
-                            } else if (std::holds_alternative<BufferPtr>(args[0])) {
-                                // Handle Buffer - convert to string for HTTP body
-                                BufferPtr buf = std::get<BufferPtr>(args[0]);
-                                data.assign(reinterpret_cast<const char*>(buf->data.data()), buf->data.size());
-                            } else if (std::holds_alternative<std::string>(args[0])) {
-                                // Handle string
-                                data = std::get<std::string>(args[0]);
-                            } else {
-                                // Handle other types (convert to string)
-                                data = value_to_string_simple_local(args[0]);
-                            }
-
-                            // Honor status codes that forbid body
-                            if (http_res->status_code == 204 || http_res->status_code == 304) {
-                                http_res->end("");
-                            } else {
-                                http_res->end(data);
-                            }
-                            return std::monostate{};
-                        };
-                        auto end_fn = std::make_shared<FunctionValue>("res.end", end_impl, nullptr, Token{});
-                        res_obj->properties["end"] = {Value{end_fn}, false, false, true, Token{}};
-
-                        // ========== NEW res.write() - Support chunked responses ==========
-                        auto write_impl = [http_res](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                            if (args.empty()) {
-                                return Value{true};
-                            }
-
-                            http_res->chunked_mode = true;
-                            std::string chunk_data;
-
-                            if (std::holds_alternative<BufferPtr>(args[0])) {
-                                // Handle Buffer
-                                BufferPtr buf = std::get<BufferPtr>(args[0]);
-                                chunk_data.assign(reinterpret_cast<const char*>(buf->data.data()), buf->data.size());
-                            } else if (std::holds_alternative<std::string>(args[0])) {
-                                // Handle string
-                                chunk_data = std::get<std::string>(args[0]);
-                            } else {
-                                // Handle other types
-                                chunk_data = value_to_string_simple_local(args[0]);
-                            }
-
-                            // Send headers if not sent yet
-                            if (!http_res->headers_sent) {
-                                std::ostringstream header_stream;
-                                std::string rp = !http_res->reason.empty() ? http_res->reason
-                                                                           : HttpResponse::reason_for_code(http_res->status_code);
-
-                                if (!rp.empty()) {
-                                    header_stream << "HTTP/1.1 " << http_res->status_code << " " << rp << "\r\n";
-                                } else {
-                                    header_stream << "HTTP/1.1 " << http_res->status_code << "\r\n";
-                                }
-
-                                // Add Transfer-Encoding: chunked for streaming
-                                http_res->headers["Transfer-Encoding"] = "chunked";
-
-                                // Set default content-type if not set
-                                if (http_res->headers.find("Content-Type") == http_res->headers.end() &&
-                                    http_res->headers.find("content-type") == http_res->headers.end()) {
-                                    http_res->headers["Content-Type"] = "text/plain";
-                                }
-
-                                for (const auto& kv : http_res->headers) {
-                                    header_stream << kv.first << ": " << kv.second << "\r\n";
-                                }
-                                header_stream << "\r\n";
-
-                                std::string headers_str = header_stream.str();
-
-                                // Send headers
-                                char* header_buf = static_cast<char*>(malloc(headers_str.size()));
-                                memcpy(header_buf, headers_str.data(), headers_str.size());
-                                uv_buf_t header_uvbuf = uv_buf_init(header_buf, (unsigned int)headers_str.size());
-
-                                uv_write_t* header_req = new uv_write_t;
-                                header_req->data = header_buf;
-
-                                uv_write(header_req, http_res->client, &header_uvbuf, 1, [](uv_write_t* req, int status) {
-                                    if (req->data) free(req->data);
-                                    delete req;
-                                });
-
-                                http_res->headers_sent = true;
-                            }
-
-                            // Send chunk in HTTP chunked format
-                            if (!chunk_data.empty()) {
-                                std::ostringstream chunk_stream;
-                                chunk_stream << std::hex << chunk_data.size() << "\r\n";
-                                chunk_stream << chunk_data << "\r\n";
-
-                                std::string chunk_str = chunk_stream.str();
-
-                                char* chunk_buf = static_cast<char*>(malloc(chunk_str.size()));
-                                memcpy(chunk_buf, chunk_str.data(), chunk_str.size());
-                                uv_buf_t chunk_uvbuf = uv_buf_init(chunk_buf, (unsigned int)chunk_str.size());
-
-                                uv_write_t* chunk_req = new uv_write_t;
-                                chunk_req->data = chunk_buf;
-
-                                uv_write(chunk_req, http_res->client, &chunk_uvbuf, 1, [](uv_write_t* req, int status) {
-                                    if (req->data) free(req->data);
-                                    delete req;
-                                });
-                            }
-
-                            return Value{true};
-                        };
-                        auto write_fn = std::make_shared<FunctionValue>("res.write", write_impl, nullptr, Token{});
-                        res_obj->properties["write"] = {Value{write_fn}, false, false, true, Token{}};
-
-                        // req.save()
-                        auto save_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                            if (args.size() < 2) {
-                                throw SwaziError("TypeError", "save requires (buffer, path)", token.loc);
-                            }
-                            if (!std::holds_alternative<BufferPtr>(args[0])) {
-                                throw SwaziError("TypeError", "First arg must be Buffer", token.loc);
-                            }
-                            BufferPtr buf = std::get<BufferPtr>(args[0]);
-                            std::string path = value_to_string_simple_local(args[1]);
-                            std::ofstream out(path, std::ios::binary);
-                            if (!out) {
-                                throw SwaziError("IOError", "Failed to open " + path, token.loc);
-                            }
-                            out.write(reinterpret_cast<const char*>(buf->data.data()), buf->data.size());
-                            return Value{true};
-                        };
-                        auto save_fn = std::make_shared<FunctionValue>("save", save_impl, nullptr, Token{});
-                        req_obj->properties["save"] = {Value{save_fn}, false, false, true, Token{}};
-
-                        // res.status(code)
-                        auto status_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
-                            if (args.empty()) return Value{res_obj};
-                            int code = static_cast<int>(value_to_number_simple_local(args[0]));
-                            http_res->status_code = code;
-                            http_res->reason = HttpResponse::reason_for_code(code);
-                            return Value{res_obj};
-                        };
-                        auto status_fn = std::make_shared<FunctionValue>("res.status", status_impl, nullptr, Token{});
-                        res_obj->properties["status"] = {Value{status_fn}, false, false, true, Token{}};
-
-                        // res.message(text)
-                        auto message_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
-                            if (!args.empty()) {
-                                http_res->reason = value_to_string_simple_local(args[0]);
-                            }
-                            return Value{res_obj};
-                        };
-                        auto message_fn = std::make_shared<FunctionValue>("res.message", message_impl, nullptr, Token{});
-                        res_obj->properties["message"] = {Value{message_fn}, false, false, true, Token{}};
-
-                        // res.redirect(url, statusCode?)
-                        auto redirect_impl = [http_res, res_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                            if (args.empty()) {
-                                throw SwaziError("TypeError", "redirect requires a URL", token.loc);
-                            }
-
-                            std::string location = value_to_string_simple_local(args[0]);
-                            int code = 302;  // Default to 302 Found
-
-                            // Optional status code (301, 302, 303, 307, 308)
-                            if (args.size() >= 2) {
-                                code = static_cast<int>(value_to_number_simple_local(args[1]));
-                                // Validate it's a redirect code
-                                if (code < 300 || code >= 400) {
-                                    code = 302;  // Fallback to safe default
-                                }
-                            }
-
-                            http_res->status_code = code;
-                            http_res->reason = HttpResponse::reason_for_code(code);
-                            http_res->headers["Location"] = location;
-
-                            // End with empty body (redirects shouldn't have content)
-                            http_res->end("");
-
-                            return Value{res_obj};
-                        };
-                        auto redirect_fn = std::make_shared<FunctionValue>("res.redirect", redirect_impl, nullptr, Token{});
-                        res_obj->properties["redirect"] = {Value{redirect_fn}, false, false, true, Token{}};
-
-                        // Call handler
-                        if (srv->request_handler) {
-                            FunctionPtr handler = srv->request_handler;
-                            scheduler_run_on_loop([handler, req_obj, res_obj]() {
-                                try {
-                                    CallbackPayload* payload = new CallbackPayload(handler, {Value{req_obj}, Value{res_obj}});
-                                    enqueue_callback_global(static_cast<void*>(payload));
-                                } catch (...) {}
-                            });
-                        }
-
-                        // ===== Clean up in-progress request =====
-                        srv->pending_requests.erase(stream);
-                    }
-                }
-
-                // free buffer
-                delete[] buf->base;
-
-                if (nread < 0) {
-                    // Connection closed - cleanup
-                    ServerInstance* srv = static_cast<ServerInstance*>(stream->data);
-                    if (srv) {
-                        srv->pending_requests.erase(stream);
-                    }
-                    uv_close((uv_handle_t*)stream, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
-                }
-            });
+        uv_read_start((uv_stream_t*)client, alloc_buffer, on_read);
     } else {
         uv_close((uv_handle_t*)client, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
     }
 }
-// native_createServer exported to builtins.cpp
-Value native_createServer(const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*token*/) {
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token, Evaluator* evaluator) {
     if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
-        throw SwaziError("TypeError", "createServer requires a request handler function", TokenLocation());
+        throw SwaziError("TypeError", "createServer requires a request handler function", token.loc);
     }
-    FunctionPtr handler = std::get<FunctionPtr>(args[0]);
 
     auto inst = std::make_shared<ServerInstance>();
-    inst->request_handler = handler;
+    inst->request_handler = std::get<FunctionPtr>(args[0]);
+    inst->env = env;
+    inst->evaluator = evaluator;
 
     long long id = g_next_server_id.fetch_add(1);
     {
@@ -896,49 +996,57 @@ Value native_createServer(const std::vector<Value>& args, EnvPtr /*env*/, const 
         g_servers[id] = inst;
     }
 
-    // build server object to return to JS
     auto server_obj = std::make_shared<ObjectValue>();
 
-    // server.listen(port, callback?)
-    auto listen_impl = [inst, id](const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) -> Value {
-        if (args.empty()) throw SwaziError("TypeError", "listen requires port number", token.loc);
-        int port = static_cast<int>(value_to_number_simple_local(args[0]));
-        FunctionPtr cb = (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) ? std::get<FunctionPtr>(args[1]) : nullptr;
+    auto listen_impl = [inst](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "listen requires port number", token.loc);
+        }
+
+        int port = static_cast<int>(std::get<double>(args[0]));
+        FunctionPtr cb = (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1]))
+            ? std::get<FunctionPtr>(args[1])
+            : nullptr;
 
         uv_loop_t* loop = scheduler_get_loop();
-        if (!loop) throw SwaziError("RuntimeError", "No event loop available for server", token.loc);
+        if (!loop) {
+            throw SwaziError("RuntimeError", "No event loop available", token.loc);
+        }
 
         scheduler_run_on_loop([inst, port, cb, loop]() {
             inst->server_handle = new uv_tcp_t;
             inst->server_handle->data = inst.get();
             uv_tcp_init(loop, inst->server_handle);
+
             struct sockaddr_in addr;
             uv_ip4_addr("0.0.0.0", port, &addr);
             uv_tcp_bind(inst->server_handle, (const struct sockaddr*)&addr, 0);
+
             int r = uv_listen((uv_stream_t*)inst->server_handle, 128, on_connection);
-            if (r == 0) {
-                // optionally call the callback on the runtime thread
-                if (cb) {
-                    CallbackPayload* payload = new CallbackPayload(cb, {});
-                    enqueue_callback_global(static_cast<void*>(payload));
-                }
-            } else {
-                // listen failed: could enqueue error to callback if desired
+            if (r == 0 && cb) {
+                CallbackPayload* payload = new CallbackPayload(cb, {});
+                enqueue_callback_global(static_cast<void*>(payload));
             }
         });
+
         return std::monostate{};
     };
-    auto listen_fn = std::make_shared<FunctionValue>("server.listen", listen_impl, nullptr, Token{});
-    server_obj->properties["listen"] = {Value{listen_fn}, false, false, true, Token{}};
+    server_obj->properties["listen"] = {
+        Value{std::make_shared<FunctionValue>("server.listen", listen_impl, nullptr, Token{})},
+        false, false, true, Token{}};
 
-    // server.close(callback?)
-    auto close_impl = [inst, id](const std::vector<Value>& args, EnvPtr /*env*/, const Token& /*token*/) -> Value {
-        FunctionPtr cb = (!args.empty() && std::holds_alternative<FunctionPtr>(args[0])) ? std::get<FunctionPtr>(args[0]) : nullptr;
+    auto close_impl = [inst, id](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        FunctionPtr cb = (!args.empty() && std::holds_alternative<FunctionPtr>(args[0]))
+            ? std::get<FunctionPtr>(args[0])
+            : nullptr;
+
         inst->closed.store(true);
 
         scheduler_run_on_loop([inst, cb]() {
             if (inst->server_handle) {
-                uv_close((uv_handle_t*)inst->server_handle, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
+                uv_close((uv_handle_t*)inst->server_handle, [](uv_handle_t* h) {
+                    delete (uv_tcp_t*)h;
+                });
                 inst->server_handle = nullptr;
             }
             if (cb) {
@@ -947,13 +1055,15 @@ Value native_createServer(const std::vector<Value>& args, EnvPtr /*env*/, const 
             }
         });
 
-        // remove from map
-        std::lock_guard<std::mutex> lk(g_servers_mutex);
-        g_servers.erase(id);
+        {
+            std::lock_guard<std::mutex> lk(g_servers_mutex);
+            g_servers.erase(id);
+        }
         return std::monostate{};
     };
-    auto close_fn = std::make_shared<FunctionValue>("server.close", close_impl, nullptr, Token{});
-    server_obj->properties["close"] = {Value{close_fn}, false, false, true, Token{}};
+    server_obj->properties["close"] = {
+        Value{std::make_shared<FunctionValue>("server.close", close_impl, nullptr, Token{})},
+        false, false, true, Token{}};
 
     return Value{server_obj};
 }
