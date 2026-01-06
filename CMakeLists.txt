@@ -53,9 +53,6 @@ add_custom_command(
 add_custom_target(generate_builtins DEPENDS "${GENERATED_BUILTIN_CPP}")
 # --- END embed builtins ---
 
-# Build llhttp as a shared library
-set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-set(BUILD_STATIC_LIBS OFF CACHE BOOL "" FORCE)
 
 # Fetch link re2
 include(FetchContent)
@@ -103,8 +100,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-# build llhttp
+# Build llhttp as a shared library
+set(BUILD_SHARED_LIBS ON)
+set(BUILD_STATIC_LIBS OFF)
 add_subdirectory(thirdparty/llhttp)
+# Reset back if needed
+set(BUILD_SHARED_LIBS OFF)
 
 # --- CORE LIBRARY (compile everything once here) ---
 file(GLOB_RECURSE LIB_SOURCES "src/*.cpp" "src/*.cc" "src/*.c")

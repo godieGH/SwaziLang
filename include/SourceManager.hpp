@@ -15,6 +15,9 @@ class SourceManager {
     }
 
     std::string get_line(int line_num) const {
+        if (line_num < 1 || lines.empty()) {
+            return "";
+        }
         auto it = lines.find(line_num);
         return it != lines.end() ? it->second : "";
     }

@@ -179,9 +179,11 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         std::string src = srcOpt.value();
         if (src.empty() || src.back() != '\n') src.push_back('\n');
 
-        SourceManager src_mgr(std::string("<embedded:") + module_spec + ">", src);
+        // SourceManager src_mgr(std::string("<embedded:") + module_spec + ">", src);
+        auto src_mgr = std::make_shared<SourceManager>(std::string("<embedded:") + module_spec + ">", src);
+        rec->source_manager = src_mgr;
 
-        Lexer lexer(src, std::string("<embedded:") + module_spec + ">", &src_mgr);
+        Lexer lexer(src, std::string("<embedded:") + module_spec + ">", src_mgr.get());
         std::vector<Token> tokens = lexer.tokenize();
         Parser parser(tokens);
         std::unique_ptr<ProgramNode> ast = parser.parse();
@@ -317,8 +319,10 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         std::string src = buf.str();
         if (src.empty() || src.back() != '\n') src.push_back('\n');
 
-        SourceManager src_mgr(resolved, src);
-        Lexer lexer(src, resolved, &src_mgr);
+        // SourceManager src_mgr(resolved, src);
+        auto src_mgr = std::make_shared<SourceManager>(resolved, src);
+        rec->source_manager = src_mgr;
+        Lexer lexer(src, resolved, src_mgr.get());
         std::vector<Token> tokens = lexer.tokenize();
         Parser parser(tokens);
         std::unique_ptr<ProgramNode> ast = parser.parse();
@@ -768,6 +772,25 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             return rec->exports;
         }
 
+        if (module_spec == "events" || module_spec == "swazi:events") {
+            const std::string key = "__builtin__:events";
+            auto it = module_cache.find(key);
+            if (it != module_cache.end()) return it->second->exports;
+
+            auto rec = std::make_shared<ModuleRecord>();
+            rec->state = ModuleRecord::State::Loading;
+            rec->exports = std::make_shared<ObjectValue>();
+            rec->path = key;
+            rec->module_env = std::make_shared<Environment>(global_env);
+            module_cache[key] = rec;
+            populate_module_metadata(rec->module_env, rec->path, "events", false);
+
+            rec->exports = make_events_exports(rec->module_env);
+
+            rec->state = ModuleRecord::State::Loaded;
+            return rec->exports;
+        }
+
         // --- end built-in short-circuit ---
     }
 
@@ -826,8 +849,10 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
     if (src.empty() || src.back() != '\n') src.push_back('\n');
 
     // Lex + parse
-    SourceManager src_mgr(resolved, src);
-    Lexer lexer(src, resolved, &src_mgr);
+    // SourceManager src_mgr(resolved, src);
+    auto src_mgr = std::make_shared<SourceManager>(resolved, src);
+    rec->source_manager = src_mgr;
+    Lexer lexer(src, resolved, src_mgr.get());
     std::vector<Token> tokens = lexer.tokenize();
     Parser parser(tokens);
     std::unique_ptr<ProgramNode> ast = parser.parse();

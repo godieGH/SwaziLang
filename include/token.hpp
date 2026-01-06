@@ -266,7 +266,11 @@ struct Token {
 
 inline std::string TokenLocation::get_line_trace() const {
     if (!src_mgr) {
-        return "(source context unavailable)";
+        return "    " + filename + ":" + std::to_string(line) + ":" + std::to_string(col);
+    }
+    if (src_mgr->filename != filename) {
+        // Token has stale source_manager from wrong file
+        return "    " + filename + ":" + std::to_string(line) + ":" + std::to_string(col);
     }
     return src_mgr->format_error_context(line, col);
 }

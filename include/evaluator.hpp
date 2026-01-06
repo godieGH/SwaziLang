@@ -1167,14 +1167,13 @@ class Evaluator {
 
     // Module loader records for caching and circular dependency handling.
     struct ModuleRecord {
-        enum class State {
-            Loading,
-            Loaded
-        };
+        enum class State { Loading,
+            Loaded };
         State state = State::Loading;
-        ObjectPtr exports = nullptr;  // object holding exported properties
-        EnvPtr module_env = nullptr;  // environment used while evaluating module
-        std::string path;             // canonical filesystem path used as cache key
+        ObjectPtr exports = nullptr;
+        EnvPtr module_env = nullptr;
+        std::string path;
+        std::shared_ptr<SourceManager> source_manager;
     };
 
     // map canonical module path -> ModuleRecord (shared_ptr)
