@@ -4656,6 +4656,34 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         // Now safe to evaluate the index expression.
         Value indexVal = evaluate_expression(idx->index.get(), env);
 
+        if (std::holds_alternative<ObjectPtr>(objVal)) {
+            ObjectPtr obj = std::get<ObjectPtr>(objVal);
+            if (obj) {
+                auto proxy_it = obj->properties.find("__proxy__");
+                if (proxy_it != obj->properties.end() &&
+                    proxy_it->second.is_private &&
+                    std::holds_alternative<ProxyPtr>(proxy_it->second.value)) {
+                    ProxyPtr proxy = std::get<ProxyPtr>(proxy_it->second.value);
+
+                    // Try to call handler.get trap
+                    FunctionPtr get_trap = get_handler_method(proxy->handler, "get", idx->token);
+                    if (get_trap) {
+                        // Convert indexVal to string key
+                        std::string key = to_property_key(indexVal, idx->token);
+
+                        // Call: handler.get(target, key)
+                        std::vector<Value> trap_args = {
+                            Value{proxy->target},
+                            Value{key}};
+                        return this->call_function(get_trap, trap_args, env, idx->token);
+                    }
+
+                    // No trap, use target instead
+                    objVal = Value{proxy->target};
+                }
+            }
+        }
+
         // Array indexing uses numeric interpretation of indexVal OR range slicing
         if (std::holds_alternative<ArrayPtr>(objVal)) {
             ArrayPtr arr = std::get<ArrayPtr>(objVal);
