@@ -52,6 +52,12 @@ struct HttpResponse {
 
     std::map<std::string, std::string>* request_headers = nullptr;
 
+    bool sendfile_active = false;
+    FunctionPtr sendfile_callback = nullptr;
+
+    std::atomic<int> pending_writes{0};
+    static const int MAX_PENDING_WRITES = 16;  // Configurable limit
+
     static std::string reason_for_code(int code) {
         switch (code) {
             case 200:
@@ -117,8 +123,14 @@ struct HttpResponse {
         headers_sent = true;
     }
 
-    void write_chunk(const std::vector<uint8_t>& data) {
-        if (!client || finished) return;
+    bool write_chunk(const std::vector<uint8_t>& data) {
+        if (!client || finished) return false;
+
+        if (sendfile_active) return false;
+
+        if (pending_writes.load() >= MAX_PENDING_WRITES) {
+            return false;
+        }
 
         if (!headers_sent) {
             chunked_mode = true;
@@ -126,7 +138,7 @@ struct HttpResponse {
             send_headers();
         }
 
-        if (data.empty()) return;
+        if (data.empty()) return true;
 
         std::ostringstream chunk_header;
         chunk_header << std::hex << data.size() << "\r\n";
@@ -142,16 +154,34 @@ struct HttpResponse {
 
         uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(total_size));
         uv_write_t* req = new uv_write_t;
-        req->data = buf;
+
+        struct WriteContext {
+            char* buffer;
+            HttpResponse* response;
+        };
+
+        auto* ctx = new WriteContext{buf, this};
+        req->data = ctx;
+
+        pending_writes.fetch_add(1);
 
         uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
-            if (req->data) free(req->data);
+            auto* ctx = static_cast<WriteContext*>(req->data);
+            ctx->response->pending_writes.fetch_sub(1);
+
+            if (ctx->buffer) free(ctx->buffer);
+            delete ctx;
             delete req;
         });
+
+        return true;
     }
 
     void end_response(const std::vector<uint8_t>& final_data = {}) {
         if (finished) return;
+
+        if (sendfile_active) return;
+
         finished = true;
 
         headers["Connection"] = "close";
@@ -159,9 +189,9 @@ struct HttpResponse {
         if (chunked_mode) {
             if (!headers_sent) {
                 headers["Transfer-Encoding"] = "chunked";
-                send_headers();  // Now headers are set correctly
+                send_headers();
             }
-            // Send final data chunk if provided
+
             if (!final_data.empty()) {
                 std::ostringstream chunk_header;
                 chunk_header << std::hex << final_data.size() << "\r\n";
@@ -185,7 +215,6 @@ struct HttpResponse {
                 });
             }
 
-            // Send terminator
             const char* terminator = "0\r\n\r\n";
             char* term_buf = static_cast<char*>(malloc(5));
             memcpy(term_buf, terminator, 5);
@@ -201,7 +230,7 @@ struct HttpResponse {
         } else {
             if (!headers_sent) {
                 headers["Content-Length"] = std::to_string(final_data.size());
-                send_headers();  // Headers set correctly above
+                send_headers();
             }
 
             if (!final_data.empty()) {
@@ -212,27 +241,35 @@ struct HttpResponse {
                 uv_write_t* req = new uv_write_t;
                 req->data = buf;
 
-                // ✅ Don't close immediately after write
                 uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
                     if (req->data) free(req->data);
                     delete req;
-                    // Don't close here either
                 });
             }
-            // If no final data and headers already sent, we can close gracefully
-            // But it's safer to let the client close after receiving the response
         }
     }
 
     FilePtr file_source = nullptr;
     uint64_t file_bytes_sent = 0;
     uint64_t file_total_size = 0;
-    bool streaming_file = false;
+
+    struct FileStreamContext {
+        HttpResponse* response;
+        char* buffer;
+        Evaluator* evaluator;
+        EnvPtr env;
+    };
 
     void stream_file_chunk() {
-        if (!file_source || !client || finished) return;
+        if (!file_source || !client || finished) {
+            if (sendfile_callback) {
+                std::string error = finished ? "" : "Stream interrupted";
+                call_sendfile_callback(error);
+            }
+            return;
+        }
 
-        const size_t CHUNK_SIZE = 64 * 1024;  // 64KB
+        const size_t CHUNK_SIZE = 64 * 1024;
         std::vector<uint8_t> buffer(CHUNK_SIZE);
         size_t bytes_read = 0;
 
@@ -250,49 +287,132 @@ struct HttpResponse {
             buffer.resize(bytes_read);
             file_bytes_sent += bytes_read;
 
-            // Send chunk
-            write_chunk(buffer);
+            std::ostringstream chunk_header;
+            chunk_header << std::hex << bytes_read << "\r\n";
+            std::string hdr = chunk_header.str();
 
-            // Continue streaming
-            if (file_bytes_sent < file_total_size) {
-                // Schedule next chunk
-                uv_idle_t* idle = new uv_idle_t;
-                idle->data = this;
-                uv_idle_init(uv_default_loop(), idle);
-                uv_idle_start(idle, [](uv_idle_t* handle) {
-                    auto* response = static_cast<HttpResponse*>(handle->data);
-                    uv_idle_stop(handle);
-                    uv_close((uv_handle_t*)handle, [](uv_handle_t* h) { delete (uv_idle_t*)h; });
+            size_t total_size = hdr.size() + bytes_read + 2;
+            char* buf = static_cast<char*>(malloc(total_size));
+
+            memcpy(buf, hdr.data(), hdr.size());
+            memcpy(buf + hdr.size(), buffer.data(), bytes_read);
+            buf[total_size - 2] = '\r';
+            buf[total_size - 1] = '\n';
+
+            uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(total_size));
+            uv_write_t* req = new uv_write_t;
+
+            auto* ctx = new FileStreamContext{this, buf, nullptr, nullptr};
+            req->data = ctx;
+
+            uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int status) {
+                auto* ctx = static_cast<FileStreamContext*>(req->data);
+                HttpResponse* response = ctx->response;
+
+                if (ctx->buffer) free(ctx->buffer);
+                delete ctx;
+                delete req;
+
+                if (status != 0) {
+                    response->call_sendfile_callback("Write error");
+                    response->finish_sendfile();
+                    return;
+                }
+
+                // ✅ Continue streaming or finish
+                if (!response->finished &&
+                    response->file_bytes_sent < response->file_total_size) {
                     response->stream_file_chunk();
-                });
-            } else {
-                // Done streaming
-                end_response();
-            }
+                } else {
+                    // ✅ File completely sent - success!
+                    response->call_sendfile_callback("");  // Empty string = no error
+                    response->finish_sendfile();
+                }
+            });
         } else {
-            // Error or EOF
-            end_response();
+            // ✅ Read error
+            call_sendfile_callback("File read error");
+            finish_sendfile();
         }
     }
 
-    void send_file(FilePtr file) {
-        if (!file || !file->is_open) return;
+    void call_sendfile_callback(const std::string& error) {
+        if (!sendfile_callback) return;
 
+        FunctionPtr cb = sendfile_callback;
+        sendfile_callback = nullptr;
+
+        scheduler_run_on_loop([cb, error]() {
+            try {
+                Value err_val = error.empty() ? Value{std::monostate{}} : Value{error};
+                CallbackPayload* payload = new CallbackPayload(cb, {err_val});
+                enqueue_callback_global(static_cast<void*>(payload));
+            } catch (...) {}
+        });
+    }
+
+    void finish_sendfile() {
+        sendfile_active = false;
+        file_source = nullptr;
+
+        finished = true;
+
+        // Send chunked terminator
+        const char* terminator = "0\r\n\r\n";
+        char* term_buf = static_cast<char*>(malloc(5));
+        memcpy(term_buf, terminator, 5);
+        uv_buf_t term_uvbuf = uv_buf_init(term_buf, 5);
+
+        uv_write_t* term_req = new uv_write_t;
+        term_req->data = term_buf;
+
+        uv_write(term_req, client, &term_uvbuf, 1, [](uv_write_t* req, int) {
+            if (req->data) free(req->data);
+            delete req;
+        });
+    }
+
+    void send_file(FilePtr file, FunctionPtr callback = nullptr) {
+        if (!file || !file->is_open) {
+            if (callback) {
+                scheduler_run_on_loop([callback]() {
+                    try {
+                        CallbackPayload* payload = new CallbackPayload(
+                            callback,
+                            {Value{std::string("File not open")}});
+                        enqueue_callback_global(static_cast<void*>(payload));
+                    } catch (...) {}
+                });
+            }
+            return;
+        }
+
+        sendfile_active = true;
+        sendfile_callback = callback;
         file_source = file;
-        streaming_file = true;
 
         // Get file size
 #ifdef _WIN32
         LARGE_INTEGER filesize_li;
         if (GetFileSizeEx((HANDLE)file->handle, &filesize_li)) {
             file_total_size = static_cast<uint64_t>(filesize_li.QuadPart);
+        } else {
+            call_sendfile_callback("Cannot get file size");
+            finish_sendfile();
+            return;
         }
 #else
         struct stat st;
         if (fstat(file->fd, &st) == 0) {
             file_total_size = static_cast<uint64_t>(st.st_size);
+        } else {
+            call_sendfile_callback("Cannot get file size");
+            finish_sendfile();
+            return;
         }
 #endif
+
+        file_bytes_sent = 0;
 
         // Start streaming
         chunked_mode = true;
@@ -612,8 +732,8 @@ static int on_headers_complete(llhttp_t* parser) {
             data.assign(str.begin(), str.end());
         }
 
-        state->response->write_chunk(data);
-        return Value{true};
+        bool success = state->response->write_chunk(data);
+        return Value{success};  // ✅ Return backpressure status
     };
     res_obj->properties["write"] = {
         Value{std::make_shared<FunctionValue>("res.write", write_impl, nullptr, Token{})},
@@ -621,6 +741,10 @@ static int on_headers_complete(llhttp_t* parser) {
 
     // res.end(data?)
     auto end_impl = [state](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+        if (state->response->sendfile_active) {
+            return std::monostate{};
+        }
+
         std::vector<uint8_t> data;
         if (!args.empty()) {
             if (std::holds_alternative<BufferPtr>(args[0])) {
@@ -659,11 +783,13 @@ static int on_headers_complete(llhttp_t* parser) {
         }
 
         FilePtr file = std::get<FilePtr>(args[0]);
-        if (!file->is_open) {
-            throw SwaziError("IOError", "File must be open", token.loc);
+
+        FunctionPtr callback = nullptr;
+        if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
+            callback = std::get<FunctionPtr>(args[1]);
         }
 
-        state->response->send_file(file);
+        state->response->send_file(file, callback);
         return std::monostate{};
     };
     res_obj->properties["sendFile"] = {
