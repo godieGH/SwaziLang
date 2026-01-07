@@ -17,14 +17,20 @@
 #include "evaluator.hpp"
 #include "uv.h"
 
+struct ListenerEntry {
+    size_t id;
+    FunctionPtr callback;
+};
+static std::atomic<size_t> g_next_listener_id{0};
+
 static uv_tty_t* g_stdin_handle = nullptr;
 static uv_tty_t* g_stdout_handle = nullptr;
-static std::vector<FunctionPtr> g_resize_listeners;
+static std::vector<ListenerEntry> g_resize_listeners;
 static uv_signal_t* g_sigwinch_handle = nullptr;
 static std::mutex g_stdin_mutex;
-static std::vector<FunctionPtr> g_data_listeners;
-static std::vector<FunctionPtr> g_eof_listeners;
-static std::vector<FunctionPtr> g_sigint_listeners;
+static std::vector<ListenerEntry> g_data_listeners;
+static std::vector<ListenerEntry> g_eof_listeners;
+static std::vector<ListenerEntry> g_sigint_listeners;
 static std::atomic<bool> g_stdin_initialized(false);
 static std::atomic<bool> g_stdin_closed(false);
 static std::atomic<bool> g_raw_mode(false);
@@ -66,42 +72,42 @@ static void enqueue_data_callbacks_from_bytes(const char* data, ssize_t len) {
     buffer->data.assign(data, data + len);
     buffer->encoding = "binary";
 
-    std::vector<FunctionPtr> listeners;
+    std::vector<ListenerEntry> listeners;
     {
         std::lock_guard<std::mutex> lk(g_stdin_mutex);
         listeners = g_data_listeners;
     }
-    for (auto& cb : listeners) {
-        if (!cb) continue;
-        CallbackPayload* p = new CallbackPayload(cb, {Value{buffer}});
+    for (auto& entry : listeners) {
+        if (!entry.callback) continue;
+        CallbackPayload* p = new CallbackPayload(entry.callback, {Value{buffer}});
         enqueue_callback_global(static_cast<void*>(p));
     }
 }
 
 static void enqueue_eof_callbacks() {
-    std::vector<FunctionPtr> listeners;
+    std::vector<ListenerEntry> listeners;
     {
         std::lock_guard<std::mutex> lk(g_stdin_mutex);
         listeners = g_eof_listeners;
     }
 
-    for (auto& cb : listeners) {
-        if (!cb) continue;
-        CallbackPayload* p = new CallbackPayload(cb, {});
+    for (auto& entry : listeners) {
+        if (!entry.callback) continue;
+        CallbackPayload* p = new CallbackPayload(entry.callback, {});
         enqueue_callback_global(static_cast<void*>(p));
     }
 }
 
 static void enqueue_sigint_callbacks() {
-    std::vector<FunctionPtr> listeners;
+    std::vector<ListenerEntry> listeners;
     {
         std::lock_guard<std::mutex> lk(g_stdin_mutex);
         listeners = g_sigint_listeners;
     }
 
-    for (auto& cb : listeners) {
-        if (!cb) continue;
-        CallbackPayload* p = new CallbackPayload(cb, {});
+    for (auto& entry : listeners) {
+        if (!entry.callback) continue;
+        CallbackPayload* p = new CallbackPayload(entry.callback, {});
         enqueue_callback_global(static_cast<void*>(p));
     }
 }
@@ -283,14 +289,14 @@ static void stdin_read_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* bu
                     buffer->data.assign(line.begin(), line.end());
                     buffer->encoding = "utf8";
 
-                    std::vector<FunctionPtr> listeners;
+                    std::vector<ListenerEntry> listeners;
                     {
                         std::lock_guard<std::mutex> lk(g_stdin_mutex);
                         listeners = g_data_listeners;
                     }
-                    for (auto& cb : listeners) {
-                        if (!cb) continue;
-                        CallbackPayload* p = new CallbackPayload(cb, {Value{buffer}});
+                    for (auto& entry : listeners) {
+                        if (!entry.callback) continue;
+                        CallbackPayload* p = new CallbackPayload(entry.callback, {Value{buffer}});
                         enqueue_callback_global(static_cast<void*>(p));
                     }
 
@@ -333,15 +339,15 @@ static void sigwinch_cb(uv_signal_t* handle, int signum) {
     size_obj->properties["height"] = {Value{static_cast<double>(height)}, false, false, true, tok};
 
     // Enqueue callbacks
-    std::vector<FunctionPtr> listeners;
+    std::vector<ListenerEntry> listeners;
     {
         std::lock_guard<std::mutex> lk(g_stdin_mutex);
         listeners = g_resize_listeners;
     }
 
-    for (auto& cb : listeners) {
-        if (!cb) continue;
-        CallbackPayload* p = new CallbackPayload(cb, {Value{size_obj}});
+    for (auto& entry : listeners) {
+        if (!entry.callback) continue;
+        CallbackPayload* p = new CallbackPayload(entry.callback, {Value{size_obj}});
         enqueue_callback_global(static_cast<void*>(p));
     }
 }
@@ -452,26 +458,279 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
         std::lock_guard<std::mutex> lk(g_stdin_mutex);
 
         if (event == "data") {
-            g_data_listeners.push_back(cb);
+            ListenerEntry entry;
+            entry.id = g_next_listener_id.fetch_add(1);
+            entry.callback = cb;
+            g_data_listeners.push_back(entry);
             ensure_init();
+            return Value{static_cast<double>(entry.id)};
         } else if (event == "eof") {
-            g_eof_listeners.push_back(cb);
+            ListenerEntry entry;
+            entry.id = g_next_listener_id.fetch_add(1);
+            entry.callback = cb;
+            g_eof_listeners.push_back(entry);
             ensure_init();
+            return Value{static_cast<double>(entry.id)};
         } else if (event == "sigint") {
-            g_sigint_listeners.push_back(cb);
+            ListenerEntry entry;
+            entry.id = g_next_listener_id.fetch_add(1);
+            entry.callback = cb;
+            g_sigint_listeners.push_back(entry);
             ensure_init();
+            return Value{static_cast<double>(entry.id)};
         } else if (event == "resize") {
-            g_resize_listeners.push_back(cb);
+            ListenerEntry entry;
+            entry.id = g_next_listener_id.fetch_add(1);
+            entry.callback = cb;
+            g_resize_listeners.push_back(entry);
             ensure_init();
+            return Value{static_cast<double>(entry.id)};
         } else {
             throw SwaziError("TypeError",
                 "stdin.on unknown event. Valid: data, eof, sigint, resize", token.loc);
         }
 
-        return std::monostate{};
+        return Value{};
     };
     obj->properties["on"] = {
         Value{std::make_shared<FunctionValue>("stdin.on", on_impl, env, tok)},
+        false, false, true, tok};
+
+    auto once_impl = [ensure_init](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "stdin.once requires (event, callback)", token.loc);
+        }
+        if (!std::holds_alternative<std::string>(args[0])) {
+            throw SwaziError("TypeError", "event must be string", token.loc);
+        }
+        if (!std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "callback must be function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr user_callback = std::get<FunctionPtr>(args[1]);
+
+        std::lock_guard<std::mutex> lk(g_stdin_mutex);
+
+        ListenerEntry entry;
+        entry.id = g_next_listener_id.fetch_add(1);
+        size_t listener_id = entry.id;
+
+        // Create a self-removing wrapper that calls user callback then removes itself
+        auto self_removing_impl = [event, user_callback, listener_id](
+                                      const std::vector<Value>& cb_args, EnvPtr cb_env, const Token& cb_token) -> Value {
+            // First enqueue the user's callback
+            CallbackPayload* user_payload = new CallbackPayload(user_callback, cb_args);
+            enqueue_callback_global(static_cast<void*>(user_payload));
+
+            // Then remove ourselves from the listener list
+            std::lock_guard<std::mutex> lk(g_stdin_mutex);
+            auto remove_by_id = [listener_id](std::vector<ListenerEntry>& listeners) {
+                listeners.erase(
+                    std::remove_if(listeners.begin(), listeners.end(),
+                        [listener_id](const ListenerEntry& e) {
+                            return e.id == listener_id;
+                        }),
+                    listeners.end());
+            };
+
+            if (event == "data") {
+                remove_by_id(g_data_listeners);
+            } else if (event == "eof") {
+                remove_by_id(g_eof_listeners);
+            } else if (event == "sigint") {
+                remove_by_id(g_sigint_listeners);
+            } else if (event == "resize") {
+                remove_by_id(g_resize_listeners);
+            }
+
+            return std::monostate{};
+        };
+
+        entry.callback = std::make_shared<FunctionValue>(
+            "stdin.once_wrapper", self_removing_impl, env, token);
+
+        if (event == "data") {
+            g_data_listeners.push_back(entry);
+        } else if (event == "eof") {
+            g_eof_listeners.push_back(entry);
+        } else if (event == "sigint") {
+            g_sigint_listeners.push_back(entry);
+        } else if (event == "resize") {
+            g_resize_listeners.push_back(entry);
+        } else {
+            throw SwaziError("TypeError",
+                "stdin.once unknown event. Valid: data, eof, sigint, resize", token.loc);
+        }
+
+        ensure_init();
+        return Value{static_cast<double>(listener_id)};
+    };
+    obj->properties["once"] = {
+        Value{std::make_shared<FunctionValue>("stdin.once", once_impl, env, tok)},
+        false, false, true, tok};
+
+    // stdin.removeListener(event, callback) - removes all instances of callback for that event
+    auto removeListener_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2) {
+            throw SwaziError("TypeError", "stdin.removeListener requires (event, callback)", token.loc);
+        }
+        if (!std::holds_alternative<std::string>(args[0])) {
+            throw SwaziError("TypeError", "event must be string", token.loc);
+        }
+        if (!std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "callback must be function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr cb = std::get<FunctionPtr>(args[1]);
+
+        std::lock_guard<std::mutex> lk(g_stdin_mutex);
+
+        if (event == "data") {
+            auto& listeners = g_data_listeners;
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&cb](const ListenerEntry& entry) {
+                        return entry.callback.get() == cb.get();
+                    }),
+                listeners.end());
+        } else if (event == "eof") {
+            auto& listeners = g_eof_listeners;
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&cb](const ListenerEntry& entry) {
+                        return entry.callback.get() == cb.get();
+                    }),
+                listeners.end());
+        } else if (event == "sigint") {
+            auto& listeners = g_sigint_listeners;
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&cb](const ListenerEntry& entry) {
+                        return entry.callback.get() == cb.get();
+                    }),
+                listeners.end());
+        } else if (event == "resize") {
+            auto& listeners = g_resize_listeners;
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&cb](const ListenerEntry& entry) {
+                        return entry.callback.get() == cb.get();
+                    }),
+                listeners.end());
+        } else {
+            throw SwaziError("TypeError",
+                "stdin.removeListener unknown event. Valid: data, eof, sigint, resize", token.loc);
+        }
+
+        return std::monostate{};
+    };
+    obj->properties["removeListener"] = {
+        Value{std::make_shared<FunctionValue>("stdin.removeListener", removeListener_impl, env, tok)},
+        false, false, true, tok};
+
+    // stdin.removeListenerById(id) or stdin.removeListenerById([id1, id2, ...])
+    auto removeListenerById_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "stdin.removeListenerById requires (id) or ([ids])", token.loc);
+        }
+
+        std::vector<size_t> ids_to_remove;
+
+        // Check if it's an array of IDs
+        if (std::holds_alternative<std::shared_ptr<ArrayValue>>(args[0])) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(args[0]);
+            for (const auto& elem : arr->elements) {
+                if (!std::holds_alternative<double>(elem)) {
+                    throw SwaziError("TypeError", "all array elements must be numbers (IDs)", token.loc);
+                }
+                ids_to_remove.push_back(static_cast<size_t>(std::get<double>(elem)));
+            }
+        } else if (std::holds_alternative<double>(args[0])) {
+            // Single ID
+            ids_to_remove.push_back(static_cast<size_t>(std::get<double>(args[0])));
+        } else {
+            throw SwaziError("TypeError", "id must be number or array of numbers", token.loc);
+        }
+
+        std::lock_guard<std::mutex> lk(g_stdin_mutex);
+
+        // Helper lambda to remove by IDs from a listener vector
+        auto remove_by_ids = [&ids_to_remove](std::vector<ListenerEntry>& listeners) {
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&ids_to_remove](const ListenerEntry& entry) {
+                        return std::find(ids_to_remove.begin(), ids_to_remove.end(), entry.id) != ids_to_remove.end();
+                    }),
+                listeners.end());
+        };
+
+        // Remove from all listener arrays
+        remove_by_ids(g_data_listeners);
+        remove_by_ids(g_eof_listeners);
+        remove_by_ids(g_sigint_listeners);
+        remove_by_ids(g_resize_listeners);
+
+        return std::monostate{};
+    };
+    obj->properties["removeListenerById"] = {
+        Value{std::make_shared<FunctionValue>("stdin.removeListenerById", removeListenerById_impl, env, tok)},
+        false, false, true, tok};
+
+    // stdin.removeAllListeners() - removes all listeners from all events
+    // stdin.removeAllListeners(event) - removes all listeners from specific event
+    // stdin.removeAllListeners([event1, event2, ...]) - removes all listeners from specified events
+    auto removeAllListeners_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        std::lock_guard<std::mutex> lk(g_stdin_mutex);
+
+        if (args.empty()) {
+            // Remove ALL listeners from ALL events
+            g_data_listeners.clear();
+            g_eof_listeners.clear();
+            g_sigint_listeners.clear();
+            g_resize_listeners.clear();
+            return std::monostate{};
+        }
+
+        std::vector<std::string> events_to_clear;
+
+        // Check if it's an array of events
+        if (std::holds_alternative<std::shared_ptr<ArrayValue>>(args[0])) {
+            auto arr = std::get<std::shared_ptr<ArrayValue>>(args[0]);
+            for (const auto& elem : arr->elements) {
+                if (!std::holds_alternative<std::string>(elem)) {
+                    throw SwaziError("TypeError", "all array elements must be event names (strings)", token.loc);
+                }
+                events_to_clear.push_back(std::get<std::string>(elem));
+            }
+        } else if (std::holds_alternative<std::string>(args[0])) {
+            // Single event
+            events_to_clear.push_back(std::get<std::string>(args[0]));
+        } else {
+            throw SwaziError("TypeError", "event must be string or array of strings", token.loc);
+        }
+
+        // Clear listeners for each specified event
+        for (const auto& event : events_to_clear) {
+            if (event == "data") {
+                g_data_listeners.clear();
+            } else if (event == "eof") {
+                g_eof_listeners.clear();
+            } else if (event == "sigint") {
+                g_sigint_listeners.clear();
+            } else if (event == "resize") {
+                g_resize_listeners.clear();
+            } else {
+                throw SwaziError("TypeError",
+                    "Unknown event '" + event + "'. Valid: data, eof, sigint, resize", token.loc);
+            }
+        }
+
+        return std::monostate{};
+    };
+    obj->properties["removeAllListeners"] = {
+        Value{std::make_shared<FunctionValue>("stdin.removeAllListeners", removeAllListeners_impl, env, tok)},
         false, false, true, tok};
 
     // stdin.prompt(text) - sets and displays a prompt
