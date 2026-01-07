@@ -32,6 +32,11 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
 std::shared_ptr<ObjectValue> make_datetime_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env);
 
+// UV module factory
+std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env);
+// Threads module factory
+std::shared_ptr<ObjectValue> make_threads_exports(EnvPtr env);
+
 std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
 

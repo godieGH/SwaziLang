@@ -11,12 +11,18 @@
 #include "evaluator.hpp"
 
 static bool is_stack_near_limit() {
-    // Get approximate stack pointer address
+    // Use thread_local so each thread tracks its own stack
+    thread_local bool initialized = false;
+    thread_local uintptr_t stack_start = 0;
+
     volatile char stack_var;
     uintptr_t current_sp = reinterpret_cast<uintptr_t>(&stack_var);
 
-    // First call initializes the baseline
-    static uintptr_t stack_start = current_sp;
+    // Initialize on first call in this thread
+    if (!initialized) {
+        stack_start = current_sp;
+        initialized = true;
+    }
 
     // Calculate bytes used
     uintptr_t stack_used = (stack_start > current_sp)
@@ -28,7 +34,6 @@ static bool is_stack_near_limit() {
 
     return stack_used > SAFE_STACK_LIMIT;
 }
-
 void Evaluator::execute_frame_until_await_or_return(CallFramePtr frame, PromisePtr promise) {
     if (!frame || !frame->function) return;
 

@@ -8,6 +8,10 @@
 static Scheduler* g_scheduler_instance = nullptr;
 static std::function<void(void*)> g_scheduler_runner = nullptr;
 
+Scheduler* get_global_scheduler() {
+    return g_scheduler_instance;
+}
+
 // Tick callback registered by owner (e.g., Evaluator) to run unhandled-rejection checks.
 // Invoked on the scheduler/loop thread.
 static std::function<void()> g_tick_callback = nullptr;

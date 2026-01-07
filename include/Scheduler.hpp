@@ -65,6 +65,8 @@ void enqueue_callback_global(void* boxed_payload);
 // Helper to let other translation units access the global scheduler loop (returns nullptr if none)
 uv_loop_t* scheduler_get_loop();
 
+Scheduler* get_global_scheduler();
+
 // NEW: schedule a function to run on the scheduler's loop thread.
 // If the scheduler is not available the function will be invoked synchronously inline.
 void scheduler_run_on_loop(const std::function<void()>& fn);

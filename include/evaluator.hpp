@@ -1137,6 +1137,9 @@ class Evaluator {
     // NEW: Mark promise and all ancestors as handled (walk parent links).
     void mark_promise_and_ancestors_handled(PromisePtr p);
 
+    EnvPtr get_global_env() { return global_env; }
+    friend class ThreadWorkerContext;
+
    private:
     EnvPtr global_env;
     EnvPtr main_module_env;
