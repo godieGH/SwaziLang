@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "AsyncBridge.hpp"
+#include "EventEmitterClass.hpp"
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "builtins.hpp"
@@ -59,6 +60,19 @@ std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
     Token tok{};
     tok.loc = TokenLocation("<events>", 0, 0, 0);
+
+    init_event_emitter_class(env);
+
+    if (env->has("EventEmitter")) {
+        auto ee_class = env->get("EventEmitter").value;
+        PropertyDescriptor pd;
+        pd.value = ee_class;
+        pd.is_private = false;
+        pd.is_readonly = false;
+        pd.is_locked = true;
+        pd.token = tok;
+        obj->properties["EventEmitter"] = std::move(pd);
+    }
 
     // events.create() -> EventEmitter
     auto create_impl = [env](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
@@ -139,22 +153,36 @@ std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env) {
             std::string event = std::get<std::string>(args[0]);
             FunctionPtr listener = std::get<FunctionPtr>(args[1]);
 
-            // Create wrapper that removes itself after first call
-            auto wrapper_impl = [emitter, event, listener](
-                                    const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
-                // Remove self first
+            // Create wrapper with atomic "fired" flag
+            auto wrapper = std::make_shared<FunctionValue>("once_wrapper", nullptr, env, token);
+            std::weak_ptr<FunctionValue> wrapper_weak(wrapper);
+
+            // Shared flag to prevent double execution
+            auto fired = std::make_shared<std::atomic<bool>>(false);
+
+            auto wrapper_impl = [emitter, event, listener, wrapper_weak, fired](
+                                    const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+                // Atomic check-and-set to ensure single execution
+                bool expected = false;
+                if (!fired->compare_exchange_strong(expected, true)) {
+                    return std::monostate{};  // Already fired
+                }
+
+                // Remove self
                 {
                     std::lock_guard<std::mutex> lock(emitter->mutex);
-                    auto& vec = emitter->listeners[event];
-                    // Find and remove the wrapper (this function)
-                    vec.erase(
-                        std::remove_if(vec.begin(), vec.end(),
-                            [](const FunctionPtr& l) {
-                                // We can't compare by address since wrapper is the current function
-                                // Just remove first matching listener (which will be us)
-                                return true;
-                            }),
-                        vec.begin() + 1);  // Only remove first match
+                    auto it = emitter->listeners.find(event);
+                    if (it != emitter->listeners.end()) {
+                        auto& vec = it->second;
+                        if (auto wrapper_ptr = wrapper_weak.lock()) {
+                            vec.erase(
+                                std::remove_if(vec.begin(), vec.end(),
+                                    [&wrapper_ptr](const FunctionPtr& l) {
+                                        return l.get() == wrapper_ptr.get();
+                                    }),
+                                vec.end());
+                        }
+                    }
                 }
 
                 // Call original listener
@@ -164,7 +192,8 @@ std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env) {
                 return std::monostate{};
             };
 
-            auto wrapper = std::make_shared<FunctionValue>("once_wrapper", wrapper_impl, env, token);
+            wrapper->is_native = true;
+            wrapper->native_impl = wrapper_impl;
 
             std::lock_guard<std::mutex> lock(emitter->mutex);
             emitter->listeners[event].push_back(wrapper);
@@ -266,7 +295,6 @@ std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env) {
 
         return Value{emitter_obj};
     };
-
     obj->properties["create"] = {
         Value{std::make_shared<FunctionValue>("events.create", create_impl, env, tok)},
         false, false, true, tok};
