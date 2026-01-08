@@ -162,6 +162,42 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         env->set(vd->identifier, var);
         return;
     }
+    
+    if (auto seqDecl = dynamic_cast<SequentialDeclarationNode*>(stmt)) {
+        for (auto& declNode : seqDecl->declarations) {
+            if (!declNode) continue;
+            
+            // Evaluate each declaration directly in the current environment
+            Value val = std::monostate{};
+            if (declNode->value) {
+                val = evaluate_expression(declNode->value.get(), env);
+            }
+            
+            // Handle destructuring patterns
+            if (declNode->pattern) {
+                if (declNode->is_constant && std::holds_alternative<std::monostate>(val)) {
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Constant pattern must be initialized.",
+                        declNode->token.loc);
+                }
+                bind_pattern_to_value(declNode->pattern.get(), val, env, declNode->is_constant, declNode->token);
+            } 
+            // Handle simple identifier
+            else {
+                Environment::Variable var{val, declNode->is_constant};
+                if (declNode->is_constant && std::holds_alternative<std::monostate>(val)) {
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Constant '" + declNode->identifier + "' must be initialized.",
+                        declNode->token.loc);
+                }
+                env->set(declNode->identifier, var);
+            }
+        }
+        return;
+    }
+    
     // Assignment: target is now an ExpressionNode (IdentifierNode / IndexExpressionNode / MemberExpressionNode)
     if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
         Value rhs = evaluate_expression(an->value.get(), env);

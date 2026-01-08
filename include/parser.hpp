@@ -64,6 +64,7 @@ class Parser {
 
     // statements
     std::unique_ptr<StatementNode> parse_statement();
+    std::unique_ptr<StatementNode> parse_sequential_declarations(bool outer_is_constant);
     std::unique_ptr<StatementNode> parse_variable_declaration();
     std::unique_ptr<StatementNode> parse_print_statement(bool newline);
     std::unique_ptr<StatementNode> parse_throw_statement();

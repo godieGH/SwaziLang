@@ -9,12 +9,134 @@
 #include "debugging/outputTry.hpp"
 #include "parser.hpp"
 
+
+std::unique_ptr<StatementNode> Parser::parse_sequential_declarations(bool outer_is_constant) {
+    Token openTok = consume();  // consume '('
+    
+    auto skip_formatting = [&]() {
+        while (peek().type == TokenType::NEWLINE || 
+               peek().type == TokenType::INDENT || 
+               peek().type == TokenType::DEDENT) {
+            consume();
+        }
+    };
+    
+    skip_formatting();
+    
+    if (peek().type == TokenType::CLOSEPARENTHESIS) {
+        Token tok = peek();
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() + 
+            ": Empty declaration list not allowed" + 
+            "\n--> Traced at:\n" + tok.loc.get_line_trace());
+    }
+    
+    std::vector<std::unique_ptr<VariableDeclarationNode>> declarations;
+    
+    while (peek().type != TokenType::CLOSEPARENTHESIS && peek().type != TokenType::EOF_TOKEN) {
+        skip_formatting();
+        
+        // Check for per-item constant modifier
+        bool item_is_constant = outer_is_constant;
+        
+        if (peek().type == TokenType::CONSTANT || peek().type == TokenType::AMPERSAND) {
+            consume();
+            item_is_constant = true;
+        }
+        
+        // Parse declaration target
+        std::unique_ptr<ExpressionNode> pattern = nullptr;
+        std::string name;
+        Token idTok;
+        
+        if (peek().type == TokenType::IDENTIFIER) {
+            consume();
+            idTok = tokens[position - 1];
+            name = idTok.value;
+        } else if (peek().type == TokenType::OPENBRACKET || peek().type == TokenType::OPENBRACE) {
+            pattern = parse_pattern();
+            idTok = pattern->token;
+        } else {
+            Token tok = peek();
+            throw std::runtime_error("Parse error at " + tok.loc.to_string() + 
+                ": Expected identifier or pattern in declaration list" + 
+                "\n--> Traced at:\n" + tok.loc.get_line_trace());
+        }
+        
+        skip_formatting();
+        
+        // Optional initializer
+        std::unique_ptr<ExpressionNode> value = nullptr;
+        
+        if (peek().type == TokenType::ASSIGN) {
+            consume();
+            skip_formatting();
+            value = parse_expression();
+        }
+        
+        // Validate: constants must be initialized
+        if (item_is_constant && !value) {
+            throw std::runtime_error("Parse error at " + idTok.loc.to_string() + 
+                ": Constant '" + (pattern ? "<pattern>" : name) + 
+                "' must be initialized at declaration" + 
+                "\n--> Traced at:\n" + idTok.loc.get_line_trace());
+        }
+        
+        // Create VariableDeclarationNode
+        auto declNode = std::make_unique<VariableDeclarationNode>();
+        if (pattern) {
+            declNode->pattern = std::move(pattern);
+            declNode->identifier = "";
+        } else {
+            declNode->identifier = name;
+            declNode->pattern = nullptr;
+        }
+        declNode->value = std::move(value);
+        declNode->is_constant = item_is_constant;
+        declNode->token = idTok;
+        
+        declarations.push_back(std::move(declNode));
+        
+        skip_formatting();
+        
+        // Separator handling
+        if (peek().type == TokenType::COMMA) {
+            consume();
+            skip_formatting();
+            if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+            continue;
+        }
+        
+        if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+        
+        Token tok = peek();
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() + 
+            ": Expected ',' or ')' in declaration list" + 
+            "\n--> Traced at:\n" + tok.loc.get_line_trace());
+    }
+    
+    skip_formatting();
+    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after declaration list");
+    
+    if (peek().type == TokenType::SEMICOLON) consume();
+    
+    // CHANGE: Return SequentialDeclarationNode instead of DoStatementNode
+    auto seqDecl = std::make_unique<SequentialDeclarationNode>();
+    seqDecl->token = openTok;
+    seqDecl->declarations = std::move(declarations);
+    
+    return seqDecl;
+}
+
 std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
     bool is_constant = false;
 
     if (peek().type == TokenType::CONSTANT || peek().type == TokenType::AMPERSAND) {
         consume();
         is_constant = true;
+    }
+    
+    if (peek().type == TokenType::OPENPARENTHESIS) {
+        return parse_sequential_declarations(is_constant);
     }
 
     // After 'data' we allow either:

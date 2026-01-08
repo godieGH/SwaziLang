@@ -627,6 +627,43 @@ struct VariableDeclarationNode : public StatementNode {
         return n;
     }
 };
+
+struct SequentialDeclarationNode : public StatementNode {
+    std::vector<std::unique_ptr<VariableDeclarationNode>> declarations;
+    
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<SequentialDeclarationNode>();
+        n->token = token;
+        n->declarations.reserve(declarations.size());
+        for (const auto& d : declarations) {
+            if (d) {
+                // Clone returns StatementNode, need to downcast
+                auto cloned = d->clone();
+                auto decl_ptr = dynamic_cast<VariableDeclarationNode*>(cloned.get());
+                if (!decl_ptr) {
+                    throw std::runtime_error("SequentialDeclarationNode::clone(): expected VariableDeclarationNode");
+                }
+                n->declarations.push_back(std::unique_ptr<VariableDeclarationNode>(
+                    static_cast<VariableDeclarationNode*>(cloned.release())));
+            } else {
+                n->declarations.push_back(nullptr);
+            }
+        }
+        return n;
+    }
+    
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "data (";
+        for (size_t i = 0; i < declarations.size(); ++i) {
+            if (i > 0) ss << ", ";
+            ss << (declarations[i] ? declarations[i]->to_string() : "<null>");
+        }
+        ss << ")";
+        return ss.str();
+    }
+};
+
 // Assignment: target can be an identifier or an index/member expression
 struct AssignmentNode : public StatementNode {
     std::unique_ptr<ExpressionNode> target;  // IdentifierNode or IndexExpressionNode or MemberExpressionNode
