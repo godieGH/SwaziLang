@@ -37,24 +37,32 @@ Scheduler::Scheduler() {
 }
 
 Scheduler::~Scheduler() {
-    // stop accepting work
     should_stop = true;
 
-    // close async handle and run loop to process close callbacks
+    // Close async handle first
     if (async_initialized) {
         uv_close(reinterpret_cast<uv_handle_t*>(&async_handle_), nullptr);
-        // Run loop in non-blocking mode to let close callbacks run
         uv_run(loop_, UV_RUN_NOWAIT);
         async_initialized = false;
     }
 
     if (loop_) {
+        // Close all uv module handles (defined in uv.cpp)
+        cleanup_uv_handles();
+
+        // Run loop until all close callbacks finish
+        while (uv_loop_alive(loop_)) {
+            uv_run(loop_, UV_RUN_ONCE);
+        }
+
+        // Now safe to clear the map (defined in uv.cpp)
+        clear_uv_handles();
+
         uv_loop_close(loop_);
         delete loop_;
         loop_ = nullptr;
     }
 
-    // unregister global
     if (g_scheduler_instance == this) g_scheduler_instance = nullptr;
 }
 

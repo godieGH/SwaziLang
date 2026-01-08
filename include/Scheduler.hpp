@@ -74,4 +74,7 @@ void scheduler_run_on_loop(const std::function<void()>& fn);
 // The callback is invoked on the scheduler's loop thread.
 void register_tick_callback(const std::function<void()>& cb);
 
+void cleanup_uv_handles();
+void clear_uv_handles();
+
 #endif  // SWAZI_SCHEDULER_HPP

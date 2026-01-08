@@ -34,6 +34,7 @@ std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env);
 
 std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env);
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)
 Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Token& token, Evaluator* evaluator);
@@ -55,6 +56,7 @@ bool streams_have_active_work();
 bool fs_has_active_work();
 bool ipc_has_active_work();
 bool http_has_active_work();
+bool uv_module_has_active_handles();
 
 struct SignalInfo {
     std::string name;

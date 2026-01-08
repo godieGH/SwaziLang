@@ -80,7 +80,8 @@ void Evaluator::run_event_loop() {
                 streams_have_active_work() ||
                 fs_has_active_work() ||
                 ipc_has_active_work() ||
-                http_has_active_work();
+                http_has_active_work() ||
+                uv_module_has_active_handles();
         });
         return;
     }
