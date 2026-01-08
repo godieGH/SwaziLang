@@ -547,7 +547,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
 
     bool rest_seen = false;
 
-    if (match(TokenType::OPENPARENTHESIS)) {
+    if (is_getter) {
+        if (peek().type == TokenType::OPENPARENTHESIS || peek().type == TokenType::IDENTIFIER || peek().type == TokenType::ELLIPSIS) {
+            throw SwaziError("SyntaxError", "Getters/'thabiti' methods do not accept parameters or '()'", nameTok.loc);
+        }
+    } else if (match(TokenType::OPENPARENTHESIS)) {
         // parenthesized params
         skip_formatting_local();
         if (peek().type != TokenType::CLOSEPARENTHESIS) {

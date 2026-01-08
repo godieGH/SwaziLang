@@ -9,45 +9,44 @@
 #include "debugging/outputTry.hpp"
 #include "parser.hpp"
 
-
 std::unique_ptr<StatementNode> Parser::parse_sequential_declarations(bool outer_is_constant) {
     Token openTok = consume();  // consume '('
-    
+
     auto skip_formatting = [&]() {
-        while (peek().type == TokenType::NEWLINE || 
-               peek().type == TokenType::INDENT || 
-               peek().type == TokenType::DEDENT) {
+        while (peek().type == TokenType::NEWLINE ||
+            peek().type == TokenType::INDENT ||
+            peek().type == TokenType::DEDENT) {
             consume();
         }
     };
-    
+
     skip_formatting();
-    
+
     if (peek().type == TokenType::CLOSEPARENTHESIS) {
         Token tok = peek();
-        throw std::runtime_error("Parse error at " + tok.loc.to_string() + 
-            ": Empty declaration list not allowed" + 
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() +
+            ": Empty declaration list not allowed" +
             "\n--> Traced at:\n" + tok.loc.get_line_trace());
     }
-    
+
     std::vector<std::unique_ptr<VariableDeclarationNode>> declarations;
-    
+
     while (peek().type != TokenType::CLOSEPARENTHESIS && peek().type != TokenType::EOF_TOKEN) {
         skip_formatting();
-        
+
         // Check for per-item constant modifier
         bool item_is_constant = outer_is_constant;
-        
+
         if (peek().type == TokenType::CONSTANT || peek().type == TokenType::AMPERSAND) {
             consume();
             item_is_constant = true;
         }
-        
+
         // Parse declaration target
         std::unique_ptr<ExpressionNode> pattern = nullptr;
         std::string name;
         Token idTok;
-        
+
         if (peek().type == TokenType::IDENTIFIER) {
             consume();
             idTok = tokens[position - 1];
@@ -57,30 +56,30 @@ std::unique_ptr<StatementNode> Parser::parse_sequential_declarations(bool outer_
             idTok = pattern->token;
         } else {
             Token tok = peek();
-            throw std::runtime_error("Parse error at " + tok.loc.to_string() + 
-                ": Expected identifier or pattern in declaration list" + 
+            throw std::runtime_error("Parse error at " + tok.loc.to_string() +
+                ": Expected identifier or pattern in declaration list" +
                 "\n--> Traced at:\n" + tok.loc.get_line_trace());
         }
-        
+
         skip_formatting();
-        
+
         // Optional initializer
         std::unique_ptr<ExpressionNode> value = nullptr;
-        
+
         if (peek().type == TokenType::ASSIGN) {
             consume();
             skip_formatting();
             value = parse_expression();
         }
-        
+
         // Validate: constants must be initialized
         if (item_is_constant && !value) {
-            throw std::runtime_error("Parse error at " + idTok.loc.to_string() + 
-                ": Constant '" + (pattern ? "<pattern>" : name) + 
-                "' must be initialized at declaration" + 
+            throw std::runtime_error("Parse error at " + idTok.loc.to_string() +
+                ": Constant '" + (pattern ? "<pattern>" : name) +
+                "' must be initialized at declaration" +
                 "\n--> Traced at:\n" + idTok.loc.get_line_trace());
         }
-        
+
         // Create VariableDeclarationNode
         auto declNode = std::make_unique<VariableDeclarationNode>();
         if (pattern) {
@@ -93,11 +92,11 @@ std::unique_ptr<StatementNode> Parser::parse_sequential_declarations(bool outer_
         declNode->value = std::move(value);
         declNode->is_constant = item_is_constant;
         declNode->token = idTok;
-        
+
         declarations.push_back(std::move(declNode));
-        
+
         skip_formatting();
-        
+
         // Separator handling
         if (peek().type == TokenType::COMMA) {
             consume();
@@ -105,25 +104,25 @@ std::unique_ptr<StatementNode> Parser::parse_sequential_declarations(bool outer_
             if (peek().type == TokenType::CLOSEPARENTHESIS) break;
             continue;
         }
-        
+
         if (peek().type == TokenType::CLOSEPARENTHESIS) break;
-        
+
         Token tok = peek();
-        throw std::runtime_error("Parse error at " + tok.loc.to_string() + 
-            ": Expected ',' or ')' in declaration list" + 
+        throw std::runtime_error("Parse error at " + tok.loc.to_string() +
+            ": Expected ',' or ')' in declaration list" +
             "\n--> Traced at:\n" + tok.loc.get_line_trace());
     }
-    
+
     skip_formatting();
     expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after declaration list");
-    
+
     if (peek().type == TokenType::SEMICOLON) consume();
-    
+
     // CHANGE: Return SequentialDeclarationNode instead of DoStatementNode
     auto seqDecl = std::make_unique<SequentialDeclarationNode>();
     seqDecl->token = openTok;
     seqDecl->declarations = std::move(declarations);
-    
+
     return seqDecl;
 }
 
@@ -134,7 +133,7 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
         consume();
         is_constant = true;
     }
-    
+
     if (peek().type == TokenType::OPENPARENTHESIS) {
         return parse_sequential_declarations(is_constant);
     }
@@ -911,6 +910,270 @@ std::unique_ptr<StatementNode> Parser::parse_assignment_or_expression_statement(
     auto stmt = std::make_unique<ExpressionStatementNode>();
     stmt->expression = std::move(expr);
     return stmt;
+}
+
+std::unique_ptr<StatementNode> Parser::parse_sequential_functions(bool outer_is_async, bool outer_is_generator) {
+    Token openTok = consume();  // consume '('
+
+    auto skip_formatting = [&]() {
+        while (peek().type == TokenType::NEWLINE ||
+            peek().type == TokenType::INDENT ||
+            peek().type == TokenType::DEDENT) {
+            consume();
+        }
+    };
+
+    skip_formatting();
+
+    if (peek().type == TokenType::CLOSEPARENTHESIS) {
+        Token tok = peek();
+        throw SwaziError("SyntaxError", "Empty function declaration list not allowed", tok.loc);
+    }
+
+    std::vector<std::unique_ptr<FunctionDeclarationNode>> declarations;
+
+    while (peek().type != TokenType::CLOSEPARENTHESIS && peek().type != TokenType::EOF_TOKEN) {
+        skip_formatting();
+
+        // Check for per-function modifiers
+        bool func_is_async = outer_is_async;
+        bool func_is_generator = outer_is_generator;
+
+        if (peek().type == TokenType::STAR) {
+            consume();
+            func_is_generator = true;
+        }
+
+        if (peek().type == TokenType::ASYNC) {
+            consume();
+            func_is_async = true;
+        }
+
+        // Reject async generators per existing rules
+        if (func_is_async && func_is_generator) {
+            throw SwaziError("SyntaxError",
+                "Async functions cannot be generators (kazi* cannot be async).",
+                peek().loc);
+        }
+
+        skip_formatting();
+
+        // Parse function name
+        expect(TokenType::IDENTIFIER, "Expected function name in declaration list");
+        Token nameTok = tokens[position - 1];
+
+        auto funcNode = std::make_unique<FunctionDeclarationNode>();
+        funcNode->name = nameTok.value;
+        funcNode->token = nameTok;
+        funcNode->is_async = func_is_async;
+        funcNode->is_generator = func_is_generator;
+
+        skip_formatting();
+
+        // Parse parameters (either parenthesized or bare identifiers)
+        bool rest_seen = false;
+        if (match(TokenType::OPENPARENTHESIS)) {
+            skip_formatting();
+            if (peek().type != TokenType::CLOSEPARENTHESIS) {
+                while (true) {
+                    skip_formatting();
+
+                    // Rest param
+                    if (peek().type == TokenType::ELLIPSIS) {
+                        Token ellTok = consume();
+                        if (rest_seen) {
+                            throw SwaziError("SyntaxError", "Only one rest parameter allowed", ellTok.loc);
+                        }
+                        expect(TokenType::IDENTIFIER, "Expected identifier after '...'");
+                        Token id = tokens[position - 1];
+
+                        auto p = std::make_unique<ParameterNode>();
+                        p->token = ellTok;
+                        p->name = id.value;
+                        p->is_rest = true;
+                        p->rest_required_count = 0;
+
+                        if (peek().type == TokenType::OPENBRACKET) {
+                            consume();
+                            expect(TokenType::NUMBER, "Expected number in rest count");
+                            Token numTok = tokens[position - 1];
+                            try {
+                                p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
+                            } catch (...) {
+                                throw SwaziError("SyntaxError", "Invalid rest count", numTok.loc);
+                            }
+                            expect(TokenType::CLOSEBRACKET, "Expected ']'");
+                        }
+
+                        funcNode->parameters.push_back(std::move(p));
+                        rest_seen = true;
+
+                        if (peek().type == TokenType::COMMA) {
+                            if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
+                                throw SwaziError("SyntaxError",
+                                    "Rest parameter must be last", peek_next().loc);
+                            }
+                        }
+                        break;
+                    }
+
+                    // Normal parameter
+                    expect(TokenType::IDENTIFIER, "Expected parameter name");
+                    Token pTok = tokens[position - 1];
+                    auto pnode = std::make_unique<ParameterNode>();
+                    pnode->token = pTok;
+                    pnode->name = pTok.value;
+                    pnode->is_rest = false;
+                    pnode->defaultValue = nullptr;
+
+                    skip_formatting();
+                    if (peek().type == TokenType::ASSIGN) {
+                        consume();
+                        skip_formatting();
+                        pnode->defaultValue = parse_expression();
+                    }
+
+                    funcNode->parameters.push_back(std::move(pnode));
+
+                    skip_formatting();
+                    if (match(TokenType::COMMA)) {
+                        skip_formatting();
+                        if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after parameters");
+        } else {
+            // Bare identifiers (legacy form)
+            while (peek().type == TokenType::IDENTIFIER || peek().type == TokenType::ELLIPSIS) {
+                if (peek().type == TokenType::ELLIPSIS) {
+                    Token ellTok = consume();
+                    if (rest_seen) {
+                        throw SwaziError("SyntaxError", "Only one rest parameter allowed", ellTok.loc);
+                    }
+                    expect(TokenType::IDENTIFIER, "Expected identifier");
+                    Token id = tokens[position - 1];
+
+                    auto p = std::make_unique<ParameterNode>();
+                    p->token = ellTok;
+                    p->name = id.value;
+                    p->is_rest = true;
+                    p->rest_required_count = 0;
+
+                    if (peek().type == TokenType::OPENBRACKET) {
+                        consume();
+                        expect(TokenType::NUMBER, "Expected number");
+                        Token numTok = tokens[position - 1];
+                        try {
+                            p->rest_required_count = static_cast<size_t>(std::stoul(numTok.value));
+                        } catch (...) {
+                            throw SwaziError("SyntaxError", "Invalid rest count", numTok.loc);
+                        }
+                        expect(TokenType::CLOSEBRACKET, "Expected ']'");
+                    }
+
+                    funcNode->parameters.push_back(std::move(p));
+                    rest_seen = true;
+
+                    if (peek().type == TokenType::COMMA) {
+                        throw SwaziError("SyntaxError",
+                            "Rest parameter must be last", peek().loc);
+                    }
+                    break;
+                }
+
+                Token pTok = consume();
+                auto pnode = std::make_unique<ParameterNode>();
+                pnode->token = pTok;
+                pnode->name = pTok.value;
+                pnode->is_rest = false;
+                pnode->defaultValue = nullptr;
+
+                if (peek().type == TokenType::ASSIGN) {
+                    consume();
+                    pnode->defaultValue = parse_expression();
+                }
+
+                funcNode->parameters.push_back(std::move(pnode));
+
+                if (!match(TokenType::COMMA)) break;
+            }
+        }
+
+        skip_formatting();
+
+        // Parse body (either colon+indent or brace)
+        struct AsyncScopeGuard {
+            Parser& parser;
+            bool prev_async, prev_gen;
+            AsyncScopeGuard(Parser& p, bool a, bool g)
+                : parser(p), prev_async(p.in_async_function), prev_gen(p.in_generator_function) {
+                parser.in_async_function = a;
+                parser.in_generator_function = g;
+            }
+            ~AsyncScopeGuard() {
+                parser.in_async_function = prev_async;
+                parser.in_generator_function = prev_gen;
+            }
+        };
+
+        AsyncScopeGuard guard(*this, func_is_async, func_is_generator);
+
+        if (match(TokenType::COLON)) {
+            expect(TokenType::NEWLINE, "Expected newline after ':'");
+            expect(TokenType::INDENT, "Expected indent");
+            while (peek().type != TokenType::DEDENT && peek().type != TokenType::EOF_TOKEN) {
+                auto stmt = parse_statement();
+                if (!stmt) break;
+                funcNode->body.push_back(std::move(stmt));
+            }
+            expect(TokenType::DEDENT, "Expected dedent");
+        } else if (match(TokenType::OPENBRACE)) {
+            while (peek().type != TokenType::CLOSEBRACE && peek().type != TokenType::EOF_TOKEN) {
+                while (peek().type == TokenType::NEWLINE ||
+                    peek().type == TokenType::INDENT ||
+                    peek().type == TokenType::DEDENT) {
+                    consume();
+                }
+                if (peek().type == TokenType::CLOSEBRACE) break;
+                auto stmt = parse_statement();
+                if (!stmt) break;
+                funcNode->body.push_back(std::move(stmt));
+            }
+            expect(TokenType::CLOSEBRACE, "Expected '}'");
+        } else {
+            expect(TokenType::COLON, "Expected ':' or '{' for function body");
+        }
+
+        declarations.push_back(std::move(funcNode));
+
+        skip_formatting();
+        if (peek().type == TokenType::COMMA) {
+            consume();
+            skip_formatting();
+            if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+            continue;
+        }
+
+        if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+
+        throw SwaziError("SyntaxError", "Expected ',' or ')' in function list", peek().loc);
+    }
+
+    skip_formatting();
+    expect(TokenType::CLOSEPARENTHESIS, "Expected ')' after function list");
+
+    if (peek().type == TokenType::SEMICOLON) consume();
+
+    auto seqFunc = std::make_unique<SequentialFunctionDeclarationNode>();
+    seqFunc->token = openTok;
+    seqFunc->is_async = outer_is_async;
+    seqFunc->is_generator = outer_is_generator;
+    seqFunc->declarations = std::move(declarations);
+
+    return seqFunc;
 }
 std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
     struct AsyncScopeGuard {

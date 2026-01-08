@@ -71,6 +71,8 @@ class Parser {
     std::unique_ptr<StatementNode> parse_assignment_or_expression_statement();
     std::unique_ptr<StatementNode> parse_try_catch();
 
+    std::unique_ptr<StatementNode> parse_sequential_functions(bool outer_is_async, bool outer_is_generator);
+
     // function parsing
     std::unique_ptr<StatementNode> parse_function_declaration();
     std::unique_ptr<StatementNode> parse_class_declaration();

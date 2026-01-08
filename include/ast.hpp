@@ -630,7 +630,7 @@ struct VariableDeclarationNode : public StatementNode {
 
 struct SequentialDeclarationNode : public StatementNode {
     std::vector<std::unique_ptr<VariableDeclarationNode>> declarations;
-    
+
     std::unique_ptr<StatementNode> clone() const override {
         auto n = std::make_unique<SequentialDeclarationNode>();
         n->token = token;
@@ -651,7 +651,7 @@ struct SequentialDeclarationNode : public StatementNode {
         }
         return n;
     }
-    
+
     std::string to_string() const override {
         std::ostringstream ss;
         ss << "data (";
@@ -931,6 +931,45 @@ struct FunctionDeclarationNode : public StatementNode {
         n->body.reserve(body.size());
         for (const auto& s : body) n->body.push_back(s ? s->clone() : nullptr);
         return n;
+    }
+};
+
+struct SequentialFunctionDeclarationNode : public StatementNode {
+    std::vector<std::unique_ptr<FunctionDeclarationNode>> declarations;
+    bool is_async = false;      // applies to all if at top level
+    bool is_generator = false;  // applies to all if at top level
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<SequentialFunctionDeclarationNode>();
+        n->token = token;
+        n->is_async = is_async;
+        n->is_generator = is_generator;
+        n->declarations.reserve(declarations.size());
+        for (const auto& d : declarations) {
+            if (d) {
+                auto cloned = d->clone();
+                auto func_ptr = dynamic_cast<FunctionDeclarationNode*>(cloned.get());
+                if (!func_ptr) {
+                    throw std::runtime_error("SequentialFunctionDeclarationNode::clone(): expected FunctionDeclarationNode");
+                }
+                n->declarations.push_back(std::unique_ptr<FunctionDeclarationNode>(
+                    static_cast<FunctionDeclarationNode*>(cloned.release())));
+            } else {
+                n->declarations.push_back(nullptr);
+            }
+        }
+        return n;
+    }
+
+    std::string to_string() const override {
+        std::ostringstream ss;
+        ss << "kazi (";
+        for (size_t i = 0; i < declarations.size(); ++i) {
+            if (i > 0) ss << ", ";
+            ss << (declarations[i] ? declarations[i]->name : "<null>");
+        }
+        ss << ")";
+        return ss.str();
     }
 };
 

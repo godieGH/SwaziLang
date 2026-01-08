@@ -162,17 +162,17 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         env->set(vd->identifier, var);
         return;
     }
-    
+
     if (auto seqDecl = dynamic_cast<SequentialDeclarationNode*>(stmt)) {
         for (auto& declNode : seqDecl->declarations) {
             if (!declNode) continue;
-            
+
             // Evaluate each declaration directly in the current environment
             Value val = std::monostate{};
             if (declNode->value) {
                 val = evaluate_expression(declNode->value.get(), env);
             }
-            
+
             // Handle destructuring patterns
             if (declNode->pattern) {
                 if (declNode->is_constant && std::holds_alternative<std::monostate>(val)) {
@@ -182,7 +182,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         declNode->token.loc);
                 }
                 bind_pattern_to_value(declNode->pattern.get(), val, env, declNode->is_constant, declNode->token);
-            } 
+            }
             // Handle simple identifier
             else {
                 Environment::Variable var{val, declNode->is_constant};
@@ -197,7 +197,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         }
         return;
     }
-    
+
     // Assignment: target is now an ExpressionNode (IdentifierNode / IndexExpressionNode / MemberExpressionNode)
     if (auto an = dynamic_cast<AssignmentNode*>(stmt)) {
         Value rhs = evaluate_expression(an->value.get(), env);
@@ -349,6 +349,39 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         auto fn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, env, persisted->token);
         Environment::Variable var{fn, true};
         env->set(persisted->name, var);
+        return;
+    }
+
+    if (auto seqFunc = dynamic_cast<SequentialFunctionDeclarationNode*>(stmt)) {
+        for (auto& funcDecl : seqFunc->declarations) {
+            if (!funcDecl) continue;
+
+            // Persist function declaration node (same as single function)
+            auto persisted = std::make_shared<FunctionDeclarationNode>();
+            persisted->token = funcDecl->token;
+            persisted->name = funcDecl->name;
+            persisted->is_async = funcDecl->is_async;
+            persisted->is_generator = funcDecl->is_generator;
+
+            persisted->parameters.reserve(funcDecl->parameters.size());
+            for (const auto& p : funcDecl->parameters) {
+                if (p)
+                    persisted->parameters.push_back(p->clone());
+                else
+                    persisted->parameters.push_back(nullptr);
+            }
+
+            persisted->body.reserve(funcDecl->body.size());
+            for (const auto& s : funcDecl->body) {
+                persisted->body.push_back(s ? s->clone() : nullptr);
+            }
+
+            // Create function value and bind to environment
+            auto fn = std::make_shared<FunctionValue>(
+                persisted->name, persisted->parameters, persisted, env, persisted->token);
+            Environment::Variable var{fn, true};  // constant binding
+            env->set(persisted->name, var);
+        }
         return;
     }
 

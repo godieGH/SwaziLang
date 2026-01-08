@@ -516,6 +516,40 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
 
     if (p.type == TokenType::KAZI) {
         consume();  // consume 'kazi'
+        Token kaziTok = tokens[position - 1];
+
+        bool is_generator = false;
+        bool is_async = false;
+
+        // Check for generator marker
+        if (peek().type == TokenType::STAR) {
+            consume();
+            is_generator = true;
+        }
+
+        // Check for async modifier
+        if (peek().type == TokenType::ASYNC) {
+            consume();
+            is_async = true;
+        }
+
+        // Reject async generators
+        if (is_async && is_generator) {
+            throw SwaziError("SyntaxError",
+                "Async functions cannot be generators", kaziTok.loc);
+        }
+
+        // Check for sequential form: kazi (...) or kazi* (...) or kazi async (...)
+        if (peek().type == TokenType::OPENPARENTHESIS) {
+            return parse_sequential_functions(is_async, is_generator);
+        }
+
+        // Otherwise parse single function (existing logic, but need to preserve modifiers)
+        // Rewind position to before 'kazi' consumption and call existing parser
+        position--;                    // back to 'kazi'
+        if (is_generator) position--;  // back to '*'
+        if (is_async) position--;      // back to 'async'
+        consume();                     // re-consume 'kazi'
         return parse_function_declaration();
     }
 
