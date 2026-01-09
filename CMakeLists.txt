@@ -176,6 +176,7 @@ endif()
 # --- MAIN EXECUTABLE (just main.cpp, links to library) ---
 add_executable(swazi src/main.cpp)
 target_link_libraries(swazi PRIVATE swazi_lib)
+target_link_options(swazi PRIVATE -rdynamic)
 
 # --- INSTALLATION ---
 install(TARGETS swazi DESTINATION bin)

@@ -18,6 +18,17 @@ bool is_vendor_spec(const std::string& module_spec) {
     return module_spec.rfind("vendor:", 0) == 0;
 }
 
+// Helper functions
+bool is_abi_spec(const std::string& module_spec) {
+    return module_spec.rfind("abi:", 0) == 0;
+}
+std::string parse_abi_spec(const std::string& module_spec) {
+    if (module_spec.rfind("abi:", 0) == 0) {
+        return module_spec.substr(4); // Skip "abi:"
+    }
+    return module_spec;
+}
+
 // Helper to check if a module spec is a URL import
 bool is_url_spec(const std::string& module_spec) {
     return module_spec.rfind("url:", 0) == 0;
@@ -78,6 +89,131 @@ std::string find_project_root(const std::string& start_path) {
 
     return "";
 }
+
+std::string resolve_addon_path(const std::string& addon_name, 
+                                const std::string& requester_filename) {
+    // Build library name based on platform
+    std::string lib_name;
+#ifdef _WIN32
+    lib_name = addon_name + ".dll";
+#elif __APPLE__
+    lib_name = "lib" + addon_name + ".dylib";
+#else
+    lib_name = "lib" + addon_name + ".so";
+#endif
+
+    // Determine base directory (where the importing script is located)
+    fs::path baseDir;
+    if (requester_filename.empty() || requester_filename == "<repl>") {
+        baseDir = fs::current_path();
+    } else {
+        try {
+            baseDir = fs::canonical(requester_filename).parent_path();
+        } catch (...) {
+            baseDir = fs::path(requester_filename).parent_path();
+        }
+    }
+
+    // Search paths in priority order
+    std::vector<fs::path> search_paths;
+    
+    // 1. HIGHEST PRIORITY: Relative to the importing script
+    //    If script is at /home/user/myapp/src/main.sl
+    //    Look in /home/user/myapp/src/addons/
+    search_paths.push_back(baseDir / "addons");
+    
+    // 2. Same directory as script
+    //    Look in /home/user/myapp/src/
+    search_paths.push_back(baseDir);
+    
+    // 3. Parent directory's addons folder (for project-level addons)
+    //    If script is at /home/user/myapp/src/main.sl
+    //    Look in /home/user/myapp/addons/
+    if (baseDir.has_parent_path()) {
+        search_paths.push_back(baseDir.parent_path() / "addons");
+    }
+    
+    // 4. Project root addons (find nearest swazi.json)
+    std::string project_root = find_project_root(requester_filename);
+    if (!project_root.empty()) {
+        search_paths.push_back(fs::path(project_root) / "addons");
+    }
+    
+    // 5. Current working directory
+    search_paths.push_back(fs::current_path() / "addons");
+    search_paths.push_back(fs::current_path());
+    
+    // 6. User's home directory
+    const char* home = std::getenv("HOME");
+    if (!home) home = std::getenv("USERPROFILE"); // Windows
+    if (home) {
+        search_paths.push_back(fs::path(home) / ".swazi" / "addons");
+    }
+    
+    // 7. System-wide installations
+#ifdef _WIN32
+    search_paths.push_back("C:\\Program Files\\Swazi\\addons");
+    search_paths.push_back("C:\\Program Files (x86)\\Swazi\\addons");
+#else
+    search_paths.push_back("/usr/local/lib/swazi/addons");
+    search_paths.push_back("/usr/lib/swazi/addons");
+#endif
+    
+    // 8. Environment variable override
+    const char* addon_path_env = std::getenv("SWAZI_ADDON_PATH");
+    if (addon_path_env) {
+        // Split by path delimiter (: on Unix, ; on Windows)
+#ifdef _WIN32
+        char delimiter = ';';
+#else
+        char delimiter = ':';
+#endif
+        std::string path_str(addon_path_env);
+        size_t start = 0;
+        size_t end = path_str.find(delimiter);
+        while (end != std::string::npos) {
+            search_paths.push_back(path_str.substr(start, end - start));
+            start = end + 1;
+            end = path_str.find(delimiter, start);
+        }
+        search_paths.push_back(path_str.substr(start));
+    }
+    
+    // Search for the addon
+    for (const auto& search_dir : search_paths) {
+        fs::path candidate = search_dir / lib_name;
+        
+        if (fs::exists(candidate)) {
+            try {
+                return fs::canonical(candidate).string();
+            } catch (...) {
+                return fs::weakly_canonical(candidate).string();
+            }
+        }
+    }
+    
+    // Not found - build helpful error message
+    std::ostringstream err;
+    err << "ABI addon '" << addon_name << "' not found.\n";
+    err << "Searched for: " << lib_name << "\n";
+    err << "In locations:\n";
+    for (const auto& path : search_paths) {
+        err << "  - " << path.string() << "\n";
+    }
+    err << "\nTo fix:\n";
+    err << "  1. Place " << lib_name << " in " << (baseDir / "addons").string() << "\n";
+    err << "  2. Or set SWAZI_ADDON_PATH environment variable\n";
+    err << "  3. Or install globally to " << 
+#ifdef _WIN32
+        "C:\\Program Files\\Swazi\\addons"
+#else
+        "/usr/local/lib/swazi/addons"
+#endif
+        << "\n";
+    
+    throw std::runtime_error(err.str());
+}
+
 
 // Resolve the module specifier to an existing file path. Tries:
 // - If spec has extension and exists -> use it.
@@ -385,6 +521,46 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
                 "'\n"
                 "This feature will download packages from the Swazi registry to ~/.swazi/cache/",
             requesterTok.loc);
+    }
+    
+    if (is_abi_spec(module_spec)) {
+        std::string addon_name = parse_abi_spec(module_spec); // "abi:math" -> "math"
+        
+        // Resolve addon path (searches relative to script, then fallbacks)
+        std::string resolved_path;
+        try {
+            resolved_path = resolve_addon_path(addon_name, requesterTok.loc.filename);
+        } catch (const std::exception& e) {
+            throw SwaziError("ModuleError", e.what(), requesterTok.loc);
+        }
+        
+        // Use canonical path as cache key
+        std::string cache_key = "__abi__:" + resolved_path;
+        
+        // Check cache
+        auto it = module_cache.find(cache_key);
+        if (it != module_cache.end()) {
+            return it->second->exports;
+        }
+        
+        // Load the addon
+        ObjectPtr exports;
+        try {
+            exports = load_addon(resolved_path, this, requesterEnv);
+        } catch (const std::exception& e) {
+            throw SwaziError("AddonError", 
+                std::string("Failed to load addon '") + addon_name + "': " + e.what(),
+                requesterTok.loc);
+        }
+        
+        // Cache it
+        auto rec = std::make_shared<ModuleRecord>();
+        rec->exports = exports;
+        rec->state = ModuleRecord::State::Loaded;
+        rec->path = resolved_path;
+        module_cache[cache_key] = rec;
+        
+        return exports;
     }
 
     {

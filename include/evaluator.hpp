@@ -1113,6 +1113,27 @@ class Evaluator {
     ~Evaluator();
     // Evaluate whole program (caller must ensure ProgramNode lifetime covers evaluation)
     void evaluate(ProgramNode* program);
+    
+    friend ObjectPtr load_addon(const std::string&, Evaluator*, EnvPtr);
+    
+    EnvPtr get_global_env() const { return global_env; }
+    double to_number_public(const Value& v, Token token = {}) { return to_number(v, token); }
+    bool to_bool_public(const Value& v) { return to_bool(v); }
+    std::string to_string_value_public(const Value& v, bool no_color = false) { 
+        return to_string_value(v, no_color); 
+    }
+    bool is_strict_equal_public(const Value& a, const Value& b) { 
+        return is_strict_equal(a, b); 
+    }
+    Value call_function_public(FunctionPtr fn, const std::vector<Value>& args, 
+                               EnvPtr caller_env, const Token& callToken) {
+        return call_function(fn, args, caller_env, callToken);
+    }
+    Value call_function_with_receiver_public(FunctionPtr fn, ObjectPtr receiver,
+                                             const std::vector<Value>& args,
+                                             EnvPtr caller_env, const Token& callToken) {
+        return call_function_with_receiver(fn, receiver, args, caller_env, callToken);
+    }
 
     // For RELP print on the go.
     Value evaluate_expression(ExpressionNode* expr);
