@@ -545,7 +545,17 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         // Load the addon
         ObjectPtr exports;
         try {
-            exports = load_addon(resolved_path, this, requesterEnv);
+            Value addon_result = load_addon(resolved_path, this, requesterEnv);
+            
+            // ABI addons can return any value type, just like script modules
+            // If it's already an object, use it directly. Otherwise wrap in exports object with 'default'
+            if (std::holds_alternative<ObjectPtr>(addon_result)) {
+                exports = std::get<ObjectPtr>(addon_result);
+            } else {
+                // Wrap non-object return values as default export (consistent with script modules)
+                exports = std::make_shared<ObjectValue>();
+                exports->properties["default"] = PropertyDescriptor{addon_result, false, false, false, Token()};
+            }
         } catch (const std::exception& e) {
             throw SwaziError("AddonError",
                 std::string("Failed to load addon '") + addon_name + "': " + e.what(),

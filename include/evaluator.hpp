@@ -1114,7 +1114,7 @@ class Evaluator {
     // Evaluate whole program (caller must ensure ProgramNode lifetime covers evaluation)
     void evaluate(ProgramNode* program);
 
-    friend ObjectPtr load_addon(const std::string&, Evaluator*, EnvPtr);
+    friend Value load_addon(const std::string&, Evaluator*, EnvPtr);
 
     EnvPtr get_global_env() const { return global_env; }
     double to_number_public(const Value& v, Token token = {}) { return to_number(v, token); }

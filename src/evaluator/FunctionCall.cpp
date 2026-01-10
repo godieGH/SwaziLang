@@ -584,7 +584,12 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
                 "Native function has no implementation.",
                 callToken.loc);
         }
-        return fn->native_impl(args, caller_env, callToken);
+        auto local = std::make_shared<Environment>(caller_env);
+        Environment::Variable thisVar;
+        thisVar.value = receiver;
+        thisVar.is_constant = false;
+        local->set("$", thisVar);
+        return fn->native_impl(args, local, callToken);
     }
 
     // compute minimum required arguments (including rest_required_count)

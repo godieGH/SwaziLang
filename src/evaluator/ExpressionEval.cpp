@@ -5505,7 +5505,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     effectiveTok.loc.col = 1;
                 }
             }
-
+            
             return call_function(fn, args, env, effectiveTok);
         }
         throw SwaziError(
@@ -5609,9 +5609,19 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 thisVar.value = instance;
                 thisVar.is_constant = false;
                 initEnv->set("$", thisVar);
+    
+                std::string marker_name = "__native_property_" + p->name;
+                auto marker_it = cls->static_table->properties.find(marker_name);
+                
                 Value initVal = std::monostate{};
-                if (p->value) initVal = evaluate_expression(p->value.get(), initEnv);
-
+                if (marker_it != cls->static_table->properties.end()) {
+                    // Native property with stored initial value
+                    initVal = marker_it->second.value;
+                } else if (p->value) {
+                    // AST-based property with expression
+                    initVal = evaluate_expression(p->value.get(), initEnv);
+                }
+                
                 PropertyDescriptor pd;
                 pd.value = initVal;
                 pd.is_private = p->is_private;
@@ -5631,6 +5641,47 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 // Materializing them onto the instance exposes them as callable instance props
                 // (e.g. ob.Base(...)) which is incorrect.
                 if (m->is_constructor || m->is_destructor) continue;
+                
+                
+                std::string marker_name = "__native_method_" + m->name;
+                auto marker_it = c->static_table->properties.find(marker_name);
+                
+                if (marker_it != c->static_table->properties.end()) {
+                    if (std::holds_alternative<FunctionPtr>(marker_it->second.value)) {
+                        FunctionPtr nativeFn = std::get<FunctionPtr>(marker_it->second.value);
+                        
+                        // Create closure with $ bound (same as AST methods)
+                        EnvPtr methodClosureParent = classEnv;
+                        EnvPtr methodClosure = std::make_shared<Environment>(methodClosureParent);
+                        Environment::Variable thisVar;
+                        thisVar.value = instance;
+                        thisVar.is_constant = true;
+                        methodClosure->set("$", thisVar);
+                        
+                        // Wrapper that substitutes methodClosure for callEnv
+                        auto wrapper_impl = [nativeFn, methodClosure](
+                            const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                            // Pass methodClosure to original native impl
+                            return nativeFn->native_impl(args, methodClosure, token);
+                        };
+                        
+                        auto wrappedFn = std::make_shared<FunctionValue>(
+                            nativeFn->name,
+                            wrapper_impl,
+                            methodClosure,
+                            nativeFn->token
+                        );
+                        
+                        PropertyDescriptor pd;
+                        pd.value = wrappedFn;
+                        pd.is_private = m->is_private;
+                        pd.is_locked = m->is_locked;
+                        pd.is_readonly = m->is_getter;
+                        pd.token = m->token;
+                        instance->properties[m->name] = std::move(pd);
+                        continue;
+                    }
+                }               
 
                 // persist a FunctionDeclarationNode like other functions do
                 auto persisted = std::make_shared<FunctionDeclarationNode>();
@@ -5676,52 +5727,74 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         // Call constructor if any on the class itself (derived class constructor should be found on cls->body->methods with is_constructor)
         if (cls->body) {
-            // Find constructor method in the class (only in this class, not searching super automatically)
-            ClassMethodNode* ctorNode = nullptr;
-            for (auto& m : cls->body->methods) {
-                if (m && m->is_constructor) {
-                    ctorNode = m.get();
-                    break;
+          
+            auto native_ctor_it = cls->static_table->properties.find("__constructor__");
+            if (native_ctor_it != cls->static_table->properties.end()) {
+                if (std::holds_alternative<FunctionPtr>(native_ctor_it->second.value)) {
+                    FunctionPtr constructorFn = std::get<FunctionPtr>(native_ctor_it->second.value);
+                    
+                    // Evaluate call arguments
+                    std::vector<Value> ctorArgs;
+                    ctorArgs.reserve(ne->arguments.size());
+                    for (auto& a : ne->arguments) {
+                        ctorArgs.push_back(evaluate_expression(a.get(), env));
+                    }
+                    
+                    // Call native constructor with instance as receiver
+                    ClassPtr saved_ctx = current_class_context;
+                    current_class_context = cls;
+                    call_function_with_receiver(constructorFn, instance, ctorArgs, env, ne->token);
+                    current_class_context = saved_ctx;
                 }
+            } else {
+                    // Find constructor method in the class (only in this class, not searching super automatically)
+                    ClassMethodNode* ctorNode = nullptr;
+                    for (auto& m : cls->body->methods) {
+                        if (m && m->is_constructor) {
+                            ctorNode = m.get();
+                            break;
+                        }
+                    }
+        
+                    if (ctorNode) {
+                        auto persisted = std::make_shared<FunctionDeclarationNode>();
+                        persisted->name = ctorNode->name;
+                        persisted->token = ctorNode->token;
+                        persisted->is_async = ctorNode->is_async;
+        
+                        // clone parameter descriptors from ctorNode->params
+                        persisted->parameters.reserve(ctorNode->params.size());
+                        for (const auto& pp : ctorNode->params) {
+                            if (pp)
+                                persisted->parameters.push_back(pp->clone());
+                            else
+                                persisted->parameters.push_back(nullptr);
+                        }
+        
+                        // clone body statements
+                        persisted->body.reserve(ctorNode->body.size());
+                        for (const auto& stmt : ctorNode->body) {
+                            persisted->body.push_back(stmt ? stmt->clone() : nullptr);
+                        }
+        
+                        // Create FunctionValue for constructor with closure = env (the class-decl environment)
+                        EnvPtr ctorClosure = cls->defining_env ? cls->defining_env : env;
+                        auto constructorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, ctorClosure, persisted->token);
+        
+                        // Evaluate call arguments
+                        std::vector<Value> ctorArgs;
+                        ctorArgs.reserve(ne->arguments.size());
+                        for (auto& a : ne->arguments) ctorArgs.push_back(evaluate_expression(a.get(), env));
+        
+                        // Call constructor with the instance as receiver so $ is available in the call frame,
+                        // and set current_class_context so 'super(...)' works inside constructor.
+                        ClassPtr saved_ctx = current_class_context;
+                        current_class_context = cls;
+                        call_function_with_receiver(constructorFn, instance, ctorArgs, env, persisted->token);
+                        current_class_context = saved_ctx;
+                    }
             }
-
-            if (ctorNode) {
-                auto persisted = std::make_shared<FunctionDeclarationNode>();
-                persisted->name = ctorNode->name;
-                persisted->token = ctorNode->token;
-                persisted->is_async = ctorNode->is_async;
-
-                // clone parameter descriptors from ctorNode->params
-                persisted->parameters.reserve(ctorNode->params.size());
-                for (const auto& pp : ctorNode->params) {
-                    if (pp)
-                        persisted->parameters.push_back(pp->clone());
-                    else
-                        persisted->parameters.push_back(nullptr);
-                }
-
-                // clone body statements
-                persisted->body.reserve(ctorNode->body.size());
-                for (const auto& stmt : ctorNode->body) {
-                    persisted->body.push_back(stmt ? stmt->clone() : nullptr);
-                }
-
-                // Create FunctionValue for constructor with closure = env (the class-decl environment)
-                EnvPtr ctorClosure = cls->defining_env ? cls->defining_env : env;
-                auto constructorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, ctorClosure, persisted->token);
-
-                // Evaluate call arguments
-                std::vector<Value> ctorArgs;
-                ctorArgs.reserve(ne->arguments.size());
-                for (auto& a : ne->arguments) ctorArgs.push_back(evaluate_expression(a.get(), env));
-
-                // Call constructor with the instance as receiver so $ is available in the call frame,
-                // and set current_class_context so 'super(...)' works inside constructor.
-                ClassPtr saved_ctx = current_class_context;
-                current_class_context = cls;
-                call_function_with_receiver(constructorFn, instance, ctorArgs, env, persisted->token);
-                current_class_context = saved_ctx;
-            }
+       
         }
 
         // return the created instance as a Value
@@ -5757,6 +5830,30 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
         ClassPtr parent = current_class_context->super;
         if (!parent) return std::monostate{};  // no-op if no super
+        
+        auto native_parent_ctor_it = parent->static_table->properties.find("__constructor__");
+        if (native_parent_ctor_it != parent->static_table->properties.end()) {
+            if (std::holds_alternative<FunctionPtr>(native_parent_ctor_it->second.value)) {
+                FunctionPtr parentCtor = std::get<FunctionPtr>(native_parent_ctor_it->second.value);
+                
+                std::vector<Value> args;
+                args.reserve(se->arguments.size());
+                for (auto& a : se->arguments) {
+                    args.push_back(evaluate_expression(a.get(), env));
+                }
+                
+                ClassPtr saved_ctx = current_class_context;
+                current_class_context = parent;
+                try {
+                    Value res = call_function_with_receiver(parentCtor, receiver, args, env, se->token);
+                    current_class_context = saved_ctx;
+                    return res;
+                } catch (...) {
+                    current_class_context = saved_ctx;
+                    throw;
+                }
+            }
+        }
 
         // find parent constructor
         if (!parent->body) return std::monostate{};
@@ -5825,34 +5922,44 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
         if (it != obj->properties.end() && std::holds_alternative<ClassPtr>(it->second.value)) {
             ClassPtr cls = std::get<ClassPtr>(it->second.value);
             if (cls->body) {
+              auto native_dtor_it = cls->static_table->properties.find("__destructor__");
+              if (native_dtor_it != cls->static_table->properties.end()) {
+                  if (std::holds_alternative<FunctionPtr>(native_dtor_it->second.value)) {
+                      FunctionPtr dtorFn = std::get<FunctionPtr>(native_dtor_it->second.value);
+                      Value res = call_function_with_receiver(dtorFn, obj, args, env, de->token);
+                      obj->properties.clear();
+                      return res;
+                  }
+              } else {
                 for (auto& m : cls->body->methods) {
-                    if (m && m->is_destructor) {
-                        auto persisted = std::make_shared<FunctionDeclarationNode>();
-                        persisted->name = m->name;
-                        persisted->token = m->token;
-                        persisted->is_async = m->is_async;
-
-                        // clone parameter descriptors from method node
-                        persisted->parameters.reserve(m->params.size());
-                        for (const auto& pp : m->params) {
-                            if (pp)
-                                persisted->parameters.push_back(pp->clone());
-                            else
-                                persisted->parameters.push_back(nullptr);
-                        }
-
-                        persisted->body.reserve(m->body.size());
-                        for (const auto& s : m->body) persisted->body.push_back(s ? s->clone() : nullptr);
-
-                        EnvPtr dtorClosure = cls->defining_env ? cls->defining_env : env;
-                        auto dtorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, dtorClosure, persisted->token);
-
-                        // forward evaluated args into destructor call
-                        Value res = call_function_with_receiver(dtorFn, obj, args, env, m->token);
-                        obj->properties.clear();
-                        return res;
-                    }
-                }
+                                  if (m && m->is_destructor) {
+                                      auto persisted = std::make_shared<FunctionDeclarationNode>();
+                                      persisted->name = m->name;
+                                      persisted->token = m->token;
+                                      persisted->is_async = m->is_async;
+              
+                                      // clone parameter descriptors from method node
+                                      persisted->parameters.reserve(m->params.size());
+                                      for (const auto& pp : m->params) {
+                                          if (pp)
+                                              persisted->parameters.push_back(pp->clone());
+                                          else
+                                              persisted->parameters.push_back(nullptr);
+                                      }
+              
+                                      persisted->body.reserve(m->body.size());
+                                      for (const auto& s : m->body) persisted->body.push_back(s ? s->clone() : nullptr);
+              
+                                      EnvPtr dtorClosure = cls->defining_env ? cls->defining_env : env;
+                                      auto dtorFn = std::make_shared<FunctionValue>(persisted->name, persisted->parameters, persisted, dtorClosure, persisted->token);
+              
+                                      // forward evaluated args into destructor call
+                                      Value res = call_function_with_receiver(dtorFn, obj, args, env, m->token);
+                                      obj->properties.clear();
+                                      return res;
+                                  }
+                              }
+              }
             }
         }
 

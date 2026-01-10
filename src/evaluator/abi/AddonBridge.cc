@@ -4,11 +4,13 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <iostream>
 #include <vector>
 
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
 #include "swazi_abi.h"
+#include "ClassRuntime.hpp" 
 
 #ifdef _WIN32
 #include <windows.h>
@@ -710,6 +712,7 @@ static swazi_status api_delete_element(swazi_env env, swazi_value array,
 // API Implementation - Function Operations
 // ============================================================================
 
+
 static swazi_status api_create_function(swazi_env env, const char* utf8name,
     size_t length, swazi_callback cb,
     void* data, swazi_value* result) {
@@ -723,23 +726,32 @@ static swazi_status api_create_function(swazi_env env, const char* utf8name,
             name = std::string(utf8name, length);
         }
     } else {
-        name = "anonymous";
+        name = "<lambda>";
     }
 
     // Create native implementation that bridges to addon callback
     auto native_impl = [cb, data, env](const std::vector<Value>& args,
                            EnvPtr callEnv, const Token& token) -> Value {
-        // Build callback info
+        // Build callback info WITH receiver support
         swazi_callback_info_s cbinfo;
         cbinfo.args = args;
         cbinfo.user_data = data;
+        
+        // Try to extract receiver from environment's "$" binding
         cbinfo.this_object = nullptr;
+        if (callEnv && callEnv->has("$")) {
+            Value dollar = callEnv->get("$").value;
+            if (std::holds_alternative<ObjectPtr>(dollar)) {
+                cbinfo.this_object = std::get<ObjectPtr>(dollar);
+            }
+        }
+        
         cbinfo.new_target = std::monostate{};
 
         // Call addon's callback
         swazi_value result_handle = cb(env, &cbinfo);
 
-        // *** FIX: Check for pending exception FIRST ***
+        // Check for pending exception FIRST
         if (env->exception_pending) {
             env->exception_pending = false;
             throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
@@ -767,49 +779,48 @@ static swazi_status api_call_function(swazi_env env, swazi_value recv,
     swazi_value* result) {
     if (!env || !func) return SWAZI_INVALID_ARG;
 
-    const Value& func_val = unwrap_value(func);
-    if (!std::holds_alternative<FunctionPtr>(func_val)) {
+    const Value& fn_val = unwrap_value(func);
+    if (!std::holds_alternative<FunctionPtr>(fn_val)) {
         set_error(env, "TypeError", "Value is not a function");
         return SWAZI_FUNCTION_EXPECTED;
     }
 
-    FunctionPtr fn = std::get<FunctionPtr>(func_val);
+    FunctionPtr fn = std::get<FunctionPtr>(fn_val);
 
-    // Build arguments
+    // Convert arguments
     std::vector<Value> args;
     args.reserve(argc);
     for (size_t i = 0; i < argc; i++) {
         args.push_back(unwrap_value(argv[i]));
     }
 
-    // Call the function
     try {
-        Value ret;
+        Value call_result;
+        
+        // Handle receiver if provided
         if (recv) {
-            const Value& recv_val = unwrap_value(recv);
+            Value recv_val = unwrap_value(recv);
             if (std::holds_alternative<ObjectPtr>(recv_val)) {
-                ObjectPtr obj = std::get<ObjectPtr>(recv_val);
-                ret = env->evaluator->call_function_with_receiver_public(
-                    fn, obj, args, env->env_ptr, Token());
+                ObjectPtr receiver = std::get<ObjectPtr>(recv_val);
+                call_result = env->evaluator->call_function_with_receiver_public(
+                    fn, receiver, args, env->env_ptr, Token());
             } else {
-                ret = env->evaluator->invoke_function(fn, args, env->env_ptr, Token());
+                call_result = env->evaluator->call_function_public(
+                    fn, args, env->env_ptr, Token());
             }
         } else {
-            ret = env->evaluator->invoke_function(fn, args, env->env_ptr, Token());
+            call_result = env->evaluator->call_function_public(
+                fn, args, env->env_ptr, Token());
         }
 
         if (result) {
-            *result = wrap_value(ret);
+            *result = wrap_value(call_result);
         }
+
         return SWAZI_OK;
     } catch (const SwaziError& e) {
         set_error(env, "Error", e.what());
-        env->exception_pending = true;
-        return SWAZI_PENDING_EXCEPTION;
-    } catch (const std::exception& e) {
-        set_error(env, "Error", e.what());
-        env->exception_pending = true;
-        return SWAZI_PENDING_EXCEPTION;
+        return SWAZI_GENERIC_FAILURE;
     }
 }
 
@@ -1849,6 +1860,821 @@ static swazi_status api_regex_set_last_index(swazi_env env, swazi_value regex,
 }
 
 // ============================================================================
+// API Implementation - Enhanced Class Operations
+// ============================================================================
+
+static swazi_status api_create_class(swazi_env env, const char* name,
+    swazi_value parent_class, swazi_value* result) {
+    if (!env || !name || !result) return SWAZI_INVALID_ARG;
+    
+    auto cls = std::make_shared<ClassValue>();
+    cls->name = name;
+    cls->token = Token();
+    cls->defining_env = env->env_ptr;
+    cls->static_table = std::make_shared<ObjectValue>();
+    
+    // ✅ CREATE A REAL ClassBodyNode (not leave it null!)
+    cls->body = std::make_unique<ClassBodyNode>();
+    
+    // Set parent class if provided
+    if (parent_class) {
+        Value parent_val = unwrap_value(parent_class);
+        if (std::holds_alternative<ClassPtr>(parent_val)) {
+            cls->super = std::get<ClassPtr>(parent_val);
+        } else {
+            set_error(env, "TypeError", "Parent must be a class value");
+            return SWAZI_OBJECT_EXPECTED;
+        }
+    }
+    
+    *result = wrap_value(Value{cls});
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_define_method(swazi_env env, swazi_value class_val,
+    const char* method_name, swazi_callback callback,
+    void* user_data, uint32_t flags) {
+    if (!env || !class_val || !method_name || !callback) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    if (!cls || !cls->body) {
+        set_error(env, "TypeError", "Invalid class");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    std::string name_str(method_name);
+    bool is_static = (flags & SWAZI_CLASS_MEMBER_STATIC) != 0;
+    bool is_private = (flags & SWAZI_CLASS_MEMBER_PRIVATE) != 0;
+    bool is_locked = (flags & SWAZI_CLASS_MEMBER_LOCKED) != 0;
+    bool is_getter = (flags & SWAZI_CLASS_MEMBER_GETTER) != 0;
+    bool is_constructor = (flags & SWAZI_CLASS_MEMBER_CONSTRUCTOR) != 0;
+    bool is_destructor = (flags & SWAZI_CLASS_MEMBER_DESTRUCTOR) != 0;
+    
+    // ✅ Create native wrapper that handles $ binding
+    auto native_impl = [callback, user_data, env](
+        const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+        
+        swazi_callback_info_s cbinfo;
+        cbinfo.args = args;
+        cbinfo.user_data = user_data;
+        cbinfo.this_object = nullptr;
+        
+        // Extract receiver from environment's "$" binding
+        if (callEnv && callEnv->has("$")) {
+            Value dollar = callEnv->get("$").value;
+            if (std::holds_alternative<ObjectPtr>(dollar)) {
+                cbinfo.this_object = std::get<ObjectPtr>(dollar);
+            }
+        }
+        
+        cbinfo.new_target = std::monostate{};
+        
+        swazi_value result_handle = callback(env, &cbinfo);
+        
+        if (env->exception_pending) {
+            env->exception_pending = false;
+            throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
+        }
+        
+        if (!result_handle) return std::monostate{};
+        
+        Value result = unwrap_value(result_handle);
+        delete result_handle;
+        return result;
+    };
+    
+    auto fn = std::make_shared<FunctionValue>(name_str, native_impl, env->env_ptr, Token());
+    
+    // ✅ For STATIC methods: add directly to static_table
+    if (is_static) {
+        PropertyDescriptor pd;
+        pd.value = fn;
+        pd.is_private = is_private;
+        pd.is_locked = is_locked;
+        pd.is_readonly = is_getter;
+        pd.token = Token();
+        cls->static_table->properties[name_str] = std::move(pd);
+        return SWAZI_OK;
+    }
+    
+    // ✅ For CONSTRUCTORS: store in special location for instantiation code
+    if (is_constructor) {
+        PropertyDescriptor pd;
+        pd.value = fn;
+        pd.is_private = is_private;
+        pd.token = Token();
+        cls->static_table->properties["__constructor__"] = std::move(pd);
+        
+        // Also add synthetic ClassMethodNode so userland can find it
+        auto method_node = std::make_unique<ClassMethodNode>();
+        method_node->name = name_str;
+        method_node->token = Token();
+        method_node->is_static = false;
+        method_node->is_constructor = true;
+        method_node->is_private = is_private;
+        method_node->is_locked = is_locked;
+        
+        // Mark as native-backed
+        std::string marker_name = "__native_method_" + name_str;
+        PropertyDescriptor marker;
+        marker.value = fn;
+        marker.is_private = true;
+        marker.token = Token();
+        cls->static_table->properties[marker_name] = marker;
+        
+        cls->body->methods.push_back(std::move(method_node));
+        return SWAZI_OK;
+    }
+    
+    // ✅ For DESTRUCTORS: similar to constructor
+    if (is_destructor) {
+        PropertyDescriptor pd;
+        pd.value = fn;
+        pd.is_private = is_private;
+        pd.token = Token();
+        cls->static_table->properties["__destructor__"] = std::move(pd);
+        
+        auto method_node = std::make_unique<ClassMethodNode>();
+        method_node->name = name_str;
+        method_node->token = Token();
+        method_node->is_static = false;
+        method_node->is_destructor = true;
+        method_node->is_private = is_private;
+        
+        std::string marker_name = "__native_method_" + name_str;
+        PropertyDescriptor marker;
+        marker.value = fn;
+        marker.is_private = true;
+        marker.token = Token();
+        cls->static_table->properties[marker_name] = marker;
+        
+        cls->body->methods.push_back(std::move(method_node));
+        return SWAZI_OK;
+    }
+    
+    // ✅ For INSTANCE methods: create synthetic ClassMethodNode
+    auto method_node = std::make_unique<ClassMethodNode>();
+    method_node->name = name_str;
+    method_node->token = Token();
+    method_node->is_static = false;
+    method_node->is_private = is_private;
+    method_node->is_locked = is_locked;
+    method_node->is_getter = is_getter;
+    method_node->is_constructor = false;
+    method_node->is_destructor = false;
+    method_node->is_async = false;
+    
+    // Store native function in marker
+    std::string marker_name = "__native_method_" + name_str;
+    PropertyDescriptor marker;
+    marker.value = fn;
+    marker.is_private = true;
+    marker.token = Token();
+    cls->static_table->properties[marker_name] = marker;
+    
+    cls->body->methods.push_back(std::move(method_node));
+    
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_define_property(swazi_env env, swazi_value class_val,
+    const char* property_name, swazi_value initial_value,
+    uint32_t flags) {
+    if (!env || !class_val || !property_name) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    if (!cls || !cls->body) {
+        set_error(env, "TypeError", "Invalid class");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    std::string prop_name(property_name);
+    Value init_val = initial_value ? unwrap_value(initial_value) : std::monostate{};
+    
+    bool is_static = (flags & SWAZI_CLASS_MEMBER_STATIC) != 0;
+    bool is_private = (flags & SWAZI_CLASS_MEMBER_PRIVATE) != 0;
+    bool is_locked = (flags & SWAZI_CLASS_MEMBER_LOCKED) != 0;
+    
+    // ✅ For STATIC properties: add to static_table
+    if (is_static) {
+        PropertyDescriptor pd;
+        pd.value = init_val;
+        pd.is_private = is_private;
+        pd.is_locked = is_locked;
+        pd.is_readonly = false;
+        pd.token = Token();
+        cls->static_table->properties[prop_name] = std::move(pd);
+        return SWAZI_OK;
+    }
+    
+    // ✅ For INSTANCE properties: create synthetic ClassPropertyNode
+    auto prop_node = std::make_unique<ClassPropertyNode>();
+    prop_node->name = prop_name;
+    prop_node->token = Token();
+    prop_node->is_static = false;
+    prop_node->is_private = is_private;
+    prop_node->is_locked = is_locked;
+    
+    // Store initial value in a marker so evaluator can retrieve it
+    std::string marker_name = "__native_property_" + prop_name;
+    PropertyDescriptor marker;
+    marker.value = init_val;
+    marker.is_private = true;
+    marker.token = Token();
+    cls->static_table->properties[marker_name] = marker;
+    
+    // Add to body
+    cls->body->properties.push_back(std::move(prop_node));
+    
+    return SWAZI_OK;
+}
+
+
+static swazi_status api_class_modify_method(swazi_env env, swazi_value class_val,
+    const char* method_name, swazi_callback new_callback,
+    void* new_user_data, uint32_t flags) {
+    if (!env || !class_val || !method_name) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    std::string name_str(method_name);
+    PropertyDescriptor* pd = nullptr;
+    
+    // ✅ First check for instance method marker
+    std::string marker_name = "__native_method_" + name_str;
+    auto marker_it = cls->static_table->properties.find(marker_name);
+    if (marker_it != cls->static_table->properties.end()) {
+        pd = &marker_it->second;
+    }
+    
+    // ✅ Check static methods (no markers, direct storage)
+    if (!pd) {
+        auto static_it = cls->static_table->properties.find(name_str);
+        if (static_it != cls->static_table->properties.end() &&
+            name_str != "__addon_class__" &&
+            name_str != "__instance_defaults__" &&
+            name_str != "__instance_methods__" &&
+            !name_str.starts_with("__native_")) {  // Exclude all markers
+            pd = &static_it->second;
+        }
+    }
+    
+    // ✅ Check constructor (special property)
+    if (!pd) {
+        auto ctor_it = cls->static_table->properties.find("__constructor__");
+        if (ctor_it != cls->static_table->properties.end() &&
+            (name_str == cls->name || name_str == "__constructor__")) {
+            pd = &ctor_it->second;
+        }
+    }
+    
+    // ✅ Check destructor (special property)
+    if (!pd) {
+        auto dtor_it = cls->static_table->properties.find("__destructor__");
+        if (dtor_it != cls->static_table->properties.end() &&
+            (name_str == ("~" + cls->name) || name_str == "__destructor__")) {
+            pd = &dtor_it->second;
+        }
+    }
+    
+    if (!pd) {
+        set_error(env, "ReferenceError", "Method not found");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    // Update callback if provided
+    if (new_callback) {
+        auto native_impl = [new_callback, new_user_data, env](
+            const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+            swazi_callback_info_s cbinfo;
+            cbinfo.args = args;
+            cbinfo.user_data = new_user_data;
+            cbinfo.this_object = nullptr;
+            
+            if (callEnv && callEnv->has("$")) {
+                Value dollar = callEnv->get("$").value;
+                if (std::holds_alternative<ObjectPtr>(dollar)) {
+                    cbinfo.this_object = std::get<ObjectPtr>(dollar);
+                }
+            }
+            
+            cbinfo.new_target = std::monostate{};
+            
+            swazi_value result_handle = new_callback(env, &cbinfo);
+            
+            if (env->exception_pending) {
+                env->exception_pending = false;
+                throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
+            }
+            
+            if (!result_handle) return std::monostate{};
+            
+            Value result = unwrap_value(result_handle);
+            delete result_handle;
+            return result;
+        };
+        
+        pd->value = std::make_shared<FunctionValue>(name_str, native_impl, env->env_ptr, Token());
+    }
+    
+    // Update flags if provided
+    if (flags != 0) {
+        pd->is_private = (flags & SWAZI_CLASS_MEMBER_PRIVATE) != 0;
+        pd->is_locked = (flags & SWAZI_CLASS_MEMBER_LOCKED) != 0;
+        pd->is_readonly = (flags & SWAZI_CLASS_MEMBER_READONLY) != 0 || 
+                         (flags & SWAZI_CLASS_MEMBER_GETTER) != 0;
+    }
+    
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_modify_property(swazi_env env, swazi_value class_val,
+    const char* property_name, swazi_value new_value,
+    uint32_t flags) {
+    if (!env || !class_val || !property_name) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    std::string prop_name(property_name);
+    PropertyDescriptor* pd = nullptr;
+    
+    // ✅ First check for instance property marker
+    std::string marker_name = "__native_property_" + prop_name;
+    auto marker_it = cls->static_table->properties.find(marker_name);
+    if (marker_it != cls->static_table->properties.end()) {
+        pd = &marker_it->second;
+    }
+    
+    // ✅ Check static properties (no markers, direct storage)
+    if (!pd) {
+        auto static_it = cls->static_table->properties.find(prop_name);
+        if (static_it != cls->static_table->properties.end() && 
+            prop_name != "__addon_class__" && 
+            prop_name != "__instance_defaults__" && 
+            prop_name != "__instance_methods__" &&
+            prop_name != "__constructor__" &&
+            prop_name != "__destructor__" &&
+            !prop_name.starts_with("__native_")) {  // Exclude all markers
+            pd = &static_it->second;
+        }
+    }
+    
+    if (!pd) {
+        set_error(env, "ReferenceError", "Property not found");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    // Update value if provided
+    if (new_value) {
+        pd->value = unwrap_value(new_value);
+    }
+    
+    // Update flags if provided
+    if (flags != 0) {
+        pd->is_private = (flags & SWAZI_CLASS_MEMBER_PRIVATE) != 0;
+        pd->is_locked = (flags & SWAZI_CLASS_MEMBER_LOCKED) != 0;
+    }
+    
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_remove_method(swazi_env env, swazi_value class_val,
+    const char* method_name) {
+    if (!env || !class_val || !method_name) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    std::string name_str(method_name);
+    
+    // ✅ Try instance method marker
+    std::string marker_name = "__native_method_" + name_str;
+    auto marker_it = cls->static_table->properties.find(marker_name);
+    if (marker_it != cls->static_table->properties.end()) {
+        cls->static_table->properties.erase(marker_it);
+        
+        // Also remove synthetic node from body
+        auto& methods = cls->body->methods;
+        methods.erase(
+            std::remove_if(methods.begin(), methods.end(),
+                [&name_str](const auto& m) { return m->name == name_str; }),
+            methods.end());
+        
+        return SWAZI_OK;
+    }
+    
+    // ✅ Try static methods (no markers)
+    auto static_it = cls->static_table->properties.find(name_str);
+    if (static_it != cls->static_table->properties.end() &&
+        name_str != "__addon_class__" &&
+        name_str != "__instance_defaults__" &&
+        name_str != "__instance_methods__" &&
+        !name_str.starts_with("__native_")) {
+        cls->static_table->properties.erase(static_it);
+        return SWAZI_OK;
+    }
+    
+    // ✅ Try constructor
+    if (name_str == cls->name || name_str == "__constructor__") {
+        auto ctor_it = cls->static_table->properties.find("__constructor__");
+        if (ctor_it != cls->static_table->properties.end()) {
+            cls->static_table->properties.erase(ctor_it);
+            
+            // Remove synthetic node
+            auto& methods = cls->body->methods;
+            methods.erase(
+                std::remove_if(methods.begin(), methods.end(),
+                    [](const auto& m) { return m->is_constructor; }),
+                methods.end());
+            
+            return SWAZI_OK;
+        }
+    }
+    
+    // ✅ Try destructor
+    if (name_str == ("~" + cls->name) || name_str == "__destructor__") {
+        auto dtor_it = cls->static_table->properties.find("__destructor__");
+        if (dtor_it != cls->static_table->properties.end()) {
+            cls->static_table->properties.erase(dtor_it);
+            
+            // Remove synthetic node
+            auto& methods = cls->body->methods;
+            methods.erase(
+                std::remove_if(methods.begin(), methods.end(),
+                    [](const auto& m) { return m->is_destructor; }),
+                methods.end());
+            
+            return SWAZI_OK;
+        }
+    }
+    
+    set_error(env, "ReferenceError", "Method not found");
+    return SWAZI_GENERIC_FAILURE;
+}
+
+static swazi_status api_class_remove_property(swazi_env env, swazi_value class_val,
+    const char* property_name) {
+    if (!env || !class_val || !property_name) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    std::string prop_name(property_name);
+    
+    // Prevent removal of internal properties
+    if (prop_name == "__addon_class__" || 
+        prop_name == "__instance_defaults__" || 
+        prop_name == "__instance_methods__" ||
+        prop_name == "__constructor__" ||
+        prop_name == "__destructor__" ||
+        prop_name.starts_with("__native_")) {
+        set_error(env, "TypeError", "Cannot remove internal property");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    // ✅ Try instance property marker
+    std::string marker_name = "__native_property_" + prop_name;
+    auto marker_it = cls->static_table->properties.find(marker_name);
+    if (marker_it != cls->static_table->properties.end()) {
+        cls->static_table->properties.erase(marker_it);
+        
+        // Also remove synthetic node from body
+        auto& properties = cls->body->properties;
+        properties.erase(
+            std::remove_if(properties.begin(), properties.end(),
+                [&prop_name](const auto& p) { return p->name == prop_name; }),
+            properties.end());
+        
+        return SWAZI_OK;
+    }
+    
+    // ✅ Try static properties
+    auto static_it = cls->static_table->properties.find(prop_name);
+    if (static_it != cls->static_table->properties.end()) {
+        cls->static_table->properties.erase(static_it);
+        return SWAZI_OK;
+    }
+    
+    set_error(env, "ReferenceError", "Property not found");
+    return SWAZI_GENERIC_FAILURE;
+}
+
+static swazi_status api_class_has_method(swazi_env env, swazi_value class_val,
+    const char* method_name, bool* result) {
+    if (!env || !class_val || !method_name || !result) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    std::string name_str(method_name);
+    
+    // ✅ Check instance method marker
+    std::string marker_name = "__native_method_" + name_str;
+    if (cls->static_table->properties.find(marker_name) != cls->static_table->properties.end()) {
+        *result = true;
+        return SWAZI_OK;
+    }
+    
+    // ✅ Check static methods
+    auto static_it = cls->static_table->properties.find(name_str);
+    if (static_it != cls->static_table->properties.end() &&
+        name_str != "__addon_class__" &&
+        name_str != "__instance_defaults__" &&
+        name_str != "__instance_methods__" &&
+        !name_str.starts_with("__native_")) {
+        *result = true;
+        return SWAZI_OK;
+    }
+    
+    // ✅ Check constructor
+    if ((name_str == cls->name || name_str == "__constructor__") &&
+        cls->static_table->properties.find("__constructor__") != cls->static_table->properties.end()) {
+        *result = true;
+        return SWAZI_OK;
+    }
+    
+    // ✅ Check destructor
+    if ((name_str == ("~" + cls->name) || name_str == "__destructor__") &&
+        cls->static_table->properties.find("__destructor__") != cls->static_table->properties.end()) {
+        *result = true;
+        return SWAZI_OK;
+    }
+    
+    *result = false;
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_has_property(swazi_env env, swazi_value class_val,
+    const char* property_name, bool* result) {
+    if (!env || !class_val || !property_name || !result) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    std::string prop_name(property_name);
+    
+    // ✅ Check instance property marker
+    std::string marker_name = "__native_property_" + prop_name;
+    if (cls->static_table->properties.find(marker_name) != cls->static_table->properties.end()) {
+        *result = true;
+        return SWAZI_OK;
+    }
+    
+    // ✅ Check static properties (exclude internal)
+    auto static_it = cls->static_table->properties.find(prop_name);
+    if (static_it != cls->static_table->properties.end() && 
+        prop_name != "__addon_class__" && 
+        prop_name != "__instance_defaults__" && 
+        prop_name != "__instance_methods__" &&
+        prop_name != "__constructor__" &&
+        prop_name != "__destructor__" &&
+        !prop_name.starts_with("__native_")) {
+        *result = true;
+        return SWAZI_OK;
+    }
+    
+    *result = false;
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_get_parent(swazi_env env, swazi_value class_val,
+    swazi_value* result) {
+    if (!env || !class_val || !result) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    
+    if (cls->super) {
+        *result = wrap_value(Value{cls->super});
+    } else {
+        *result = wrap_value(std::monostate{});
+    }
+    
+    return SWAZI_OK;
+}
+
+static swazi_status api_class_set_parent(swazi_env env, swazi_value class_val,
+    swazi_value parent_class) {
+    if (!env || !class_val) return SWAZI_INVALID_ARG;
+    
+    Value cls_value = unwrap_value(class_val);
+    if (!std::holds_alternative<ClassPtr>(cls_value)) {
+        set_error(env, "TypeError", "Expected class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(cls_value);
+    
+    if (parent_class) {
+        Value parent_val = unwrap_value(parent_class);
+        if (std::holds_alternative<ClassPtr>(parent_val)) {
+            cls->super = std::get<ClassPtr>(parent_val);
+        } else {
+            set_error(env, "TypeError", "Parent must be a class value");
+            return SWAZI_OBJECT_EXPECTED;
+        }
+    } else {
+        cls->super = nullptr;
+    }
+    
+    return SWAZI_OK;
+}
+
+
+static swazi_status api_class_call_super_constructor(swazi_env env, 
+    swazi_callback_info info,
+    size_t argc, 
+    const swazi_value* argv) {
+    if (!env || !info) return SWAZI_INVALID_ARG;
+    
+    // Get the instance (this/$)
+    if (!info->this_object) {
+        set_error(env, "ReferenceError", "No receiver available for super call");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    ObjectPtr instance = info->this_object;
+    
+    // Get the class from instance
+    auto class_it = instance->properties.find("__class__");
+    if (class_it == instance->properties.end()) {
+        set_error(env, "ReferenceError", "Instance has no class link");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    if (!std::holds_alternative<ClassPtr>(class_it->second.value)) {
+        set_error(env, "TypeError", "Invalid class link");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ClassPtr cls = std::get<ClassPtr>(class_it->second.value);
+    
+    // Get parent class
+    if (!cls->super) {
+        set_error(env, "ReferenceError", "Class has no parent");
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    ClassPtr parent = cls->super;
+    
+    // Find parent constructor
+    auto parent_ctor_it = parent->static_table->properties.find("__constructor__");
+    if (parent_ctor_it == parent->static_table->properties.end()) {
+        return SWAZI_OK; // No parent constructor, that's okay
+    }
+    
+    if (!std::holds_alternative<FunctionPtr>(parent_ctor_it->second.value)) {
+        return SWAZI_OK; // Not a function, skip
+    }
+    
+    FunctionPtr parent_ctor = std::get<FunctionPtr>(parent_ctor_it->second.value);
+    
+    // Convert argv to vector
+    std::vector<Value> args;
+    for (size_t i = 0; i < argc; i++) {
+        args.push_back(unwrap_value(argv[i]));
+    }
+    
+    // Call parent constructor with instance as receiver
+    try {
+        env->evaluator->call_function_with_receiver_public(
+            parent_ctor, instance, args, env->env_ptr, Token());
+    } catch (const SwaziError& e) {
+        set_error(env, "Error", e.what());
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    return SWAZI_OK;
+}
+
+static swazi_status api_get_receiver(swazi_env env, swazi_callback_info info,
+    swazi_value* receiver) {
+    if (!env || !info || !receiver) return SWAZI_INVALID_ARG;
+    
+    if (!info->this_object) {
+        *receiver = nullptr;
+        return SWAZI_OK;
+    }
+    
+    *receiver = wrap_value(Value{info->this_object});
+    return SWAZI_OK;
+}
+
+static swazi_status api_get_instance_class(swazi_env env, swazi_value instance,
+    swazi_value* class_val) {
+    if (!env || !instance || !class_val) return SWAZI_INVALID_ARG;
+    
+    Value inst_val = unwrap_value(instance);
+    if (!std::holds_alternative<ObjectPtr>(inst_val)) {
+        set_error(env, "TypeError", "Value is not an object");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    
+    ObjectPtr obj = std::get<ObjectPtr>(inst_val);
+    if (!obj) {
+        *class_val = wrap_value(std::monostate{});
+        return SWAZI_OK;
+    }
+    
+    auto it = obj->properties.find("__class__");
+    if (it == obj->properties.end()) {
+        *class_val = wrap_value(std::monostate{});
+        return SWAZI_OK;
+    }
+    
+    if (!std::holds_alternative<ClassPtr>(it->second.value)) {
+        *class_val = wrap_value(std::monostate{});
+        return SWAZI_OK;
+    }
+    
+    *class_val = wrap_value(it->second.value);
+    return SWAZI_OK;
+}
+
+static swazi_status api_instance_of(swazi_env env, swazi_value instance,
+    swazi_value class_val, bool* result) {
+    if (!env || !instance || !class_val || !result) return SWAZI_INVALID_ARG;
+    
+    Value inst_val = unwrap_value(instance);
+    Value cls_val = unwrap_value(class_val);
+    
+    *result = false;
+    
+    if (!std::holds_alternative<ObjectPtr>(inst_val)) {
+        return SWAZI_OK;
+    }
+    
+    if (!std::holds_alternative<ClassPtr>(cls_val)) {
+        return SWAZI_OK;
+    }
+    
+    ObjectPtr obj = std::get<ObjectPtr>(inst_val);
+    ClassPtr target_cls = std::get<ClassPtr>(cls_val);
+    
+    if (!obj || !target_cls) {
+        return SWAZI_OK;
+    }
+    
+    auto it = obj->properties.find("__class__");
+    if (it == obj->properties.end()) {
+        return SWAZI_OK;
+    }
+    
+    if (!std::holds_alternative<ClassPtr>(it->second.value)) {
+        return SWAZI_OK;
+    }
+    
+    ClassPtr inst_cls = std::get<ClassPtr>(it->second.value);
+    
+    // Exact match (no inheritance walk for now, can be extended)
+    *result = (inst_cls == target_cls);
+    return SWAZI_OK;
+}
+
+// ============================================================================
 // API Initialization
 // ============================================================================
 
@@ -1991,6 +2817,24 @@ void init_addon_api() {
     g_api.regex_exec = api_regex_exec;
     g_api.regex_get_last_index = api_regex_get_last_index;
     g_api.regex_set_last_index = api_regex_set_last_index;
+    
+    
+    // Class operations
+    g_api.create_class = api_create_class;
+    g_api.class_define_method = api_class_define_method;
+    g_api.class_define_property = api_class_define_property;
+    g_api.class_modify_method = api_class_modify_method;
+    g_api.class_modify_property = api_class_modify_property;
+    g_api.class_remove_method = api_class_remove_method;
+    g_api.class_remove_property = api_class_remove_property;
+    g_api.class_has_method = api_class_has_method;
+    g_api.class_has_property = api_class_has_property;
+    g_api.class_get_parent = api_class_get_parent;
+    g_api.class_set_parent = api_class_set_parent;
+    g_api.class_call_super_constructor = api_class_call_super_constructor;
+    g_api.get_receiver = api_get_receiver;
+    g_api.get_instance_class = api_get_instance_class;
+    g_api.instance_of = api_instance_of;
 
     // Instance checking
     g_api.instanceof = api_instanceof;
@@ -2012,8 +2856,28 @@ extern "C" const swazi_api* swazi_get_api() {
 // ============================================================================
 // Addon Loading
 // ============================================================================
-
-ObjectPtr load_addon(const std::string& path, Evaluator* evaluator, EnvPtr env) {
+static bool is_valid_language_value(const Value& v) {
+    // Check if the value is one of the supported language types
+    return std::holds_alternative<std::monostate>(v) ||
+           std::holds_alternative<double>(v) ||
+           std::holds_alternative<std::string>(v) ||
+           std::holds_alternative<bool>(v) ||
+           std::holds_alternative<FunctionPtr>(v) ||
+           std::holds_alternative<ArrayPtr>(v) ||
+           std::holds_alternative<ObjectPtr>(v) ||
+           std::holds_alternative<ClassPtr>(v) ||
+           std::holds_alternative<BufferPtr>(v) ||
+           std::holds_alternative<FilePtr>(v) ||
+           std::holds_alternative<RangePtr>(v) ||
+           std::holds_alternative<DateTimePtr>(v) ||
+           std::holds_alternative<MapStoragePtr>(v) ||
+           std::holds_alternative<RegexPtr>(v) ||
+           std::holds_alternative<PromisePtr>(v) ||
+           std::holds_alternative<GeneratorPtr>(v) ||
+           std::holds_alternative<ProxyPtr>(v) ||
+           std::holds_alternative<HoleValue>(v);
+}
+Value load_addon(const std::string& path, Evaluator* evaluator, EnvPtr env) {
     init_addon_api();
 
     // Load the shared library
@@ -2068,22 +2932,27 @@ ObjectPtr load_addon(const std::string& path, Evaluator* evaluator, EnvPtr env) 
         swazi_value result = register_func(env_wrapper, exports_handle.get());
 
         if (env_wrapper->exception_pending) {
-            // FIX: Use env_wrapper, not env, and create a token with empty location
             throw SwaziError(
                 env_wrapper->last_error_code.empty() ? "AddonError" : env_wrapper->last_error_code,
                 env_wrapper->last_error_message,
-                TokenLocation{}  // Empty location since we don't have context here
+                TokenLocation{}
             );
         }
 
         if (result && result != exports_handle.get()) {
-            // Addon returned different object
             SwaziValuePtr result_ptr(result);
             Value result_val = unwrap_value(result);
-
-            if (std::holds_alternative<ObjectPtr>(result_val)) {
-                return std::get<ObjectPtr>(result_val);
+            
+            // ✅ Validate that it's a known language type
+            if (!is_valid_language_value(result_val)) {
+                throw SwaziError(
+                    "AddonError",
+                    "Addon returned an invalid value type that the language doesn't support",
+                    TokenLocation{}
+                );
             }
+            
+            return result_val;
         }
 
     } catch (const SwaziError&) {
@@ -2097,5 +2966,5 @@ ObjectPtr load_addon(const std::string& path, Evaluator* evaluator, EnvPtr env) 
         g_addon_envs[path] = std::move(env_wrapper_ptr);
     }
 
-    return exports;
+    return Value{exports};
 }
