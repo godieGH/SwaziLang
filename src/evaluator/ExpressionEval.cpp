@@ -6,6 +6,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <unistd.h>
 
 #include "ClassRuntime.hpp"
 #include "Frame.hpp"

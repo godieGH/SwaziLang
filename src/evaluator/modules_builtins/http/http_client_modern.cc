@@ -11,6 +11,7 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 #include "AsyncBridge.hpp"
 #include "Scheduler.hpp"

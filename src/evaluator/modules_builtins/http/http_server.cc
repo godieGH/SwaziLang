@@ -13,6 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"
