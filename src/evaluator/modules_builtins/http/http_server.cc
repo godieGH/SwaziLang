@@ -1,6 +1,7 @@
 // http_server.cc
 
 #include <llhttp.h>
+#include <unistd.h>
 #include <uv.h>
 
 #include <atomic>
@@ -13,7 +14,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <unistd.h>
 
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"

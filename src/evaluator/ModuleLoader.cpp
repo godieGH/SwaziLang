@@ -92,7 +92,6 @@ std::string find_project_root(const std::string& start_path) {
 
 std::string resolve_addon_path(const std::string& addon_name,
     const std::string& requester_filename) {
-    
     // Platform-specific library name
     std::string lib_name;
 #ifdef _WIN32
@@ -122,7 +121,7 @@ std::string resolve_addon_path(const std::string& addon_name,
     std::vector<fs::path> search_paths;
     search_paths.push_back(baseDir / "addons");
     search_paths.push_back(baseDir);
-    
+
     if (baseDir.has_parent_path()) {
         search_paths.push_back(baseDir.parent_path() / "addons");
     }
@@ -199,7 +198,7 @@ std::string resolve_addon_path(const std::string& addon_name,
         err << "  - " << path.string() << "\n";
     }
     err << "\nTo fix:\n";
-    err << "  1. Place " << swazi_name << " or " << lib_name 
+    err << "  1. Place " << swazi_name << " or " << lib_name
         << " in " << (baseDir / "addons").string() << "\n";
     err << "  2. Or set SWAZI_ADDON_PATH environment variable\n";
     err << "  3. Or install globally\n";
@@ -244,19 +243,6 @@ std::string Evaluator::resolve_module_path(const std::string& module_spec, const
         if (fs::exists(cand)) return fs::weakly_canonical(cand).string();
 
         // if extension present but not found, try exact candidate anyway (maybe caller used relative without ext)
-        if (!specPath.has_extension()) {
-            std::vector<std::string> exts = {
-                ".sl",
-                ".swz"};
-            for (auto& e : exts) {
-                fs::path c2 = cand;
-                c2 += e;
-                if (fs::exists(c2)) return fs::weakly_canonical(c2).string();
-            }
-        }
-        // As a last attempt, try current_path / spec
-        cand = fs::current_path() / specPath;
-        if (fs::exists(cand)) return fs::weakly_canonical(cand).string();
         if (!specPath.has_extension()) {
             std::vector<std::string> exts = {
                 ".sl",
@@ -538,7 +524,7 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         ObjectPtr exports;
         try {
             Value addon_result = load_addon(resolved_path, this, requesterEnv);
-            
+
             // ABI addons can return any value type, just like script modules
             // If it's already an object, use it directly. Otherwise wrap in exports object with 'default'
             if (std::holds_alternative<ObjectPtr>(addon_result)) {

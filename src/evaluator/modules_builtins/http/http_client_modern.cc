@@ -3,6 +3,7 @@
 // Supports: GET, POST, PUT, DELETE, PATCH, upload/download streaming, pause/resume, HTTPS
 
 #include <llhttp.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <map>
@@ -11,7 +12,6 @@
 #include <regex>
 #include <string>
 #include <vector>
-#include <unistd.h>
 
 #include "AsyncBridge.hpp"
 #include "Scheduler.hpp"

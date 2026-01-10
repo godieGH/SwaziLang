@@ -132,19 +132,18 @@ typedef swazi_value (*swazi_addon_register_func)(
     SWAZI_MODULE_EXPORT swazi_value \
     swazi_addon_register(swazi_env env, swazi_value exports)
 
-
 // Class member flags (can be combined with bitwise OR)
 typedef enum {
-        SWAZI_CLASS_MEMBER_NONE = 0,
-        SWAZI_CLASS_MEMBER_STATIC = 1 << 0,      // Static member (*)
-        SWAZI_CLASS_MEMBER_PRIVATE = 1 << 1,     // Private member (@)
-        SWAZI_CLASS_MEMBER_LOCKED = 1 << 2,      // Locked member (&)
-        SWAZI_CLASS_MEMBER_READONLY = 1 << 3,    // Read-only (for getters)
-        SWAZI_CLASS_MEMBER_GETTER = 1 << 4,      // Method is a getter
-        SWAZI_CLASS_MEMBER_CONSTRUCTOR = 1 << 5, // Method is constructor
-        SWAZI_CLASS_MEMBER_DESTRUCTOR = 1 << 6,  // Method is destructor
+    SWAZI_CLASS_MEMBER_NONE = 0,
+    SWAZI_CLASS_MEMBER_STATIC = 1 << 0,       // Static member (*)
+    SWAZI_CLASS_MEMBER_PRIVATE = 1 << 1,      // Private member (@)
+    SWAZI_CLASS_MEMBER_LOCKED = 1 << 2,       // Locked member (&)
+    SWAZI_CLASS_MEMBER_READONLY = 1 << 3,     // Read-only (for getters)
+    SWAZI_CLASS_MEMBER_GETTER = 1 << 4,       // Method is a getter
+    SWAZI_CLASS_MEMBER_CONSTRUCTOR = 1 << 5,  // Method is constructor
+    SWAZI_CLASS_MEMBER_DESTRUCTOR = 1 << 6,   // Method is destructor
 } swazi_class_member_flags;
-    
+
 // ============================================================================
 // Core API Structure
 // ============================================================================
@@ -452,21 +451,19 @@ typedef struct swazi_api_s {
 
     swazi_status (*instanceof)(swazi_env env, swazi_value object,
         swazi_value constructor, bool* result);
-        
-            
+
     // ============================================================================
     // Class Operations - Full-Featured Class Support
     // ============================================================================
-    
-    
+
     // Create a new class (optionally with parent class for inheritance)
     swazi_status (*create_class)(
         swazi_env env,
-        const char* name,           // Class name (UTF-8)
-        swazi_value parent_class,   // Parent class or NULL for no inheritance
-        swazi_value* result         // Output: new class
+        const char* name,          // Class name (UTF-8)
+        swazi_value parent_class,  // Parent class or NULL for no inheritance
+        swazi_value* result        // Output: new class
     );
-    
+
     // Define instance or static method
     // - Constructor: use SWAZI_CLASS_MEMBER_CONSTRUCTOR flag
     // - Destructor: use SWAZI_CLASS_MEMBER_DESTRUCTOR flag
@@ -478,9 +475,9 @@ typedef struct swazi_api_s {
         const char* method_name,
         swazi_callback callback,
         void* user_data,
-        uint32_t flags              // Combination of swazi_class_member_flags
+        uint32_t flags  // Combination of swazi_class_member_flags
     );
-    
+
     // Define instance or static property with initial value
     swazi_status (*class_define_property)(
         swazi_env env,
@@ -489,71 +486,66 @@ typedef struct swazi_api_s {
         swazi_value initial_value,  // NULL for no initializer
         uint32_t flags              // Combination of swazi_class_member_flags
     );
-    
+
     // Modify existing method (change callback, user_data, or flags)
     swazi_status (*class_modify_method)(
         swazi_env env,
         swazi_value class_val,
         const char* method_name,
         swazi_callback new_callback,  // NULL to keep existing
-        void* new_user_data,           // Ignored if new_callback is NULL
-        uint32_t flags                 // New flags (0 to keep existing)
+        void* new_user_data,          // Ignored if new_callback is NULL
+        uint32_t flags                // New flags (0 to keep existing)
     );
-    
+
     // Modify existing property (change value or flags)
     swazi_status (*class_modify_property)(
         swazi_env env,
         swazi_value class_val,
         const char* property_name,
-        swazi_value new_value,      // NULL to keep existing value
-        uint32_t flags              // New flags (0 to keep existing)
+        swazi_value new_value,  // NULL to keep existing value
+        uint32_t flags          // New flags (0 to keep existing)
     );
-    
+
     // Remove method from class
     swazi_status (*class_remove_method)(
         swazi_env env,
         swazi_value class_val,
-        const char* method_name
-    );
-    
+        const char* method_name);
+
     // Remove property from class
     swazi_status (*class_remove_property)(
         swazi_env env,
         swazi_value class_val,
-        const char* property_name
-    );
-    
+        const char* property_name);
+
     // Check if class has a method
     swazi_status (*class_has_method)(
         swazi_env env,
         swazi_value class_val,
         const char* method_name,
-        bool* result
-    );
-    
+        bool* result);
+
     // Check if class has a property
     swazi_status (*class_has_property)(
         swazi_env env,
         swazi_value class_val,
         const char* property_name,
-        bool* result
-    );
-    
+        bool* result);
+
     // Get parent class (returns NULL if no parent)
     swazi_status (*class_get_parent)(
         swazi_env env,
         swazi_value class_val,
-        swazi_value* result         // Output: parent class or NULL
+        swazi_value* result  // Output: parent class or NULL
     );
-    
+
     // Set parent class (for dynamic inheritance - use with caution)
     swazi_status (*class_set_parent)(
         swazi_env env,
         swazi_value class_val,
-        swazi_value parent_class    // Parent class or NULL to remove
+        swazi_value parent_class  // Parent class or NULL to remove
     );
-    
-    
+
     // Call parent constructor from within a native constructor
     // - Only valid inside constructor callback
     // - Automatically passes 'this' ($) to parent constructor
@@ -561,31 +553,27 @@ typedef struct swazi_api_s {
         swazi_env env,
         swazi_callback_info info,
         size_t argc,
-        const swazi_value* argv
-    );
-    
+        const swazi_value* argv);
+
     // Get receiver ('this' / $) from callback info
     // - Available in: methods, constructor, destructor, getters
     swazi_status (*get_receiver)(
         swazi_env env,
         swazi_callback_info info,
-        swazi_value* receiver
-    );
-    
+        swazi_value* receiver);
+
     // Get class from instance
     swazi_status (*get_instance_class)(
         swazi_env env,
         swazi_value instance,
-        swazi_value* class_val
-    );
-    
+        swazi_value* class_val);
+
     // Check if instance is of a given class (exact match, no inheritance check)
     swazi_status (*instance_of)(
         swazi_env env,
         swazi_value instance,
         swazi_value class_val,
-        bool* result
-    );
+        bool* result);
 
 } swazi_api;
 
