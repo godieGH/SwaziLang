@@ -1158,6 +1158,12 @@ class Evaluator {
     // NEW: Mark promise and all ancestors as handled (walk parent links).
     void mark_promise_and_ancestors_handled(PromisePtr p);
 
+    ClassPtr get_current_class_context_public() const { return current_class_context; }
+    void set_current_class_context_public(ClassPtr ctx) { current_class_context = ctx; }
+    Value evaluate_expression_public(ExpressionNode* expr, EnvPtr env) {
+        return evaluate_expression(expr, env);
+    }
+
    private:
     EnvPtr global_env;
     EnvPtr main_module_env;

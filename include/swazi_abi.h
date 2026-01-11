@@ -263,6 +263,15 @@ typedef struct swazi_api_s {
     swazi_status (*create_function)(swazi_env env, const char* utf8name,
         size_t length, swazi_callback cb,
         void* data, swazi_value* result);
+    // Create a function bound to a specific receiver (for object methods)
+    swazi_status (*create_bound_function)(
+        swazi_env env,
+        const char* utf8name,
+        size_t length,
+        swazi_callback cb,
+        void* data,
+        swazi_value receiver,
+        swazi_value* result);
     swazi_status (*call_function)(swazi_env env, swazi_value recv,
         swazi_value func, size_t argc,
         const swazi_value* argv,

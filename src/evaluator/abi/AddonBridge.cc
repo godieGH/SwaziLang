@@ -789,6 +789,74 @@ static swazi_status api_create_function(swazi_env env, const char* utf8name,
     return SWAZI_OK;
 }
 
+static swazi_status api_create_bound_function(
+    swazi_env env,
+    const char* utf8name,
+    size_t length,
+    swazi_callback cb,
+    void* data,
+    swazi_value receiver,
+    swazi_value* result) {
+    if (!env || !cb || !result || !receiver) return SWAZI_INVALID_ARG;
+
+    std::string name;
+    if (utf8name) {
+        if (length == (size_t)-1) {
+            name = std::string(utf8name);
+        } else {
+            name = std::string(utf8name, length);
+        }
+    } else {
+        name = "<lambda>";
+    }
+
+    // Unwrap the receiver object
+    Value receiver_val = unwrap_value(receiver);
+    if (!std::holds_alternative<ObjectPtr>(receiver_val)) {
+        set_error(env, "TypeError", "Receiver must be an object");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+    ObjectPtr receiver_obj = std::get<ObjectPtr>(receiver_val);
+
+    // Create native implementation WITH pre-bound receiver
+    auto native_impl = [cb, data, env, receiver_obj](
+                           const std::vector<Value>& args,
+                           EnvPtr callEnv,
+                           const Token& token) -> Value {
+        swazi_callback_info_s cbinfo;
+        cbinfo.args = args;
+        cbinfo.user_data = data;
+        cbinfo.this_object = receiver_obj;  // ← Pre-bound receiver
+        cbinfo.new_target = std::monostate{};
+
+        swazi_value result_handle = cb(env, &cbinfo);
+
+        if (env->exception_pending) {
+            env->exception_pending = false;
+            throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
+        }
+
+        if (!result_handle) return std::monostate{};
+
+        Value result = unwrap_value(result_handle);
+        delete result_handle;
+        return result;
+    };
+
+    // Create the function with a closure that has $ bound
+    EnvPtr method_closure = std::make_shared<Environment>(env->env_ptr);
+    Environment::Variable thisVar;
+    thisVar.value = receiver_obj;
+    thisVar.is_constant = true;
+    method_closure->set("$", thisVar);
+
+    auto fn = std::make_shared<FunctionValue>(
+        name, native_impl, method_closure, Token());
+
+    *result = wrap_value(Value{fn});
+    return SWAZI_OK;
+}
+
 static swazi_status api_call_function(swazi_env env, swazi_value recv,
     swazi_value func, size_t argc,
     const swazi_value* argv,
@@ -843,10 +911,258 @@ static swazi_status api_call_function(swazi_env env, swazi_value recv,
 static swazi_status api_new_instance(swazi_env env, swazi_value constructor,
     size_t argc, const swazi_value* argv,
     swazi_value* result) {
-    if (!env || !constructor) return SWAZI_INVALID_ARG;
+    if (!env || !constructor || !result) return SWAZI_INVALID_ARG;
 
-    // For now, just call as function (simplified)
-    return api_call_function(env, nullptr, constructor, argc, argv, result);
+    // Unwrap constructor - must be a ClassPtr
+    Value ctor_val = unwrap_value(constructor);
+    if (!std::holds_alternative<ClassPtr>(ctor_val)) {
+        set_error(env, "TypeError", "Constructor must be a class value");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+
+    ClassPtr cls = std::get<ClassPtr>(ctor_val);
+    if (!cls) {
+        set_error(env, "TypeError", "Invalid class value");
+        return SWAZI_GENERIC_FAILURE;
+    }
+
+    // Create the instance object
+    auto instance = std::make_shared<ObjectValue>();
+
+    // Attach __class__ link (private property)
+    PropertyDescriptor classLink;
+    classLink.value = cls;
+    classLink.is_private = true;
+    classLink.token = Token();
+    instance->properties["__class__"] = std::move(classLink);
+
+    // Build class hierarchy chain (bottom-up, then reverse for top-down initialization)
+    std::vector<ClassPtr> chain;
+    for (ClassPtr walk = cls; walk; walk = walk->super) {
+        chain.push_back(walk);
+    }
+    std::reverse(chain.begin(), chain.end());
+
+    // Initialize properties and methods from each class in the chain (top-down)
+    for (auto& c : chain) {
+        if (!c || !c->body) continue;
+
+        // Use the class's defining environment for evaluation
+        EnvPtr classEnv = c->defining_env ? c->defining_env : env->env_ptr;
+
+        // --- Initialize instance properties (non-static) ---
+        for (auto& p : c->body->properties) {
+            if (!p) continue;
+            if (p->is_static) continue;
+
+            // Create environment with $ bound to instance for initializer evaluation
+            auto initEnv = std::make_shared<Environment>(classEnv);
+            Environment::Variable thisVar;
+            thisVar.value = instance;
+            thisVar.is_constant = false;
+            initEnv->set("$", thisVar);
+
+            // Check for native property marker
+            std::string marker_name = "__native_property_" + p->name;
+            auto marker_it = c->static_table->properties.find(marker_name);
+
+            Value initVal = std::monostate{};
+            if (marker_it != c->static_table->properties.end()) {
+                // Native property - use stored initial value
+                initVal = marker_it->second.value;
+            } else if (p->value) {
+                // AST property - evaluate initializer expression
+                initVal = env->evaluator->evaluate_expression_public(p->value.get(), initEnv);
+            }
+
+            PropertyDescriptor pd;
+            pd.value = initVal;
+            pd.is_private = p->is_private;
+            pd.is_locked = p->is_locked;
+            pd.is_readonly = false;
+            pd.token = p->token;
+            instance->properties[p->name] = std::move(pd);
+        }
+
+        // --- Initialize instance methods (non-static) ---
+        for (auto& m : c->body->methods) {
+            if (!m) continue;
+            if (m->is_static) continue;
+
+            // Skip constructors and destructors - they're handled separately
+            if (m->is_constructor || m->is_destructor) continue;
+
+            // Check for native method marker
+            std::string marker_name = "__native_method_" + m->name;
+            auto marker_it = c->static_table->properties.find(marker_name);
+
+            if (marker_it != c->static_table->properties.end()) {
+                // Native method found
+                if (std::holds_alternative<FunctionPtr>(marker_it->second.value)) {
+                    FunctionPtr nativeFn = std::get<FunctionPtr>(marker_it->second.value);
+
+                    // Create closure with $ bound to instance
+                    EnvPtr methodClosure = std::make_shared<Environment>(classEnv);
+                    Environment::Variable thisVar;
+                    thisVar.value = instance;
+                    thisVar.is_constant = true;
+                    methodClosure->set("$", thisVar);
+
+                    // Wrapper that substitutes methodClosure for callEnv
+                    auto wrapper_impl = [nativeFn, methodClosure](
+                                            const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                        return nativeFn->native_impl(args, methodClosure, token);
+                    };
+
+                    auto wrappedFn = std::make_shared<FunctionValue>(
+                        nativeFn->name,
+                        wrapper_impl,
+                        methodClosure,
+                        nativeFn->token);
+
+                    PropertyDescriptor pd;
+                    pd.value = wrappedFn;
+                    pd.is_private = m->is_private;
+                    pd.is_locked = m->is_locked;
+                    pd.is_readonly = m->is_getter;
+                    pd.token = m->token;
+                    instance->properties[m->name] = std::move(pd);
+                    continue;
+                }
+            }
+
+            // AST method - create FunctionDeclarationNode
+            auto persisted = std::make_shared<FunctionDeclarationNode>();
+            persisted->name = m->name;
+            persisted->token = m->token;
+            persisted->is_async = m->is_async;
+
+            // Clone parameters
+            persisted->parameters.reserve(m->params.size());
+            for (const auto& pp : m->params) {
+                if (pp)
+                    persisted->parameters.push_back(pp->clone());
+                else
+                    persisted->parameters.push_back(nullptr);
+            }
+
+            // Clone body
+            persisted->body.reserve(m->body.size());
+            for (const auto& s : m->body) {
+                persisted->body.push_back(s ? s->clone() : nullptr);
+            }
+
+            // Create closure with $ bound to instance
+            EnvPtr methodClosure = std::make_shared<Environment>(classEnv);
+            Environment::Variable thisVar;
+            thisVar.value = instance;
+            thisVar.is_constant = true;
+            methodClosure->set("$", thisVar);
+
+            auto fn = std::make_shared<FunctionValue>(
+                persisted->name, persisted->parameters, persisted, methodClosure, persisted->token);
+
+            PropertyDescriptor pd;
+            pd.value = fn;
+            pd.is_private = m->is_private;
+            pd.is_locked = m->is_locked;
+            pd.is_readonly = m->is_getter;
+            pd.token = m->token;
+            instance->properties[m->name] = std::move(pd);
+        }
+    }
+
+    // --- Call constructor if present ---
+    if (cls->body) {
+        // Convert argv to vector
+        std::vector<Value> ctorArgs;
+        ctorArgs.reserve(argc);
+        for (size_t i = 0; i < argc; i++) {
+            ctorArgs.push_back(unwrap_value(argv[i]));
+        }
+
+        // Check for native constructor first
+        auto native_ctor_it = cls->static_table->properties.find("__constructor__");
+        if (native_ctor_it != cls->static_table->properties.end()) {
+            if (std::holds_alternative<FunctionPtr>(native_ctor_it->second.value)) {
+                FunctionPtr constructorFn = std::get<FunctionPtr>(native_ctor_it->second.value);
+
+                try {
+                    // Set class context for super() calls
+                    ClassPtr saved_ctx = env->evaluator->get_current_class_context_public();
+                    env->evaluator->set_current_class_context_public(cls);
+
+                    env->evaluator->call_function_with_receiver_public(
+                        constructorFn, instance, ctorArgs, env->env_ptr, Token());
+
+                    env->evaluator->set_current_class_context_public(saved_ctx);
+                } catch (const SwaziError& e) {
+                    set_error(env, "instantiationError", e.what());
+                    return SWAZI_GENERIC_FAILURE;
+                } catch (const std::exception& e) {
+                    set_error(env, "Error", e.what());
+                    return SWAZI_GENERIC_FAILURE;
+                }
+            }
+        } else {
+            // Look for AST constructor
+            ClassMethodNode* ctorNode = nullptr;
+            for (auto& m : cls->body->methods) {
+                if (m && m->is_constructor) {
+                    ctorNode = m.get();
+                    break;
+                }
+            }
+
+            if (ctorNode) {
+                auto persisted = std::make_shared<FunctionDeclarationNode>();
+                persisted->name = ctorNode->name;
+                persisted->token = ctorNode->token;
+                persisted->is_async = ctorNode->is_async;
+
+                // Clone parameters
+                persisted->parameters.reserve(ctorNode->params.size());
+                for (const auto& pp : ctorNode->params) {
+                    if (pp)
+                        persisted->parameters.push_back(pp->clone());
+                    else
+                        persisted->parameters.push_back(nullptr);
+                }
+
+                // Clone body
+                persisted->body.reserve(ctorNode->body.size());
+                for (const auto& stmt : ctorNode->body) {
+                    persisted->body.push_back(stmt ? stmt->clone() : nullptr);
+                }
+
+                // Create constructor function
+                EnvPtr ctorClosure = cls->defining_env ? cls->defining_env : env->env_ptr;
+                auto constructorFn = std::make_shared<FunctionValue>(
+                    persisted->name, persisted->parameters, persisted, ctorClosure, persisted->token);
+
+                try {
+                    // Set class context for super() calls
+                    ClassPtr saved_ctx = env->evaluator->get_current_class_context_public();
+                    env->evaluator->set_current_class_context_public(cls);
+
+                    env->evaluator->call_function_with_receiver_public(
+                        constructorFn, instance, ctorArgs, env->env_ptr, persisted->token);
+
+                    env->evaluator->set_current_class_context_public(saved_ctx);
+                } catch (const SwaziError& e) {
+                    set_error(env, "instantiationError", e.what());
+                    return SWAZI_GENERIC_FAILURE;
+                } catch (const std::exception& e) {
+                    set_error(env, "Error", e.what());
+                    return SWAZI_GENERIC_FAILURE;
+                }
+            }
+        }
+    }
+
+    // Return the fully constructed instance
+    *result = wrap_value(Value{instance});
+    return SWAZI_OK;
 }
 
 // ============================================================================
@@ -953,7 +1269,7 @@ static swazi_status api_create_error(swazi_env env, swazi_value code,
     if (!env || !result) return SWAZI_INVALID_ARG;
 
     auto err_obj = std::make_shared<ObjectValue>();
-    err_obj->properties["__error__"] = PropertyDescriptor{Value{true}, false, false, false, Token()};
+    err_obj->properties["__error__"] = PropertyDescriptor{Value{true}, true, false, false, Token()};
     err_obj->properties["code"] = PropertyDescriptor{unwrap_value(code), false, false, false, Token()};
     err_obj->properties["message"] = PropertyDescriptor{unwrap_value(msg), false, false, false, Token()};
 
@@ -2930,6 +3246,7 @@ void init_addon_api() {
 
     // Function operations
     g_api.create_function = api_create_function;
+    g_api.create_bound_function = api_create_bound_function;
     g_api.call_function = api_call_function;
     g_api.new_instance = api_new_instance;
 
