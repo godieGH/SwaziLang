@@ -7,10 +7,10 @@
 #include <string>
 #include <vector>
 
-#include "ClassRuntime.hpp"
-#include "SwaziError.hpp"
 #include "AsyncBridge.hpp"
+#include "ClassRuntime.hpp"
 #include "Scheduler.hpp"
+#include "SwaziError.hpp"
 #include "evaluator.hpp"
 #include "swazi_abi.h"
 
@@ -222,7 +222,6 @@ static swazi_status api_is_date(swazi_env env, swazi_value value,
     *result = std::holds_alternative<DateTimePtr>(unwrap_value(value));
     return SWAZI_OK;
 }
-
 
 // ============================================================================
 // API Implementation - Boolean Operations
@@ -1114,7 +1113,7 @@ static swazi_status api_queue_macrotask(swazi_env env, swazi_callback callback,
 
         if (env->exception_pending) {
             env->exception_pending = false;
-            std::cerr << "Exception in queued callback: " 
+            std::cerr << "Exception in queued callback: "
                       << env->last_error_message << std::endl;
         }
 
@@ -1152,7 +1151,7 @@ static swazi_status api_queue_microtask(swazi_env env, swazi_callback callback,
 
         if (env->exception_pending) {
             env->exception_pending = false;
-            std::cerr << "Exception in microtask: " 
+            std::cerr << "Exception in microtask: "
                       << env->last_error_message << std::endl;
         }
 
@@ -1172,7 +1171,7 @@ static swazi_status api_queue_microtask(swazi_env env, swazi_callback callback,
     return SWAZI_OK;
 }
 
-static swazi_status api_resolve_deferred_async(swazi_env env, 
+static swazi_status api_resolve_deferred_async(swazi_env env,
     swazi_deferred deferred, swazi_value resolution) {
     if (!env || !deferred || !resolution) return SWAZI_INVALID_ARG;
 
@@ -1214,7 +1213,6 @@ static swazi_status api_reject_deferred_async(swazi_env env,
     return SWAZI_OK;
 }
 
-
 static void api_thread_will_start(swazi_env env) {
     (void)env;
     addon_thread_started();
@@ -1224,7 +1222,6 @@ static void api_thread_did_finish(swazi_env env) {
     (void)env;
     addon_thread_finished();
 }
-
 
 static void* api_get_event_loop(swazi_env env) {
     if (!env || !env->evaluator) return nullptr;
@@ -1260,28 +1257,25 @@ static swazi_status api_queue_background_work(
     swazi_env env,
     void (*work_cb)(void*),
     void (*after_cb)(void*),
-    void* user_data
-) {
+    void* user_data) {
     if (!env || !work_cb) return SWAZI_INVALID_ARG;
-    
+
     uv_loop_t* loop = scheduler_get_loop();
     if (!loop) return SWAZI_GENERIC_FAILURE;
-    
+
     auto* req = new uv_work_t;
     auto* bw = new BackgroundWork{work_cb, after_cb, user_data};
     req->data = bw;
-    
+
     int r = uv_queue_work(loop, req, uv_work_wrapper, uv_after_wrapper);
     if (r != 0) {
         delete bw;
         delete req;
         return SWAZI_GENERIC_FAILURE;
     }
-    
+
     return SWAZI_OK;
 }
-
-
 
 // ============================================================================
 // API Implementation - Reference Management
