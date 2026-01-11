@@ -327,6 +327,54 @@ typedef struct swazi_api_s {
         swazi_value resolution);
     swazi_status (*reject_deferred)(swazi_env env, swazi_deferred deferred,
         swazi_value rejection);
+        
+    // ============================================================================
+    // Async/Scheduler Operations (Thread-Safe)
+    // ============================================================================
+    
+    // Queue a callback to run on the main event loop thread (macrotask)
+    // Safe to call from any thread
+    swazi_status (*queue_macrotask)(
+        swazi_env env,
+        swazi_callback callback,
+        void* user_data);
+    
+    // Queue a callback to run as a microtask on the main loop thread
+    // Safe to call from any thread
+    swazi_status (*queue_microtask)(
+        swazi_env env,
+        swazi_callback callback,
+        void* user_data);
+    
+    // Resolve a deferred promise from ANY thread (queues resolution to main loop)
+    // This is the thread-safe version of resolve_deferred
+    swazi_status (*resolve_deferred_async)(
+        swazi_env env,
+        swazi_deferred deferred,
+        swazi_value resolution);
+    
+    // Reject a deferred promise from ANY thread (queues rejection to main loop)
+    // This is the thread-safe version of reject_deferred
+    swazi_status (*reject_deferred_async)(
+        swazi_env env,
+        swazi_deferred deferred,
+        swazi_value rejection);
+        
+     // Call before spawning background threads
+    void (*thread_will_start)(swazi_env env);
+    
+    // Call after thread completes (before returning from thread func)
+    void (*thread_did_finish)(swazi_env env);
+    
+    void* (*get_event_loop)(swazi_env env);
+    
+    // OR: Wrap uv_queue_work in the ABI (better encapsulation)
+    swazi_status (*queue_background_work)(
+        swazi_env env,
+        void (*work_cb)(void* data),        // Runs on thread pool
+        void (*after_cb)(void* data),       // Runs on main loop
+        void* user_data
+    );
 
     // ------------------------------------------------------------------------
     // Reference Management

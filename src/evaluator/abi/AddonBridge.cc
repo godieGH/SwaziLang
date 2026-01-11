@@ -9,6 +9,8 @@
 
 #include "ClassRuntime.hpp"
 #include "SwaziError.hpp"
+#include "AsyncBridge.hpp"
+#include "Scheduler.hpp"
 #include "evaluator.hpp"
 #include "swazi_abi.h"
 
@@ -17,6 +19,21 @@
 #else
 #include <dlfcn.h>
 #endif
+
+static std::atomic<size_t> g_addon_active_threads{0};
+
+// Add these helper functions
+void addon_thread_started() {
+    g_addon_active_threads.fetch_add(1);
+}
+
+void addon_thread_finished() {
+    g_addon_active_threads.fetch_sub(1);
+}
+
+bool addon_threads_exist() {
+    return g_addon_active_threads.load() > 0;
+}
 
 // ============================================================================
 // Internal Structures (never exposed to addons)
@@ -205,6 +222,7 @@ static swazi_status api_is_date(swazi_env env, swazi_value value,
     *result = std::holds_alternative<DateTimePtr>(unwrap_value(value));
     return SWAZI_OK;
 }
+
 
 // ============================================================================
 // API Implementation - Boolean Operations
@@ -1079,6 +1097,191 @@ static swazi_status api_reject_deferred(swazi_env env, swazi_deferred deferred,
     delete deferred;
     return SWAZI_OK;
 }
+
+static swazi_status api_queue_macrotask(swazi_env env, swazi_callback callback,
+    void* user_data) {
+    if (!env || !callback) return SWAZI_INVALID_ARG;
+
+    // Create a wrapper that will be executed on the main loop
+    auto wrapper = [env, callback, user_data]() {
+        swazi_callback_info_s cbinfo;
+        cbinfo.args = {};  // No args for this callback
+        cbinfo.user_data = user_data;
+        cbinfo.this_object = nullptr;
+        cbinfo.new_target = std::monostate{};
+
+        swazi_value result_handle = callback(env, &cbinfo);
+
+        if (env->exception_pending) {
+            env->exception_pending = false;
+            std::cerr << "Exception in queued callback: " 
+                      << env->last_error_message << std::endl;
+        }
+
+        if (result_handle) {
+            delete result_handle;
+        }
+    };
+
+    // Use the scheduler bridge to queue this on the main loop
+    if (env->evaluator && env->evaluator->scheduler()) {
+        env->evaluator->scheduler()->enqueue_macrotask(wrapper);
+    } else {
+        // Fallback: use global bridge
+        CallbackPayload* payload = new CallbackPayload(nullptr, {});
+        // Store wrapper in a static map keyed by payload pointer
+        // (implementation detail - needs global map)
+        enqueue_callback_global(static_cast<void*>(payload));
+    }
+
+    return SWAZI_OK;
+}
+
+static swazi_status api_queue_microtask(swazi_env env, swazi_callback callback,
+    void* user_data) {
+    if (!env || !callback) return SWAZI_INVALID_ARG;
+
+    auto wrapper = [env, callback, user_data]() {
+        swazi_callback_info_s cbinfo;
+        cbinfo.args = {};
+        cbinfo.user_data = user_data;
+        cbinfo.this_object = nullptr;
+        cbinfo.new_target = std::monostate{};
+
+        swazi_value result_handle = callback(env, &cbinfo);
+
+        if (env->exception_pending) {
+            env->exception_pending = false;
+            std::cerr << "Exception in microtask: " 
+                      << env->last_error_message << std::endl;
+        }
+
+        if (result_handle) {
+            delete result_handle;
+        }
+    };
+
+    if (env->evaluator && env->evaluator->scheduler()) {
+        env->evaluator->scheduler()->enqueue_microtask(wrapper);
+    } else {
+        // Fallback
+        CallbackPayload* payload = new CallbackPayload(nullptr, {});
+        enqueue_microtask_global(static_cast<void*>(payload));
+    }
+
+    return SWAZI_OK;
+}
+
+static swazi_status api_resolve_deferred_async(swazi_env env, 
+    swazi_deferred deferred, swazi_value resolution) {
+    if (!env || !deferred || !resolution) return SWAZI_INVALID_ARG;
+
+    // Capture the promise and resolution value by VALUE (copies)
+    PromisePtr prom = deferred->promise;
+    Value res = unwrap_value(resolution);
+
+    // Queue the resolution to happen on the main loop
+    if (env->evaluator && env->evaluator->scheduler()) {
+        env->evaluator->scheduler()->enqueue_macrotask([env, prom, res]() {
+            env->evaluator->fulfill_promise(prom, res);
+        });
+    } else {
+        // Fallback: immediate (unsafe but best-effort)
+        env->evaluator->fulfill_promise(prom, res);
+    }
+
+    // Clean up deferred (addon no longer owns it)
+    delete deferred;
+    return SWAZI_OK;
+}
+
+static swazi_status api_reject_deferred_async(swazi_env env,
+    swazi_deferred deferred, swazi_value rejection) {
+    if (!env || !deferred || !rejection) return SWAZI_INVALID_ARG;
+
+    PromisePtr prom = deferred->promise;
+    Value rej = unwrap_value(rejection);
+
+    if (env->evaluator && env->evaluator->scheduler()) {
+        env->evaluator->scheduler()->enqueue_macrotask([env, prom, rej]() {
+            env->evaluator->reject_promise(prom, rej);
+        });
+    } else {
+        env->evaluator->reject_promise(prom, rej);
+    }
+
+    delete deferred;
+    return SWAZI_OK;
+}
+
+
+static void api_thread_will_start(swazi_env env) {
+    (void)env;
+    addon_thread_started();
+}
+
+static void api_thread_did_finish(swazi_env env) {
+    (void)env;
+    addon_thread_finished();
+}
+
+
+static void* api_get_event_loop(swazi_env env) {
+    if (!env || !env->evaluator) return nullptr;
+    return env->evaluator->scheduler()->get_uv_loop();
+}
+
+// Better: Wrap uv_queue_work to hide libuv from addons
+struct BackgroundWork {
+    void (*work_cb)(void*);
+    void (*after_cb)(void*);
+    void* user_data;
+};
+
+static void uv_work_wrapper(uv_work_t* req) {
+    BackgroundWork* bw = (BackgroundWork*)req->data;
+    if (bw && bw->work_cb) {
+        bw->work_cb(bw->user_data);
+    }
+}
+
+static void uv_after_wrapper(uv_work_t* req, int status) {
+    BackgroundWork* bw = (BackgroundWork*)req->data;
+    if (bw) {
+        if (bw->after_cb) {
+            bw->after_cb(bw->user_data);
+        }
+        delete bw;
+    }
+    delete req;
+}
+
+static swazi_status api_queue_background_work(
+    swazi_env env,
+    void (*work_cb)(void*),
+    void (*after_cb)(void*),
+    void* user_data
+) {
+    if (!env || !work_cb) return SWAZI_INVALID_ARG;
+    
+    uv_loop_t* loop = scheduler_get_loop();
+    if (!loop) return SWAZI_GENERIC_FAILURE;
+    
+    auto* req = new uv_work_t;
+    auto* bw = new BackgroundWork{work_cb, after_cb, user_data};
+    req->data = bw;
+    
+    int r = uv_queue_work(loop, req, uv_work_wrapper, uv_after_wrapper);
+    if (r != 0) {
+        delete bw;
+        delete req;
+        return SWAZI_GENERIC_FAILURE;
+    }
+    
+    return SWAZI_OK;
+}
+
+
 
 // ============================================================================
 // API Implementation - Reference Management
@@ -2760,6 +2963,14 @@ void init_addon_api() {
     g_api.create_promise = api_create_promise;
     g_api.resolve_deferred = api_resolve_deferred;
     g_api.reject_deferred = api_reject_deferred;
+    g_api.queue_macrotask = api_queue_macrotask;
+    g_api.queue_microtask = api_queue_microtask;
+    g_api.resolve_deferred_async = api_resolve_deferred_async;
+    g_api.reject_deferred_async = api_reject_deferred_async;
+    g_api.thread_will_start = api_thread_will_start;
+    g_api.thread_did_finish = api_thread_did_finish;
+    g_api.get_event_loop = api_get_event_loop;
+    g_api.queue_background_work = api_queue_background_work;
 
     // Reference management
     g_api.create_reference = api_create_reference;

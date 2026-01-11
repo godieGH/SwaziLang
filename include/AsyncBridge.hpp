@@ -36,3 +36,6 @@ void scheduler_run_on_loop(const std::function<void()>& fn);
 
 // Optional: register a tick callback invoked on the scheduler loop thread (implemented in Scheduler.cpp).
 void register_tick_callback(const std::function<void()>& cb);
+
+//fotward decl for work running on addons
+bool addon_threads_exist();
