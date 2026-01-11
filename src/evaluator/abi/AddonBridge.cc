@@ -1469,7 +1469,7 @@ static swazi_status api_create_external(swazi_env env, void* data,
 
     // Mark object as external
     obj->properties["__external__"] = PropertyDescriptor{
-        Value{true}, false, false, false, Token()};
+        Value{true}, true, false, false, Token()};  // mark it private and locked so userland can not access or override
 
     *result = wrap_value(Value{obj});
     return SWAZI_OK;
