@@ -710,12 +710,26 @@ CommandResult cmd_cache(const std::vector<std::string>& args) {
 }
 
 CommandResult cmd_start(const std::vector<std::string>& args) {
+    // Parse flags
+    bool verbose = false;
+    bool quiet = false;
+    std::vector<std::string> script_args;
+
+    for (const auto& arg : args) {
+        if (arg == "--verbose" || arg == "-v") {
+            verbose = true;
+        } else if (arg == "--quiet" || arg == "-q") {
+            quiet = true;
+        } else {
+            script_args.push_back(arg);
+        }
+    }
+
     // Find swazi.json
     auto config_opt = find_and_parse_swazi_json(".");
 
     if (!config_opt.has_value()) {
-        std::cerr << "Error: No swazi.json found in current directory or parent directories.\n";
-        std::cerr << "Run 'swazi init' to create a new project.\n";
+        std::cerr << "Error: No swazi.json found. Run 'swazi init' to create a new project.\n";
         return {1, ""};
     }
 
@@ -738,7 +752,10 @@ CommandResult cmd_start(const std::vector<std::string>& args) {
 
     // Check if entry file exists
     if (!fs::exists(entry_path)) {
-        std::cerr << "Error: Entry point '" << config.entry << "' not found at: " << entry_path.string() << "\n";
+        std::cerr << "Error: Entry point '" << config.entry << "' not found.\n";
+        if (verbose) {
+            std::cerr << "  Expected at: " << entry_path.string() << "\n";
+        }
         return {1, ""};
     }
 
@@ -759,17 +776,19 @@ CommandResult cmd_start(const std::vector<std::string>& args) {
         source_code.push_back('\n');
     }
 
-    std::cout << "Running project: " << config.name << " (v" << config.version << ")\n";
-    std::cout << "Entry point: " << config.entry << "\n";
-    std::cout << "-----------------------------------\n\n";
+    // Show startup info (unless quiet mode)
+    if (!quiet) {
+        if (verbose) {
+            std::cout << "Running project: " << config.name << " (v" << config.version << ")\n";
+            std::cout << "Entry point: " << config.entry << "\n";
+            std::cout << "-----------------------------------\n\n";
+        } else {
+            // Minimal output - just a dot or nothing
+            std::cout << "→ " << config.name << "\n";
+        }
+    }
 
     try {
-        // You'll need to include these headers at the top if not already included
-        // #include "lexer.hpp"
-        // #include "parser.hpp"
-        // #include "evaluator.hpp"
-        // These should already be available in your project
-
         SourceManager src_mgr(entry_path.string(), source_code);
         Lexer lexer(source_code, entry_path.string(), &src_mgr);
         std::vector<Token> tokens = lexer.tokenize();
@@ -779,14 +798,10 @@ CommandResult cmd_start(const std::vector<std::string>& args) {
 
         Evaluator evaluator;
 
-        // Build CLI args for the script (project name as argv[0], then any additional args)
+        // Build CLI args for the script
         std::vector<std::string> cli_args;
         cli_args.push_back(config.name);
-
-        // Add any additional arguments passed to 'swazi start'
-        for (const auto& arg : args) {
-            cli_args.push_back(arg);
-        }
+        cli_args.insert(cli_args.end(), script_args.begin(), script_args.end());
 
         evaluator.set_cli_args(cli_args);
         evaluator.set_entry_point(entry_path.string());
@@ -795,16 +810,19 @@ CommandResult cmd_start(const std::vector<std::string>& args) {
         return {0, ""};
 
     } catch (const std::exception& e) {
-        std::cerr << "\n-----------------------------------\n";
-        std::cerr << "Runtime error: " << e.what() << "\n";
+        if (!quiet) {
+            std::cerr << "\n"
+                      << (verbose ? "-----------------------------------\n" : "");
+            std::cerr << "Error: " << e.what() << "\n";
+        } else {
+            std::cerr << e.what() << "\n";
+        }
         return {1, ""};
     } catch (...) {
-        std::cerr << "\n-----------------------------------\n";
-        std::cerr << "Unknown fatal error occurred\n";
+        std::cerr << (quiet ? "" : "\n") << "Fatal error occurred\n";
         return {1, ""};
     }
 }
-
 CommandResult cmd_run(const std::vector<std::string>& args) {
     std::cout << "run <script-name> command (stub)\n";
     std::cout << "This will run script from swazi.json\n";
