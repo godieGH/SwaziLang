@@ -1287,6 +1287,15 @@ static swazi_status api_create_range_error(swazi_env env, swazi_value code,
     return api_create_error(env, code, msg, result);
 }
 
+static swazi_status api_get_last_error(swazi_env env, swazi_error_info* info) {
+    if (!env || !info) return SWAZI_INVALID_ARG;
+
+    info->code = env->last_error_code.c_str();
+    info->message = env->last_error_message.c_str();
+
+    return SWAZI_OK;
+}
+
 // ============================================================================
 // API Implementation - Buffer Operations
 // ============================================================================
@@ -3263,6 +3272,7 @@ void init_addon_api() {
     g_api.create_error = api_create_error;
     g_api.create_type_error = api_create_type_error;
     g_api.create_range_error = api_create_range_error;
+    g_api.get_last_error = api_get_last_error;
 
     // Buffer operations
     g_api.create_buffer = api_create_buffer;

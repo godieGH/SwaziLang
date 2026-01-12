@@ -105,6 +105,11 @@ typedef void (*swazi_finalize)(
     void* finalize_data,
     void* finalize_hint);
 
+typedef struct {
+    const char* code;
+    const char* message;
+} swazi_error_info;
+
 // ============================================================================
 // Module Registration
 // ============================================================================
@@ -309,6 +314,9 @@ typedef struct swazi_api_s {
         swazi_value msg, swazi_value* result);
     swazi_status (*create_range_error)(swazi_env env, swazi_value code,
         swazi_value msg, swazi_value* result);
+
+    // other error handling apis
+    swazi_status (*get_last_error)(swazi_env env, swazi_error_info* info);
 
     // ------------------------------------------------------------------------
     // Buffer Operations
