@@ -42,9 +42,15 @@ ObjectPtr createMatchResult(
 
     // Add numeric indices: "0" (full match), "1", "2", etc. (capture groups)
     for (size_t i = 0; i < groups.size(); ++i) {
-        std::string captured = std::string(groups[i].data(), groups[i].size());
-        result->properties[std::to_string(i)] = PropertyDescriptor{
-            Value{captured}, false, false, true, token};
+        // Check if group didn't participate in match
+        if (groups[i].data() == nullptr || (i > 0 && groups[i].empty() && groups[i].data() == groups[0].data())) {
+            result->properties[std::to_string(i)] = PropertyDescriptor{
+                Value{std::monostate{}}, false, false, true, token};
+        } else {
+            std::string captured = std::string(groups[i].data(), groups[i].size());
+            result->properties[std::to_string(i)] = PropertyDescriptor{
+                Value{captured}, false, false, true, token};
+        }
     }
 
     // Add metadata
@@ -1604,26 +1610,47 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         re2::RE2& re = regex->getCompiled();
 
                         if (regex->global) {
-                            // Stateful: search from lastIndex
+                            // If lastIndex already past end, reset and return false (JS behavior).
                             if (regex->lastIndex >= str.size()) {
                                 regex->lastIndex = 0;
                                 return Value{false};
                             }
 
-                            re2::StringPiece input(str);
-                            input.remove_prefix(regex->lastIndex);
+                            // Create substring from lastIndex
+                            re2::StringPiece input(str.data() + regex->lastIndex,
+                                str.size() - regex->lastIndex);
 
-                            if (re2::RE2::PartialMatch(input, re)) {
-                                // Find match position to update lastIndex
-                                re2::StringPiece match;
-                                if (re2::RE2::FindAndConsume(&input, re, &match)) {
-                                    regex->lastIndex = str.size() - input.size();
-                                }
-                                return Value{true};
-                            } else {
+                            // Find next match at or after lastIndex
+                            re2::StringPiece match_piece;
+                            bool found = re.Match(input, 0, input.size(), re2::RE2::UNANCHORED, &match_piece, 1);
+
+                            if (!found) {
+                                // No match -> reset lastIndex and return false
                                 regex->lastIndex = 0;
                                 return Value{false};
                             }
+
+                            // Compute absolute positions
+                            size_t match_start = 0;
+                            if (match_piece.data() != nullptr) {
+                                match_start = static_cast<size_t>(match_piece.data() - input.data());
+                            }
+                            size_t match_length = match_piece.size();
+                            size_t absolute_start = regex->lastIndex + match_start;
+
+                            // Advance lastIndex like JS: move to after the match; for zero-length, advance by 1.
+                            size_t nextIndex;
+                            if (match_length == 0) {
+                                // avoid infinite loop on zero-length matches:
+                                // move to next character (or clamp to str.size()).
+                                nextIndex = absolute_start + 1;
+                                if (nextIndex > str.size()) nextIndex = str.size();
+                            } else {
+                                nextIndex = absolute_start + match_length;
+                            }
+
+                            regex->lastIndex = nextIndex;
+                            return Value{true};
                         } else {
                             // Non-global: just test once from beginning
                             return Value{re2::RE2::PartialMatch(str, re)};
@@ -1642,9 +1669,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         re2::RE2& re = regex->getCompiled();
 
                         int numGroups = regex->getNumGroups();
-                        std::vector<re2::StringPiece> groups(numGroups + 1);  // +1 for full match
+                        std::vector<re2::StringPiece> groups(numGroups + 1);
 
-                        re2::StringPiece input(str);
                         size_t searchStart = 0;
 
                         if (regex->global) {
@@ -1654,8 +1680,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                                 return Value{std::monostate{}};
                             }
                             searchStart = regex->lastIndex;
-                            input.remove_prefix(searchStart);
                         }
+
+                        // Create substring view from searchStart
+                        re2::StringPiece input(str.data() + searchStart, str.size() - searchStart);
 
                         // Perform the match
                         if (!re.Match(input, 0, input.size(), re2::RE2::UNANCHORED,
@@ -1666,14 +1694,21 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                             return Value{std::monostate{}};
                         }
 
+                        for (size_t i = 0; i < groups.size(); ++i) {
+                            if (groups[i].data() == nullptr) {
+                                groups[i] = re2::StringPiece();  // Ensure it's empty, not null
+                            }
+                        }
+
                         // Calculate actual position in original string
                         size_t matchPos = searchStart + (groups[0].data() - input.data());
 
                         if (regex->global) {
+                            // Update lastIndex for next call
                             regex->lastIndex = matchPos + groups[0].length();
                         }
 
-                        // Create match result
+                        // Create match result object
                         return Value{createMatchResult(
                             groups, matchPos, str,
                             regex->getGroupNames(),
@@ -1693,32 +1728,97 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         re2::RE2& re = regex->getCompiled();
 
                         auto result = std::make_shared<ArrayValue>();
-
                         if (regex->global) {
-                            // Find all matches
-                            re2::StringPiece input(str);
-                            re2::StringPiece match;
+                            regex->lastIndex = 0;
+                            size_t pos = 0;
+                            bool last_was_empty = false;
 
-                            while (re2::RE2::FindAndConsume(&input, re, &match)) {
-                                result->elements.push_back(Value{std::string(match.data(), match.size())});
+                            while (pos <= str.size()) {
+                                re2::StringPiece match_piece;
+                                re2::StringPiece remaining(str.data() + pos, str.size() - pos);
+
+                                // Find next match at or after pos
+                                bool found = re.Match(remaining, 0, remaining.size(), re2::RE2::UNANCHORED, &match_piece, 1);
+                                if (!found) {
+                                    break;  // no more matches anywhere after pos
+                                }
+
+                                // Compute start/length safely
+                                size_t match_start = 0;
+                                if (match_piece.data() != nullptr) {
+                                    match_start = static_cast<size_t>(match_piece.data() - remaining.data());
+                                }
+                                size_t match_length = match_piece.size();
+                                size_t absolute_match_start = pos + match_start;
+
+                                if (match_length == 0) {
+                                    // zero-length match: only push if the previous match wasn't also empty
+                                    if (!last_was_empty) {
+                                        result->elements.push_back(Value{std::string()});
+                                        regex->lastIndex = absolute_match_start;  // index after match (same as start for empty)
+                                        last_was_empty = true;
+                                    }
+                                    // Advance at least one character from the place where the empty match occurred
+                                    // to avoid infinite loop on consecutive empty matches.
+                                    pos = absolute_match_start + 1;
+                                } else {
+                                    // Non-empty match: push and move past it
+                                    result->elements.push_back(Value{std::string(match_piece.data(), match_length)});
+                                    regex->lastIndex = absolute_match_start + match_length;
+                                    last_was_empty = false;
+                                    pos = absolute_match_start + match_length;
+                                }
                             }
 
                             return result->elements.empty() ? Value{std::monostate{}} : Value{result};
                         } else {
-                            // Single match - return array with one element or null
+                            // Non-global: return array with full match + capture groups
                             int numGroups = regex->getNumGroups();
                             std::vector<re2::StringPiece> groups(numGroups + 1);
 
                             if (re.Match(str, 0, str.size(), re2::RE2::UNANCHORED,
                                     groups.data(), groups.size())) {
-                                for (const auto& g : groups) {
-                                    result->elements.push_back(Value{std::string(g.data(), g.size())});
+                                // Add full match and all capture groups
+                                for (size_t i = 0; i < groups.size(); ++i) {
+                                    if (groups[i].data() == nullptr) {
+                                        result->elements.push_back(Value{std::monostate{}});
+                                    } else {
+                                        result->elements.push_back(Value{std::string(groups[i].data(), groups[i].size())});
+                                    }
                                 }
                                 return Value{result};
                             }
 
                             return Value{std::monostate{}};
                         }
+                    });
+                }
+
+                // debug() -> object with regex internals
+                if (prop == "debug") {
+                    return make_fn([this, regex](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                        auto obj = std::make_shared<ObjectValue>();
+
+                        re2::RE2& re = regex->getCompiled();
+
+                        obj->properties["pattern"] = {Value{regex->pattern}, false, true, false, Token()};
+                        obj->properties["flags"] = {Value{regex->flags}, false, true, false, Token()};
+                        obj->properties["numGroups"] = {Value{static_cast<double>(regex->getNumGroups())}, false, true, false, Token()};
+                        obj->properties["lastIndex"] = {Value{static_cast<double>(regex->lastIndex)}, false, true, false, Token()};
+                        obj->properties["isValid"] = {Value{re.ok()}, false, true, false, Token()};
+
+                        if (!re.ok()) {
+                            obj->properties["error"] = {Value{re.error()}, false, true, false, Token()};
+                        }
+
+                        // List capture group names
+                        auto namesArr = std::make_shared<ArrayValue>();
+                        for (const auto& name : regex->getGroupNames()) {
+                            namesArr->elements.push_back(Value{name});
+                        }
+                        obj->properties["groupNames"] = {Value{namesArr}, false, true, false, Token()};
+
+                        return Value{obj};
                     });
                 }
 
@@ -1762,23 +1862,45 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         re2::RE2& re = regex->getCompiled();
                         auto result = std::make_shared<ArrayValue>();
 
-                        re2::StringPiece input(str);
-                        re2::StringPiece match;
-                        size_t lastPos = 0;
+                        size_t pos = 0;
                         int count = 0;
 
-                        while ((limit < 0 || count < limit) &&
-                            re2::RE2::FindAndConsume(&input, re, &match)) {
-                            // Add the text before the match
-                            size_t matchStart = match.data() - str.data();
-                            result->elements.push_back(Value{str.substr(lastPos, matchStart - lastPos)});
-                            lastPos = matchStart + match.length();
-                            count++;
+                        while (pos <= str.size() && (limit < 0 || count < limit)) {
+                            re2::StringPiece remaining(str.data() + pos, str.size() - pos);
+                            re2::StringPiece match;
+
+                            // Use Match with UNANCHORED to find next separator
+                            if (re.Match(remaining, 0, remaining.size(), re2::RE2::UNANCHORED, &match, 1)) {
+                                // Calculate match position in original string
+                                size_t matchPosInRemaining = match.data() - remaining.data();
+                                size_t matchPos = pos + matchPosInRemaining;
+
+                                // Add text before the separator
+                                result->elements.push_back(Value{str.substr(pos, matchPos - pos)});
+
+                                // Move past the separator
+                                pos = matchPos + match.length();
+
+                                // Handle empty matches (advance by 1 to avoid infinite loop)
+                                if (match.length() == 0) {
+                                    if (pos < str.size()) {
+                                        pos++;
+                                    } else {
+                                        break;
+                                    }
+                                }
+
+                                count++;
+                            } else {
+                                // No more matches, add remaining text
+                                result->elements.push_back(Value{str.substr(pos)});
+                                break;
+                            }
                         }
 
-                        // Add remaining text
-                        if (limit < 0 || count < limit) {
-                            result->elements.push_back(Value{str.substr(lastPos)});
+                        // If we haven't added anything yet, return the whole string
+                        if (result->elements.empty()) {
+                            result->elements.push_back(Value{str});
                         }
 
                         return Value{result};

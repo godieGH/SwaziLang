@@ -404,9 +404,6 @@ struct RegexValue {
                 case 'u':
                     unicode = true;
                     break;
-                default:
-                    // Invalid flag will be caught during compilation
-                    break;
             }
         }
     }
@@ -419,13 +416,21 @@ struct RegexValue {
             re2::RE2::Options opts;
             opts.set_case_sensitive(!ignoreCase);
             opts.set_dot_nl(dotAll);        // '.' matches newline if 's' flag
-            opts.set_one_line(!multiline);  // '^' and '$' behavior
             opts.set_posix_syntax(false);   // Use Perl syntax
             opts.set_longest_match(false);  // First match (like JS)
             opts.set_log_errors(false);     // We'll handle errors
 
-            // Create the compiled regex
-            runtimePattern->compiled = std::make_unique<re2::RE2>(pattern, opts);
+            // Build the actual pattern with inline flags
+            // RE2's set_one_line() doesn't work with PartialMatch/UNANCHORED,
+            // so we use inline (?m) flag for multiline support
+            std::string actual_pattern = pattern;
+
+            if (multiline) {
+                actual_pattern = "(?m)" + actual_pattern;
+            }
+
+            // Create the compiled regex with the modified pattern
+            runtimePattern->compiled = std::make_unique<re2::RE2>(actual_pattern, opts);
 
             // Check if compilation succeeded
             if (!runtimePattern->compiled->ok()) {

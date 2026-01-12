@@ -55,9 +55,15 @@ ObjectPtr createMatchResult(
 
     // Add numeric indices: "0" (full match), "1", "2", etc. (capture groups)
     for (size_t i = 0; i < groups.size(); ++i) {
-        std::string captured = std::string(groups[i].data(), groups[i].size());
-        result->properties[std::to_string(i)] = PropertyDescriptor{
-            Value{captured}, false, false, true, token};
+        // Check if group didn't participate in match
+        if (groups[i].data() == nullptr || (i > 0 && groups[i].empty() && groups[i].data() == groups[0].data())) {
+            result->properties[std::to_string(i)] = PropertyDescriptor{
+                Value{std::monostate{}}, false, false, true, token};
+        } else {
+            std::string captured = std::string(groups[i].data(), groups[i].size());
+            result->properties[std::to_string(i)] = PropertyDescriptor{
+                Value{captured}, false, false, true, token};
+        }
     }
 
     // Add metadata

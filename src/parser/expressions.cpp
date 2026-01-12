@@ -1244,11 +1244,27 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         auto node = std::make_unique<RegexLiteralNode>();
         node->token = regexTok;
 
-        // Parse "pattern|flags" from token value
-        size_t separator = regexTok.value.find('|');
+        // Parse "pattern|flags" from token value.
+        // Use rfind to split on the last '|' because the pattern itself may contain '|' (alternation).
+        // Only treat the tail as flags if it consists solely of valid flag letters.
+        size_t separator = regexTok.value.rfind('|');
         if (separator != std::string::npos) {
-            node->pattern = regexTok.value.substr(0, separator);
-            node->flags = regexTok.value.substr(separator + 1);
+            std::string possibleFlags = regexTok.value.substr(separator + 1);
+            bool flags_only = !possibleFlags.empty();
+            for (char ch : possibleFlags) {
+                if (ch != 'g' && ch != 'i' && ch != 'm' && ch != 's' && ch != 'u' && ch != 'y') {
+                    flags_only = false;
+                    break;
+                }
+            }
+            if (flags_only) {
+                node->pattern = regexTok.value.substr(0, separator);
+                node->flags = possibleFlags;
+            } else {
+                // The '|' found is part of the pattern (e.g., alternation). Treat entire value as pattern.
+                node->pattern = regexTok.value;
+                node->flags = "";
+            }
         } else {
             node->pattern = regexTok.value;
             node->flags = "";
@@ -1256,7 +1272,6 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
 
         return node;
     }
-
     if (t.type == TokenType::BLOCK_DU) {
         return std::make_unique<NullNode>(consume());
     }

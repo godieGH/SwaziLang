@@ -1124,7 +1124,8 @@ void Lexer::scan_regex_literal(std::vector<Token>& out, int tok_line, int tok_co
         }
 
         if (c == '\\') {
-            pattern.push_back(advance());
+            pattern.push_back(c);  // Add the backslash
+            advance();             // Move to next char
             escaped = true;
             continue;
         }
