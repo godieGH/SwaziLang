@@ -480,6 +480,215 @@ static Value process_on_message(const std::vector<Value>& args, EnvPtr /*env*/, 
     // Unknown event - silently ignore
     return std::monostate{};
 }
+
+// process.off(event?, callback?) - remove listeners
+// - process.off() -> remove ALL listeners for ALL events
+// - process.off(event) -> remove all listeners for specific event
+// - process.off(event, callback) -> remove specific callback
+// - process.off([events...]) -> remove all listeners for listed events
+static Value process_off(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
+    // Case 1: process.off() - remove ALL listeners
+    if (args.empty()) {
+        // Clear message listeners
+        {
+            std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+            g_ipc_state.message_listeners.clear();
+        }
+
+        // Clear all signal listeners and stop handles
+        {
+            std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+            g_signal_state.catch_all_listeners.clear();
+            g_signal_state.signal_listeners.clear();
+
+            // Stop and cleanup all signal handles
+            for (auto& kv : g_signal_state.signal_handles) {
+                uv_signal_stop(kv.second);
+                uv_close((uv_handle_t*)kv.second, [](uv_handle_t* h) {
+                    delete (uv_signal_t*)h;
+                });
+            }
+            g_signal_state.signal_handles.clear();
+        }
+
+        return std::monostate{};
+    }
+
+    // Case 2: process.off([events...]) - array of events
+    if (std::holds_alternative<ArrayPtr>(args[0])) {
+        ArrayPtr arr = std::get<ArrayPtr>(args[0]);
+
+        for (const auto& elem : arr->elements) {
+            if (!std::holds_alternative<std::string>(elem)) continue;
+            std::string event = std::get<std::string>(elem);
+
+            // Remove all listeners for this event (recursive call)
+            process_off({Value{event}}, nullptr, token);
+        }
+
+        return std::monostate{};
+    }
+
+    if (!std::holds_alternative<std::string>(args[0])) {
+        throw SwaziError("TypeError",
+            "First argument must be event name (string) or array of event names", token.loc);
+    }
+
+    std::string event = std::get<std::string>(args[0]);
+
+    // Case 3: process.off(event, callback) - remove specific callback
+    if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
+        FunctionPtr callback = std::get<FunctionPtr>(args[1]);
+
+        // Handle "message" event
+        if (event == "message") {
+            std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+            auto& listeners = g_ipc_state.message_listeners;
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&callback](const FunctionPtr& fn) { return fn == callback; }),
+                listeners.end());
+            return std::monostate{};
+        }
+
+        // Handle "signal" catch-all event
+        if (event == "signal") {
+            std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+            auto& listeners = g_signal_state.catch_all_listeners;
+            listeners.erase(
+                std::remove_if(listeners.begin(), listeners.end(),
+                    [&callback](const FunctionPtr& fn) { return fn == callback; }),
+                listeners.end());
+            return std::monostate{};
+        }
+
+        // Handle specific signal
+        int signum = -1;
+        try {
+            signum = resolve_signal(Value{event}, token);
+        } catch (...) {
+            return std::monostate{};
+        }
+
+        if (signum != -1) {
+            std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+            auto it = g_signal_state.signal_listeners.find(event);
+            if (it != g_signal_state.signal_listeners.end()) {
+                auto& listeners = it->second;
+                listeners.erase(
+                    std::remove_if(listeners.begin(), listeners.end(),
+                        [&callback](const FunctionPtr& fn) { return fn == callback; }),
+                    listeners.end());
+
+                // If no more listeners, stop the handle
+                if (listeners.empty()) {
+                    auto handle_it = g_signal_state.signal_handles.find(event);
+                    if (handle_it != g_signal_state.signal_handles.end()) {
+                        uv_signal_stop(handle_it->second);
+                        uv_close((uv_handle_t*)handle_it->second, [](uv_handle_t* h) {
+                            delete (uv_signal_t*)h;
+                        });
+                        g_signal_state.signal_handles.erase(handle_it);
+                    }
+                }
+            }
+        }
+
+        return std::monostate{};
+    }
+
+    // Case 4: process.off(event) - remove ALL listeners for this event
+    if (event == "message") {
+        std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+        g_ipc_state.message_listeners.clear();
+        return std::monostate{};
+    }
+
+    if (event == "signal") {
+        std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+        g_signal_state.catch_all_listeners.clear();
+
+        // Note: Don't stop individual signal handles as they might still have
+        // specific listeners. Only clear the catch-all.
+        return std::monostate{};
+    }
+
+    // Specific signal event
+    int signum = -1;
+    try {
+        signum = resolve_signal(Value{event}, token);
+    } catch (...) {
+        return std::monostate{};
+    }
+
+    if (signum != -1) {
+        std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+
+        // Clear listeners
+        auto it = g_signal_state.signal_listeners.find(event);
+        if (it != g_signal_state.signal_listeners.end()) {
+            it->second.clear();
+        }
+
+        // Stop and cleanup the signal handle
+        auto handle_it = g_signal_state.signal_handles.find(event);
+        if (handle_it != g_signal_state.signal_handles.end()) {
+            uv_signal_stop(handle_it->second);
+            uv_close((uv_handle_t*)handle_it->second, [](uv_handle_t* h) {
+                delete (uv_signal_t*)h;
+            });
+            g_signal_state.signal_handles.erase(handle_it);
+        }
+    }
+
+    return std::monostate{};
+}
+
+// process.listeners(event?) - get count or list of listeners
+static Value process_listeners(const std::vector<Value>& args, EnvPtr /*env*/, const Token& token) {
+    // If no event specified, return total count across all events
+    if (args.empty()) {
+        size_t total = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+            total += g_ipc_state.message_listeners.size();
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+            total += g_signal_state.catch_all_listeners.size();
+            for (const auto& kv : g_signal_state.signal_listeners) {
+                total += kv.second.size();
+            }
+        }
+        return Value{static_cast<double>(total)};
+    }
+
+    if (!std::holds_alternative<std::string>(args[0])) {
+        throw SwaziError("TypeError", "Event name must be a string", token.loc);
+    }
+
+    std::string event = std::get<std::string>(args[0]);
+
+    if (event == "message") {
+        std::lock_guard<std::mutex> lk(g_ipc_state.listeners_mutex);
+        return Value{static_cast<double>(g_ipc_state.message_listeners.size())};
+    }
+
+    if (event == "signal") {
+        std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+        return Value{static_cast<double>(g_signal_state.catch_all_listeners.size())};
+    }
+
+    // Specific signal
+    std::lock_guard<std::mutex> lk(g_signal_state.mutex);
+    auto it = g_signal_state.signal_listeners.find(event);
+    if (it != g_signal_state.signal_listeners.end()) {
+        return Value{static_cast<double>(it->second.size())};
+    }
+
+    return Value{0.0};
+}
+
 // process.detach() - detach from parent terminal (daemonize)
 static Value process_detach(const std::vector<Value>& /*args*/, EnvPtr /*env*/, const Token& token) {
 #ifndef _WIN32
@@ -553,6 +762,12 @@ Value process_send_ipc(const std::vector<Value>& args, EnvPtr env, const Token& 
 
 Value process_on_message_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token) {
     return process_on_message(args, env, token);
+}
+Value process_off_impl(const std::vector<Value>& args, EnvPtr env, const Token& token) {
+    return process_off(args, env, token);
+}
+Value process_listeners_impl(const std::vector<Value>& args, EnvPtr env, const Token& token) {
+    return process_listeners(args, env, token);
 }
 
 Value process_detach_impl(const std::vector<Value>& args, EnvPtr env, const Token& token) {

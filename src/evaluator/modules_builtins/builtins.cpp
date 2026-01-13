@@ -1676,6 +1676,8 @@ std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env) {
 
 Value process_send_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token);
 Value process_on_message_ipc(const std::vector<Value>& args, EnvPtr env, const Token& token);
+Value process_off_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
+Value process_listeners_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
 
 std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
@@ -1767,6 +1769,25 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
             env,
             t);
         obj->properties["on"] = PropertyDescriptor{fn_on, false, false, false, t};
+
+        // process.off(...)
+        auto fn_off = std::make_shared<FunctionValue>(
+            "process.off",
+            [](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+                return process_off_impl(args, env, token);
+            },
+            env,
+            t);
+        obj->properties["off"] = PropertyDescriptor{fn_off, false, false, false, t};
+
+        auto fn_listeners = std::make_shared<FunctionValue>(
+            "process.listeners",
+            [](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+                return process_listeners_impl(args, env, token);
+            },
+            env,
+            t);
+        obj->properties["listeners"] = PropertyDescriptor{fn_listeners, false, false, false, t};
     }
 
     // process.chdir(path) -> bool
@@ -1813,6 +1834,7 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
         obj->properties["ignoreSignals"] = PropertyDescriptor{fn_ignore, false, false, false, t};
     }
 
+    // process.constants
     {
         auto constants_obj = std::make_shared<ObjectValue>();
         constants_obj->is_frozen = true;  // Make it immutable
