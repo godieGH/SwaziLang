@@ -126,7 +126,7 @@ std::string resolve_addon_path(const std::string& addon_name,
         search_paths.push_back(baseDir.parent_path() / "addons");
     }
 
-    std::string project_root = find_project_root(requester_filename);
+    std::string project_root = find_project_root(baseDir.string());  // ✅ CORRECT - uses real path
     if (!project_root.empty()) {
         search_paths.push_back(fs::path(project_root) / "addons");
     }
@@ -353,9 +353,21 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         std::string vendor_name = parse_vendor_spec(module_spec);
 
         // Find project root
-        std::string project_root = find_project_root(requesterTok.loc.filename);
+        fs::path script_path;
+        if (requesterTok.loc.filename.empty() || requesterTok.loc.filename == "<repl>") {
+            script_path = fs::current_path();
+        } else {
+            try {
+                // ✅ canonical() resolves symlinks to real path
+                script_path = fs::canonical(requesterTok.loc.filename).parent_path();
+            } catch (...) {
+                script_path = fs::path(requesterTok.loc.filename).parent_path();
+            }
+        }
+
+        std::string project_root = find_project_root(script_path.string());
         if (project_root.empty()) {
-            project_root = fs::current_path().string();
+            project_root = script_path.string();
         }
 
         // Build vendor package path
@@ -486,6 +498,7 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         return rec->exports;
     }
 
+    // ============ URL MODULE LOADING ============
     if (is_url_spec(module_spec)) {
         // Parse url:package or url:package@version
         std::string url_spec = module_spec.substr(4);  // Skip "url:"
@@ -500,6 +513,7 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
             requesterTok.loc);
     }
 
+    // ============ ABI MODULE LOADING ============
     if (is_abi_spec(module_spec)) {
         std::string addon_name = parse_abi_spec(module_spec);  // "abi:math" -> "math"
 
