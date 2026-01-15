@@ -575,12 +575,14 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             for (auto& s : ifn->then_body) {
                 evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
                 if (did_return && *did_return) return;
+                if (lc && (lc->did_break || lc->did_continue)) return;
             }
         } else if (ifn->has_else) {
             auto blockEnv = std::make_shared<Environment>(env);
             for (auto& s : ifn->else_body) {
                 evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
                 if (did_return && *did_return) return;
+                if (lc && (lc->did_break || lc->did_continue)) return;
             }
         }
         return;
@@ -1338,6 +1340,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         loopCtrl->did_break = false;  // reset for outer flow
                         return;                       // exit entire switch
                     }
+                    if (loopCtrl->did_continue) return;
                 }
             }
         }
@@ -1353,6 +1356,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     loopCtrl->did_break = false;
                     return;  // exit switch
                 }
+                if (loopCtrl->did_continue) return;
             }
         }
 
@@ -1372,6 +1376,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     evaluate_statement(s.get(), tryEnv, return_value, did_return, lc);
                     // don't return here — break so finally can run
                     if (did_return && *did_return) break;
+                    if (lc && (lc->did_break || lc->did_continue)) break;
                 }
             } catch (const SuspendExecution&) {
                 // This is NOT an error — it's the "await" suspension control-flow.
@@ -1404,6 +1409,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             for (auto& s : tcf->catchBlock) {
                 evaluate_statement(s.get(), catchEnv, return_value, did_return, lc);
                 if (did_return && *did_return) break;
+                if (lc && (lc->did_break || lc->did_continue)) break;
             }
         }
 
@@ -1413,6 +1419,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             for (auto& s : tcf->finallyBlock) {
                 evaluate_statement(s.get(), finallyEnv, return_value, did_return, lc);
                 if (did_return && *did_return) break;
+                if (lc && (lc->did_break || lc->did_continue)) break;
             }
         }
 
