@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Linenoise library
-add_library(linenoise thirdparty/linenoise/linenoise.c)
+add_library(linenoise STATIC thirdparty/linenoise/linenoise.c)
 target_include_directories(linenoise PUBLIC thirdparty/linenoise/)
 
 # Network module library
@@ -15,7 +15,7 @@ file(GLOB_RECURSE NETSOURCE
   "src/evaluator/modules_builtins/net_module/*.cpp"
   "src/evaluator/modules_builtins/net_module/*.c"
 )
-add_library(swazi_net ${NETSOURCE})
+add_library(swazi_net STATIC ${NETSOURCE})
 target_include_directories(swazi_net
     PUBLIC ${CMAKE_SOURCE_DIR}/include
     PRIVATE ${CMAKE_SOURCE_DIR}/src/evaluator/modules_builtins/net_module
@@ -114,7 +114,7 @@ list(FILTER LIB_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
 list(FILTER LIB_SOURCES EXCLUDE REGEX "src/evaluator/modules_builtins/net_module/.*")
 # Exclude swazi_format too
 list(FILTER LIB_SOURCES EXCLUDE REGEX "src/format/.*")
-add_library(swazi_lib ${LIB_SOURCES} "${GENERATED_BUILTIN_CPP}")
+add_library(swazi_lib STATIC ${LIB_SOURCES} "${GENERATED_BUILTIN_CPP}")
 
 target_include_directories(swazi_lib PUBLIC 
     ${CMAKE_SOURCE_DIR}/include

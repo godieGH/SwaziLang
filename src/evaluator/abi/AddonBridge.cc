@@ -39,6 +39,17 @@ bool addon_threads_exist() {
 // Internal Structures (never exposed to addons)
 // ============================================================================
 
+// Internal structure for tracking handles in a scope
+struct swazi_handle_scope_s {
+    std::vector<swazi_value> handles;
+    swazi_handle_scope_s* parent;
+};
+
+struct swazi_escapable_handle_scope_s {
+    swazi_handle_scope_s base;
+    swazi_value escaped_handle;
+};
+
 struct swazi_env_s {
     Evaluator* evaluator;
     EnvPtr env_ptr;
@@ -46,6 +57,7 @@ struct swazi_env_s {
     std::string last_error_message;
     Value last_exception;
     bool exception_pending = false;
+    swazi_handle_scope_s* current_scope = nullptr;
 };
 
 struct swazi_value_s {
@@ -83,14 +95,19 @@ struct swazi_ref_s {
 // ============================================================================
 
 static swazi_api g_api = {};
-static bool g_api_initialized = false;
+static std::once_flag g_api_once;
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-static swazi_value wrap_value(const Value& v) {
-    return new swazi_value_s(v);
+static swazi_value wrap_value(const Value& v, swazi_env env) {
+    auto* handle = new swazi_value_s(v);
+
+    if (env && env->current_scope) {
+        env->current_scope->handles.push_back(handle);
+    }
+    return handle;
 }
 
 static Value unwrap_value(swazi_value v) {
@@ -104,19 +121,101 @@ static void set_error(swazi_env env, const char* code, const char* msg) {
     env->last_error_message = msg ? msg : "";
 }
 
+// HandleScope API implementation
+static swazi_status api_open_handle_scope(swazi_env env,
+    swazi_handle_scope* scope) {
+    if (!env || !scope) return SWAZI_INVALID_ARG;
+
+    auto* new_scope = new swazi_handle_scope_s();
+    new_scope->parent = env->current_scope;
+    env->current_scope = new_scope;
+
+    *scope = new_scope;
+    return SWAZI_OK;
+}
+
+static swazi_status api_close_handle_scope(swazi_env env,
+    swazi_handle_scope scope) {
+    if (!env || !scope) return SWAZI_INVALID_ARG;
+    if (env->current_scope != scope) return SWAZI_HANDLE_SCOPE_MISMATCH;
+
+    // 🔥 Delete all handles in this scope
+    for (swazi_value handle : scope->handles) {
+        delete handle;
+    }
+
+    // Restore parent scope
+    env->current_scope = scope->parent;
+    delete scope;
+
+    return SWAZI_OK;
+}
+
+static swazi_status api_open_escapable_handle_scope(
+    swazi_env env,
+    swazi_escapable_handle_scope* scope) {
+    if (!env || !scope) return SWAZI_INVALID_ARG;
+
+    auto* new_scope = new swazi_escapable_handle_scope_s();
+    new_scope->base.parent = env->current_scope;
+    new_scope->escaped_handle = nullptr;
+    env->current_scope = &new_scope->base;
+
+    *scope = new_scope;
+    return SWAZI_OK;
+}
+
+static swazi_status api_close_escapable_handle_scope(
+    swazi_env env,
+    swazi_escapable_handle_scope scope) {
+    if (!env || !scope) return SWAZI_INVALID_ARG;
+    if (env->current_scope != &scope->base) return SWAZI_HANDLE_SCOPE_MISMATCH;
+
+    // Delete all handles EXCEPT the escaped one
+    for (swazi_value handle : scope->base.handles) {
+        if (handle != scope->escaped_handle) {
+            delete handle;
+        }
+    }
+
+    // Move escaped handle to parent scope
+    if (scope->escaped_handle && scope->base.parent) {
+        scope->base.parent->handles.push_back(scope->escaped_handle);
+    }
+
+    env->current_scope = scope->base.parent;
+    delete scope;
+
+    return SWAZI_OK;
+}
+
+static swazi_status api_escape_handle(
+    swazi_env env,
+    swazi_escapable_handle_scope scope,
+    swazi_value escapee,
+    swazi_value* result) {
+    if (!env || !scope || !escapee || !result) return SWAZI_INVALID_ARG;
+
+    // Mark this handle as escaped (won't be deleted when scope closes)
+    scope->escaped_handle = escapee;
+    *result = escapee;
+
+    return SWAZI_OK;
+}
+
 // ============================================================================
 // API Implementation - Environment Operations
 // ============================================================================
 
 static swazi_status api_get_undefined(swazi_env env, swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(std::monostate{});
+    *result = wrap_value(std::monostate{}, env);
     return SWAZI_OK;
 }
 
 static swazi_status api_get_null(swazi_env env, swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(std::monostate{});
+    *result = wrap_value(std::monostate{}, env);
     return SWAZI_OK;
 }
 
@@ -129,14 +228,14 @@ static swazi_status api_get_global(swazi_env env, swazi_value* result) {
     global_obj->is_env_proxy = true;
     global_obj->proxy_env = env->evaluator->get_global_env();
 
-    *result = wrap_value(Value{global_obj});
+    *result = wrap_value(Value{global_obj}, env);
     return SWAZI_OK;
 }
 
 static swazi_status api_get_boolean(swazi_env env, bool value,
     swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(Value{value});
+    *result = wrap_value(Value{value}, env);
     return SWAZI_OK;
 }
 
@@ -244,7 +343,7 @@ static swazi_status api_get_value_bool(swazi_env env, swazi_value value,
 static swazi_status api_create_bool(swazi_env env, bool value,
     swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(Value{value});
+    *result = wrap_value(Value{value}, env);
     return SWAZI_OK;
 }
 
@@ -311,28 +410,28 @@ static swazi_status api_get_value_int64(swazi_env env, swazi_value value,
 static swazi_status api_create_double(swazi_env env, double value,
     swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(Value{value});
+    *result = wrap_value(Value{value}, env);
     return SWAZI_OK;
 }
 
 static swazi_status api_create_int32(swazi_env env, int32_t value,
     swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(Value{static_cast<double>(value)});
+    *result = wrap_value(Value{static_cast<double>(value)}, env);
     return SWAZI_OK;
 }
 
 static swazi_status api_create_uint32(swazi_env env, uint32_t value,
     swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(Value{static_cast<double>(value)});
+    *result = wrap_value(Value{static_cast<double>(value)}, env);
     return SWAZI_OK;
 }
 
 static swazi_status api_create_int64(swazi_env env, int64_t value,
     swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
-    *result = wrap_value(Value{static_cast<double>(value)});
+    *result = wrap_value(Value{static_cast<double>(value)}, env);
     return SWAZI_OK;
 }
 
@@ -392,7 +491,7 @@ static swazi_status api_create_string_utf8(swazi_env env, const char* str,
         s = std::string(str, length);
     }
 
-    *result = wrap_value(Value{s});
+    *result = wrap_value(Value{s}, env);
     return SWAZI_OK;
 }
 
@@ -410,7 +509,7 @@ static swazi_status api_create_object(swazi_env env, swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
 
     auto obj = std::make_shared<ObjectValue>();
-    *result = wrap_value(Value{obj});
+    *result = wrap_value(Value{obj}, env);
     return SWAZI_OK;
 }
 
@@ -435,9 +534,9 @@ static swazi_status api_get_property(swazi_env env, swazi_value object,
 
     auto it = obj->properties.find(key_str);
     if (it == obj->properties.end()) {
-        *result = wrap_value(std::monostate{});
+        *result = wrap_value(std::monostate{}, env);
     } else {
-        *result = wrap_value(it->second.value);
+        *result = wrap_value(it->second.value, env);
     }
 
     return SWAZI_OK;
@@ -459,9 +558,9 @@ static swazi_status api_get_named_property(swazi_env env, swazi_value object,
 
     auto it = obj->properties.find(key_str);
     if (it == obj->properties.end()) {
-        *result = wrap_value(std::monostate{});
+        *result = wrap_value(std::monostate{}, env);
     } else {
-        *result = wrap_value(it->second.value);
+        *result = wrap_value(it->second.value, env);
     }
 
     return SWAZI_OK;
@@ -606,7 +705,7 @@ static swazi_status api_get_property_names(swazi_env env, swazi_value object,
         arr->elements.push_back(Value{kv.first});
     }
 
-    *result = wrap_value(Value{arr});
+    *result = wrap_value(Value{arr}, env);
     return SWAZI_OK;
 }
 
@@ -618,7 +717,7 @@ static swazi_status api_create_array(swazi_env env, swazi_value* result) {
     if (!env || !result) return SWAZI_INVALID_ARG;
 
     auto arr = std::make_shared<ArrayValue>();
-    *result = wrap_value(Value{arr});
+    *result = wrap_value(Value{arr}, env);
     return SWAZI_OK;
 }
 
@@ -628,7 +727,7 @@ static swazi_status api_create_array_with_length(swazi_env env, size_t length,
 
     auto arr = std::make_shared<ArrayValue>();
     arr->elements.resize(length, std::monostate{});
-    *result = wrap_value(Value{arr});
+    *result = wrap_value(Value{arr}, env);
     return SWAZI_OK;
 }
 
@@ -659,9 +758,9 @@ static swazi_status api_get_element(swazi_env env, swazi_value array,
 
     ArrayPtr arr = std::get<ArrayPtr>(v);
     if (index >= arr->elements.size()) {
-        *result = wrap_value(std::monostate{});
+        *result = wrap_value(std::monostate{}, env);
     } else {
-        *result = wrap_value(arr->elements[index]);
+        *result = wrap_value(arr->elements[index], env);
     }
 
     return SWAZI_OK;
@@ -748,6 +847,9 @@ static swazi_status api_create_function(swazi_env env, const char* utf8name,
     // Create native implementation that bridges to addon callback
     auto native_impl = [cb, data, env](const std::vector<Value>& args,
                            EnvPtr callEnv, const Token& token) -> Value {
+        swazi_handle_scope scope;
+        api_open_handle_scope(env, &scope);
+
         // Build callback info WITH receiver support
         swazi_callback_info_s cbinfo;
         cbinfo.args = args;
@@ -769,6 +871,7 @@ static swazi_status api_create_function(swazi_env env, const char* utf8name,
 
         // Check for pending exception FIRST
         if (env->exception_pending) {
+            api_close_handle_scope(env, scope);
             env->exception_pending = false;
             throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
         }
@@ -779,13 +882,15 @@ static swazi_status api_create_function(swazi_env env, const char* utf8name,
         }
 
         Value result = unwrap_value(result_handle);
-        delete result_handle;
+
+        api_close_handle_scope(env, scope);
+
         return result;
     };
 
     auto fn = std::make_shared<FunctionValue>(name, native_impl,
         env->env_ptr, Token());
-    *result = wrap_value(Value{fn});
+    *result = wrap_value(Value{fn}, env);
     return SWAZI_OK;
 }
 
@@ -823,6 +928,9 @@ static swazi_status api_create_bound_function(
                            const std::vector<Value>& args,
                            EnvPtr callEnv,
                            const Token& token) -> Value {
+        swazi_handle_scope scope;
+        api_open_handle_scope(env, &scope);
+
         swazi_callback_info_s cbinfo;
         cbinfo.args = args;
         cbinfo.user_data = data;
@@ -832,6 +940,7 @@ static swazi_status api_create_bound_function(
         swazi_value result_handle = cb(env, &cbinfo);
 
         if (env->exception_pending) {
+            api_close_handle_scope(env, scope);
             env->exception_pending = false;
             throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
         }
@@ -839,7 +948,8 @@ static swazi_status api_create_bound_function(
         if (!result_handle) return std::monostate{};
 
         Value result = unwrap_value(result_handle);
-        delete result_handle;
+        api_close_handle_scope(env, scope);
+
         return result;
     };
 
@@ -853,7 +963,7 @@ static swazi_status api_create_bound_function(
     auto fn = std::make_shared<FunctionValue>(
         name, native_impl, method_closure, Token());
 
-    *result = wrap_value(Value{fn});
+    *result = wrap_value(Value{fn}, env);
     return SWAZI_OK;
 }
 
@@ -898,7 +1008,7 @@ static swazi_status api_call_function(swazi_env env, swazi_value recv,
         }
 
         if (result) {
-            *result = wrap_value(call_result);
+            *result = wrap_value(call_result, env);
         }
 
         return SWAZI_OK;
@@ -1161,7 +1271,7 @@ static swazi_status api_new_instance(swazi_env env, swazi_value constructor,
     }
 
     // Return the fully constructed instance
-    *result = wrap_value(Value{instance});
+    *result = wrap_value(Value{instance}, env);
     return SWAZI_OK;
 }
 
@@ -1180,13 +1290,13 @@ static swazi_status api_get_cb_info(swazi_env env, swazi_callback_info cbinfo,
 
     if (argv) {
         for (size_t i = 0; i < cbinfo->args.size(); i++) {
-            argv[i] = wrap_value(cbinfo->args[i]);
+            argv[i] = wrap_value(cbinfo->args[i], env);
         }
     }
 
     if (this_arg) {
         if (cbinfo->this_object) {
-            *this_arg = wrap_value(Value{cbinfo->this_object});
+            *this_arg = wrap_value(Value{cbinfo->this_object}, env);
         } else {
             *this_arg = nullptr;
         }
@@ -1204,7 +1314,7 @@ static swazi_status api_get_new_target(swazi_env env,
     swazi_value* result) {
     if (!env || !cbinfo || !result) return SWAZI_INVALID_ARG;
 
-    *result = wrap_value(cbinfo->new_target);
+    *result = wrap_value(cbinfo->new_target, env);
     return SWAZI_OK;
 }
 
@@ -1254,11 +1364,11 @@ static swazi_status api_get_and_clear_last_exception(swazi_env env,
     if (!env || !result) return SWAZI_INVALID_ARG;
 
     if (env->exception_pending) {
-        *result = wrap_value(env->last_exception);
+        *result = wrap_value(env->last_exception, env);
         env->exception_pending = false;
         env->last_exception = std::monostate{};
     } else {
-        *result = wrap_value(std::monostate{});
+        *result = wrap_value(std::monostate{}, env);
     }
 
     return SWAZI_OK;
@@ -1273,7 +1383,7 @@ static swazi_status api_create_error(swazi_env env, swazi_value code,
     err_obj->properties["code"] = PropertyDescriptor{unwrap_value(code), false, false, false, Token()};
     err_obj->properties["message"] = PropertyDescriptor{unwrap_value(msg), false, false, false, Token()};
 
-    *result = wrap_value(Value{err_obj});
+    *result = wrap_value(Value{err_obj}, env);
     return SWAZI_OK;
 }
 
@@ -1312,7 +1422,7 @@ static swazi_status api_create_buffer(swazi_env env, size_t length,
         *data = buf->data.data();
     }
 
-    *result = wrap_value(Value{buf});
+    *result = wrap_value(Value{buf}, env);
     return SWAZI_OK;
 }
 
@@ -1335,7 +1445,7 @@ static swazi_status api_create_external_buffer(swazi_env env, size_t length,
         finalize_cb(env, data, finalize_hint);
     }
 
-    *result = wrap_value(Value{buf});
+    *result = wrap_value(Value{buf}, env);
     return SWAZI_OK;
 }
 
@@ -1353,7 +1463,7 @@ static swazi_status api_create_buffer_copy(swazi_env env, size_t length,
         *result_data = buf->data.data();
     }
 
-    *result = wrap_value(Value{buf});
+    *result = wrap_value(Value{buf}, env);
     return SWAZI_OK;
 }
 
@@ -1395,7 +1505,7 @@ static swazi_status api_create_promise(swazi_env env, swazi_deferred* deferred,
     def->promise = prom;
 
     *deferred = def;
-    *promise = wrap_value(Value{prom});
+    *promise = wrap_value(Value{prom}, env);
 
     return SWAZI_OK;
 }
@@ -1428,6 +1538,8 @@ static swazi_status api_queue_macrotask(swazi_env env, swazi_callback callback,
 
     // Create a wrapper that will be executed on the main loop
     auto wrapper = [env, callback, user_data]() {
+        swazi_handle_scope scope;
+        api_open_handle_scope(env, &scope);
         swazi_callback_info_s cbinfo;
         cbinfo.args = {};  // No args for this callback
         cbinfo.user_data = user_data;
@@ -1437,14 +1549,13 @@ static swazi_status api_queue_macrotask(swazi_env env, swazi_callback callback,
         swazi_value result_handle = callback(env, &cbinfo);
 
         if (env->exception_pending) {
+            api_close_handle_scope(env, scope);
             env->exception_pending = false;
             std::cerr << "Exception in queued callback: "
                       << env->last_error_message << std::endl;
         }
 
-        if (result_handle) {
-            delete result_handle;
-        }
+        api_close_handle_scope(env, scope);
     };
 
     // Use the scheduler bridge to queue this on the main loop
@@ -1466,6 +1577,8 @@ static swazi_status api_queue_microtask(swazi_env env, swazi_callback callback,
     if (!env || !callback) return SWAZI_INVALID_ARG;
 
     auto wrapper = [env, callback, user_data]() {
+        swazi_handle_scope scope;
+        api_open_handle_scope(env, &scope);
         swazi_callback_info_s cbinfo;
         cbinfo.args = {};
         cbinfo.user_data = user_data;
@@ -1475,14 +1588,13 @@ static swazi_status api_queue_microtask(swazi_env env, swazi_callback callback,
         swazi_value result_handle = callback(env, &cbinfo);
 
         if (env->exception_pending) {
+            api_close_handle_scope(env, scope);
             env->exception_pending = false;
             std::cerr << "Exception in microtask: "
                       << env->last_error_message << std::endl;
         }
 
-        if (result_handle) {
-            delete result_handle;
-        }
+        api_close_handle_scope(env, scope);
     };
 
     if (env->evaluator && env->evaluator->scheduler()) {
@@ -1678,7 +1790,7 @@ static swazi_status api_get_reference_value(swazi_env env, swazi_ref ref,
     auto it = g_refs.find(ref);
     if (it == g_refs.end()) return SWAZI_INVALID_ARG;
 
-    *result = wrap_value(it->second->value);
+    *result = wrap_value(it->second->value, env);
     return SWAZI_OK;
 }
 
@@ -1692,7 +1804,7 @@ static swazi_status api_coerce_to_bool(swazi_env env, swazi_value value,
 
     const Value& v = unwrap_value(value);
     bool b = env->evaluator->to_bool_public(v);
-    *result = wrap_value(Value{b});
+    *result = wrap_value(Value{b}, env);
 
     return SWAZI_OK;
 }
@@ -1704,7 +1816,7 @@ static swazi_status api_coerce_to_number(swazi_env env, swazi_value value,
     try {
         const Value& v = unwrap_value(value);
         double d = env->evaluator->to_number_public(v, Token());
-        *result = wrap_value(Value{d});
+        *result = wrap_value(Value{d}, env);
         return SWAZI_OK;
     } catch (...) {
         set_error(env, "TypeError", "Cannot coerce to number");
@@ -1718,7 +1830,7 @@ static swazi_status api_coerce_to_string(swazi_env env, swazi_value value,
 
     const Value& v = unwrap_value(value);
     std::string s = env->evaluator->to_string_value_public(v, true);
-    *result = wrap_value(Value{s});
+    *result = wrap_value(Value{s}, env);
 
     return SWAZI_OK;
 }
@@ -1731,14 +1843,14 @@ static swazi_status api_coerce_to_object(swazi_env env, swazi_value value,
 
     // If already an object, return as-is
     if (std::holds_alternative<ObjectPtr>(v)) {
-        *result = wrap_value(v);
+        *result = wrap_value(v, env);
         return SWAZI_OK;
     }
 
     // Otherwise create wrapper object
     auto obj = std::make_shared<ObjectValue>();
     obj->properties["value"] = PropertyDescriptor{v, false, false, false, Token()};
-    *result = wrap_value(Value{obj});
+    *result = wrap_value(Value{obj}, env);
 
     return SWAZI_OK;
 }
@@ -1796,7 +1908,7 @@ static swazi_status api_create_external(swazi_env env, void* data,
     obj->properties["__external__"] = PropertyDescriptor{
         Value{true}, true, false, false, Token()};  // mark it private and locked so userland can not access or override
 
-    *result = wrap_value(Value{obj});
+    *result = wrap_value(Value{obj}, env);
     return SWAZI_OK;
 }
 
@@ -1852,7 +1964,7 @@ static swazi_status api_create_date(swazi_env env, double time,
     dt->recompute_calendar_fields();
     dt->update_literal_text();
 
-    *result = wrap_value(Value{dt});
+    *result = wrap_value(Value{dt}, env);
     return SWAZI_OK;
 }
 
@@ -1960,7 +2072,7 @@ static swazi_status api_datetime_set_year(swazi_env env, swazi_value value,
     dt->recompute_epoch_from_fields();
     dt->update_literal_text();
 
-    *result = wrap_value(Value{dt});
+    *result = wrap_value(Value{dt}, env);
     return SWAZI_OK;
 }
 
@@ -1983,7 +2095,7 @@ static swazi_status api_datetime_set_month(swazi_env env, swazi_value value,
     dt->recompute_epoch_from_fields();
     dt->update_literal_text();
 
-    *result = wrap_value(Value{dt});
+    *result = wrap_value(Value{dt}, env);
     return SWAZI_OK;
 }
 
@@ -2006,7 +2118,7 @@ static swazi_status api_datetime_set_day(swazi_env env, swazi_value value,
     dt->recompute_epoch_from_fields();
     dt->update_literal_text();
 
-    *result = wrap_value(Value{dt});
+    *result = wrap_value(Value{dt}, env);
     return SWAZI_OK;
 }
 
@@ -2023,7 +2135,7 @@ static swazi_status api_datetime_add_days(swazi_env env, swazi_value value,
     DateTimePtr dt = std::get<DateTimePtr>(v);
     DateTimePtr newDt = dt->addDays(days);
 
-    *result = wrap_value(Value{newDt});
+    *result = wrap_value(Value{newDt}, env);
     return SWAZI_OK;
 }
 
@@ -2039,7 +2151,7 @@ static swazi_status api_datetime_add_months(swazi_env env, swazi_value value,
     DateTimePtr dt = std::get<DateTimePtr>(v);
     DateTimePtr newDt = dt->addMonths(months);
 
-    *result = wrap_value(Value{newDt});
+    *result = wrap_value(Value{newDt}, env);
     return SWAZI_OK;
 }
 
@@ -2055,7 +2167,7 @@ static swazi_status api_datetime_add_years(swazi_env env, swazi_value value,
     DateTimePtr dt = std::get<DateTimePtr>(v);
     DateTimePtr newDt = dt->addYears(years);
 
-    *result = wrap_value(Value{newDt});
+    *result = wrap_value(Value{newDt}, env);
     return SWAZI_OK;
 }
 
@@ -2071,7 +2183,7 @@ static swazi_status api_datetime_add_hours(swazi_env env, swazi_value value,
     DateTimePtr dt = std::get<DateTimePtr>(v);
     DateTimePtr newDt = dt->addHours(hours);
 
-    *result = wrap_value(Value{newDt});
+    *result = wrap_value(Value{newDt}, env);
     return SWAZI_OK;
 }
 
@@ -2087,7 +2199,7 @@ static swazi_status api_datetime_add_seconds(swazi_env env, swazi_value value,
     DateTimePtr dt = std::get<DateTimePtr>(v);
     DateTimePtr newDt = dt->addSeconds(seconds);
 
-    *result = wrap_value(Value{newDt});
+    *result = wrap_value(Value{newDt}, env);
     return SWAZI_OK;
 }
 
@@ -2129,7 +2241,7 @@ static swazi_status api_datetime_set_timezone(swazi_env env, swazi_value value,
     try {
         DateTimePtr dt = std::get<DateTimePtr>(v);
         DateTimePtr newDt = dt->setZone(tz);
-        *result = wrap_value(Value{newDt});
+        *result = wrap_value(Value{newDt}, env);
         return SWAZI_OK;
     } catch (const std::exception& e) {
         set_error(env, "ValueError", e.what());
@@ -2152,7 +2264,7 @@ static swazi_status api_create_range(swazi_env env, int32_t start, int32_t end,
     }
 
     auto range = std::make_shared<RangeValue>(start, end, step, inclusive);
-    *result = wrap_value(Value{range});
+    *result = wrap_value(Value{range}, env);
     return SWAZI_OK;
 }
 
@@ -2259,7 +2371,7 @@ static swazi_status api_create_regex(swazi_env env, const char* pattern,
         // Compile to validate pattern
         regex->getCompiled();
 
-        *result = wrap_value(Value{regex});
+        *result = wrap_value(Value{regex}, env);
         return SWAZI_OK;
     } catch (const std::exception& e) {
         set_error(env, "SyntaxError", e.what());
@@ -2331,7 +2443,7 @@ static swazi_status api_regex_exec(swazi_env env, swazi_value regex,
         bool matched = re2::RE2::FullMatchN(text, compiled, arg_ptrs.data(), num_groups + 1);
 
         if (!matched) {
-            *result = wrap_value(std::monostate{});
+            *result = wrap_value(std::monostate{}, env);
             return SWAZI_OK;
         }
 
@@ -2342,7 +2454,7 @@ static swazi_status api_regex_exec(swazi_env env, swazi_value regex,
             arr->elements.push_back(Value{cap});
         }
 
-        *result = wrap_value(Value{arr});
+        *result = wrap_value(Value{arr}, env);
         return SWAZI_OK;
     } catch (const std::exception& e) {
         set_error(env, "Error", e.what());
@@ -2408,7 +2520,7 @@ static swazi_status api_create_class(swazi_env env, const char* name,
         }
     }
 
-    *result = wrap_value(Value{cls});
+    *result = wrap_value(Value{cls}, env);
     return SWAZI_OK;
 }
 
@@ -2440,6 +2552,9 @@ static swazi_status api_class_define_method(swazi_env env, swazi_value class_val
     // ✅ Create native wrapper that handles $ binding
     auto native_impl = [callback, user_data, env](
                            const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+        swazi_handle_scope scope;
+        api_open_handle_scope(env, &scope);
+
         swazi_callback_info_s cbinfo;
         cbinfo.args = args;
         cbinfo.user_data = user_data;
@@ -2458,6 +2573,7 @@ static swazi_status api_class_define_method(swazi_env env, swazi_value class_val
         swazi_value result_handle = callback(env, &cbinfo);
 
         if (env->exception_pending) {
+            api_close_handle_scope(env, scope);
             env->exception_pending = false;
             throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
         }
@@ -2465,7 +2581,8 @@ static swazi_status api_class_define_method(swazi_env env, swazi_value class_val
         if (!result_handle) return std::monostate{};
 
         Value result = unwrap_value(result_handle);
-        delete result_handle;
+        api_close_handle_scope(env, scope);
+
         return result;
     };
 
@@ -2682,6 +2799,9 @@ static swazi_status api_class_modify_method(swazi_env env, swazi_value class_val
     if (new_callback) {
         auto native_impl = [new_callback, new_user_data, env](
                                const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+            swazi_handle_scope scope;
+            api_open_handle_scope(env, &scope);
+
             swazi_callback_info_s cbinfo;
             cbinfo.args = args;
             cbinfo.user_data = new_user_data;
@@ -2699,6 +2819,7 @@ static swazi_status api_class_modify_method(swazi_env env, swazi_value class_val
             swazi_value result_handle = new_callback(env, &cbinfo);
 
             if (env->exception_pending) {
+                api_close_handle_scope(env, scope);
                 env->exception_pending = false;
                 throw SwaziError(env->last_error_code, env->last_error_message, token.loc);
             }
@@ -2706,7 +2827,8 @@ static swazi_status api_class_modify_method(swazi_env env, swazi_value class_val
             if (!result_handle) return std::monostate{};
 
             Value result = unwrap_value(result_handle);
-            delete result_handle;
+            api_close_handle_scope(env, scope);
+
             return result;
         };
 
@@ -3007,9 +3129,9 @@ static swazi_status api_class_get_parent(swazi_env env, swazi_value class_val,
     ClassPtr cls = std::get<ClassPtr>(cls_value);
 
     if (cls->super) {
-        *result = wrap_value(Value{cls->super});
+        *result = wrap_value(Value{cls->super}, env);
     } else {
-        *result = wrap_value(std::monostate{});
+        *result = wrap_value(std::monostate{}, env);
     }
 
     return SWAZI_OK;
@@ -3117,7 +3239,7 @@ static swazi_status api_get_receiver(swazi_env env, swazi_callback_info info,
         return SWAZI_OK;
     }
 
-    *receiver = wrap_value(Value{info->this_object});
+    *receiver = wrap_value(Value{info->this_object}, env);
     return SWAZI_OK;
 }
 
@@ -3133,22 +3255,22 @@ static swazi_status api_get_instance_class(swazi_env env, swazi_value instance,
 
     ObjectPtr obj = std::get<ObjectPtr>(inst_val);
     if (!obj) {
-        *class_val = wrap_value(std::monostate{});
+        *class_val = wrap_value(std::monostate{}, env);
         return SWAZI_OK;
     }
 
     auto it = obj->properties.find("__class__");
     if (it == obj->properties.end()) {
-        *class_val = wrap_value(std::monostate{});
+        *class_val = wrap_value(std::monostate{}, env);
         return SWAZI_OK;
     }
 
     if (!std::holds_alternative<ClassPtr>(it->second.value)) {
-        *class_val = wrap_value(std::monostate{});
+        *class_val = wrap_value(std::monostate{}, env);
         return SWAZI_OK;
     }
 
-    *class_val = wrap_value(it->second.value);
+    *class_val = wrap_value(it->second.value, env);
     return SWAZI_OK;
 }
 
@@ -3197,8 +3319,6 @@ static swazi_status api_instance_of(swazi_env env, swazi_value instance,
 // ============================================================================
 
 void init_addon_api() {
-    if (g_api_initialized) return;
-
     // Environment operations
     g_api.get_undefined = api_get_undefined;
     g_api.get_null = api_get_null;
@@ -3363,10 +3483,14 @@ void init_addon_api() {
     g_api.get_instance_class = api_get_instance_class;
     g_api.instance_of = api_instance_of;
 
+    g_api.open_handle_scope = api_open_handle_scope;
+    g_api.close_handle_scope = api_close_handle_scope;
+    g_api.open_escapable_handle_scope = api_open_escapable_handle_scope;
+    g_api.close_escapable_handle_scope = api_close_escapable_handle_scope;
+    g_api.escape_handle = api_escape_handle;
+
     // Instance checking
     g_api.instanceof = api_instanceof;
-
-    g_api_initialized = true;
 }
 
 // ============================================================================
@@ -3374,9 +3498,7 @@ void init_addon_api() {
 // ============================================================================
 
 extern "C" const swazi_api* swazi_get_api() {
-    if (!g_api_initialized) {
-        init_addon_api();
-    }
+    std::call_once(g_api_once, init_addon_api);
     return &g_api;
 }
 
@@ -3452,44 +3574,51 @@ Value load_addon(const std::string& path, Evaluator* evaluator, EnvPtr env) {
 
     swazi_env_s* env_wrapper = env_wrapper_ptr.get();
 
+    swazi_handle_scope registration_scope;
+    api_open_handle_scope(env_wrapper, &registration_scope);
+
     auto exports = std::make_shared<ObjectValue>();
-    SwaziValuePtr exports_handle(wrap_value(Value{exports}));
+    swazi_value exports_handle = wrap_value(Value{exports}, env_wrapper);
 
     try {
-        swazi_value result = register_func(env_wrapper, exports_handle.get());
+        swazi_value result = register_func(env_wrapper, exports_handle);
 
         if (env_wrapper->exception_pending) {
+            api_close_handle_scope(env_wrapper, registration_scope);
             throw SwaziError(
                 env_wrapper->last_error_code.empty() ? "AddonError" : env_wrapper->last_error_code,
                 env_wrapper->last_error_message,
                 TokenLocation{});
         }
 
-        if (result && result != exports_handle.get()) {
-            SwaziValuePtr result_ptr(result);
-            Value result_val = unwrap_value(result);
-
-            // ✅ Validate that it's a known language type
+        Value result_val;
+        if (result && result != exports_handle) {
+            result_val = unwrap_value(result);
             if (!is_valid_language_value(result_val)) {
+                api_close_handle_scope(env_wrapper, registration_scope);
                 throw SwaziError(
                     "AddonError",
                     "Addon returned an invalid value type that the language doesn't support",
                     TokenLocation{});
             }
-
-            return result_val;
+        } else {
+            result_val = Value{exports};
         }
 
+        api_close_handle_scope(env_wrapper, registration_scope);
+
+        {
+            std::lock_guard<std::mutex> lock(g_addon_envs_mutex);
+            g_addon_envs[path] = std::move(env_wrapper_ptr);
+        }
+
+        return result_val;
+
     } catch (const SwaziError&) {
+        api_close_handle_scope(env_wrapper, registration_scope);
         throw;
     } catch (const std::exception& e) {
+        api_close_handle_scope(env_wrapper, registration_scope);
         throw SwaziError("AddonError", e.what(), TokenLocation{});
     }
-
-    {
-        std::lock_guard<std::mutex> lock(g_addon_envs_mutex);
-        g_addon_envs[path] = std::move(env_wrapper_ptr);
-    }
-
-    return Value{exports};
 }

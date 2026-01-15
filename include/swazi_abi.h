@@ -119,6 +119,10 @@ typedef swazi_value (*swazi_addon_register_func)(
     swazi_env env,
     swazi_value exports);
 
+// handle auto release handles when gone out of scope
+typedef struct swazi_handle_scope_s* swazi_handle_scope;
+typedef struct swazi_escapable_handle_scope_s* swazi_escapable_handle_scope;
+
 // Platform-specific export macro
 #ifdef _WIN32
 #ifdef SWAZI_ADDON_BUILDING
@@ -337,7 +341,10 @@ typedef struct swazi_api_s {
     // ------------------------------------------------------------------------
     // Promise Operations
     // ------------------------------------------------------------------------
-
+    // In swazi_abi.h, add to Promise Operations comment:
+    // IMPORTANT: swazi_deferred must be resolved or rejected to prevent memory leaks.
+    // Always call resolve_deferred/reject_deferred or their async variants.
+    // In error paths, call reject_deferred before returning.
     swazi_status (*create_promise)(swazi_env env, swazi_deferred* deferred,
         swazi_value* promise);
     swazi_status (*resolve_deferred)(swazi_env env, swazi_deferred deferred,
@@ -639,6 +646,30 @@ typedef struct swazi_api_s {
         swazi_value class_val,
         bool* result);
 
+    // HandleScope Management (Automatic Cleanup)
+    swazi_status (*open_handle_scope)(
+        swazi_env env,
+        swazi_handle_scope* scope);
+
+    swazi_status (*close_handle_scope)(
+        swazi_env env,
+        swazi_handle_scope scope);
+
+    // For values that need to outlive the scope
+    swazi_status (*open_escapable_handle_scope)(
+        swazi_env env,
+        swazi_escapable_handle_scope* scope);
+
+    swazi_status (*close_escapable_handle_scope)(
+        swazi_env env,
+        swazi_escapable_handle_scope scope);
+
+    swazi_status (*escape_handle)(
+        swazi_env env,
+        swazi_escapable_handle_scope scope,
+        swazi_value escapee,
+        swazi_value* result);
+
 } swazi_api;
 
 // ============================================================================
@@ -752,6 +783,39 @@ inline bool IsArray(swazi_env env, swazi_value value) {
     swazi_get_api()->is_array(env, value, &result);
     return result;
 }
+
+class HandleScope {
+    swazi_env env_;
+    swazi_handle_scope scope_;
+
+   public:
+    HandleScope(swazi_env env) : env_(env) {
+        swazi_get_api()->open_handle_scope(env_, &scope_);
+    }
+    ~HandleScope() {
+        swazi_get_api()->close_handle_scope(env_, scope_);
+    }
+    HandleScope(const HandleScope&) = delete;
+    HandleScope& operator=(const HandleScope&) = delete;
+};
+
+class EscapableHandleScope {
+    swazi_env env_;
+    swazi_escapable_handle_scope scope_;
+
+   public:
+    EscapableHandleScope(swazi_env env) : env_(env) {
+        swazi_get_api()->open_escapable_handle_scope(env_, &scope_);
+    }
+    ~EscapableHandleScope() {
+        swazi_get_api()->close_escapable_handle_scope(env_, scope_);
+    }
+    swazi_value escape(swazi_value value) {
+        swazi_value result;
+        swazi_get_api()->escape_handle(env_, scope_, value, &result);
+        return result;
+    }
+};
 
 }  // namespace swazi
 

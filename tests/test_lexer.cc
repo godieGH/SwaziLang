@@ -88,14 +88,18 @@ TEST(LexerTest, HandlesStringEscapes) {
 
 // Operators
 TEST(LexerTest, TokenizesArithmeticOperators) {
-    auto types = getTokenTypes("+ - * / %");
-    EXPECT_EQ(types[0], TokenType::PLUS);
-    EXPECT_EQ(types[1], TokenType::MINUS);
-    EXPECT_EQ(types[2], TokenType::STAR);
-    EXPECT_EQ(types[3], TokenType::SLASH);
-    EXPECT_EQ(types[4], TokenType::PERCENT);
+    auto types = getTokenTypes("a + b - c * d / e % f");
+    EXPECT_EQ(types[0], TokenType::IDENTIFIER); // a
+    EXPECT_EQ(types[1], TokenType::PLUS);
+    EXPECT_EQ(types[2], TokenType::IDENTIFIER); // b
+    EXPECT_EQ(types[3], TokenType::MINUS);
+    EXPECT_EQ(types[4], TokenType::IDENTIFIER); // c
+    EXPECT_EQ(types[5], TokenType::STAR);
+    EXPECT_EQ(types[6], TokenType::IDENTIFIER); // d
+    EXPECT_EQ(types[7], TokenType::SLASH);
+    EXPECT_EQ(types[8], TokenType::IDENTIFIER); // e
+    EXPECT_EQ(types[9], TokenType::PERCENT);
 }
-
 TEST(LexerTest, TokenizesComparisonOperators) {
     auto types = getTokenTypes("== != < > <= >=");
     EXPECT_EQ(types[0], TokenType::EQUALITY);
