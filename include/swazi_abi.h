@@ -41,6 +41,7 @@ typedef struct swazi_value_s* swazi_value;
 typedef struct swazi_callback_info_s* swazi_callback_info;
 typedef struct swazi_deferred_s* swazi_deferred;
 typedef struct swazi_ref_s* swazi_ref;
+typedef struct swazi_property_descriptor_s* swazi_property_descriptor;
 
 // ============================================================================
 // Status Codes
@@ -84,10 +85,13 @@ typedef enum {
     SWAZI_EXTERNAL,
     SWAZI_BIGINT,
     SWAZI_ARRAY,
+    SWAZI_CLASS,
     SWAZI_BUFFER,
     SWAZI_PROMISE,
     SWAZI_DATETIME,
     SWAZI_RANGE,
+    SWAZI_REGEX,
+    SWAZI_COMPLEX_OBJECT,
 } swazi_valuetype;
 
 // ============================================================================
@@ -179,6 +183,29 @@ typedef struct swazi_api_s {
     swazi_status (*is_promise)(swazi_env env, swazi_value value, bool* result);
     swazi_status (*is_date)(swazi_env env, swazi_value value, bool* result);
 
+    // ============================================================================
+    // Utility Functions
+    // ============================================================================
+
+    // Check if a value is callable (function or class)
+    swazi_status (*is_callable)(swazi_env env, swazi_value value, bool* result);
+
+    // Check if a value is truthy/falsy
+    swazi_status (*is_truthy)(swazi_env env, swazi_value value, bool* result);
+
+    // Get the length of a collection (array, string, buffer, object keys, etc.)
+    swazi_status (*get_length)(swazi_env env, swazi_value value, size_t* result);
+
+    // Freeze an object (prevent modifications)
+    swazi_status (*freeze_object)(swazi_env env, swazi_value object);
+
+    // Check if an object is frozen
+    swazi_status (*is_frozen)(swazi_env env, swazi_value object, bool* result);
+
+    // Get object keys as an array
+    swazi_status (*get_own_property_names)(swazi_env env, swazi_value object,
+        swazi_value* result);
+
     // ------------------------------------------------------------------------
     // Boolean Operations
     // ------------------------------------------------------------------------
@@ -246,6 +273,32 @@ typedef struct swazi_api_s {
         swazi_value key, bool* result);
     swazi_status (*get_property_names)(swazi_env env, swazi_value object,
         swazi_value* result);
+    swazi_status (*descriptor_get_value)(swazi_env env, swazi_property_descriptor desc, swazi_value* result);
+
+    // Property Descriptor Operations
+    swazi_status (*create_property_descriptor)(
+        swazi_env env,
+        swazi_value value,
+        bool is_private,
+        bool is_locked,
+        bool is_readonly,
+        swazi_property_descriptor* result);
+
+    swazi_status (*delete_property_descriptor)(
+        swazi_env env,
+        swazi_property_descriptor desc);
+
+    swazi_status (*get_property_descriptor)(
+        swazi_env env,
+        swazi_value object,
+        const char* property_name,
+        swazi_property_descriptor* result);
+
+    swazi_status (*define_property_with_descriptor)(
+        swazi_env env,
+        swazi_value object,
+        const char* property_name,
+        swazi_property_descriptor desc);
 
     // ------------------------------------------------------------------------
     // Array Operations

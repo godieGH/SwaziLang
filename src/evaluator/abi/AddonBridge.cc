@@ -90,6 +90,13 @@ struct swazi_ref_s {
     uint32_t refcount;
 };
 
+struct swazi_property_descriptor_s {
+    Value value;
+    bool is_private;
+    bool is_locked;
+    bool is_readonly;
+};
+
 // ============================================================================
 // Global API Table
 // ============================================================================
@@ -271,8 +278,12 @@ static swazi_status api_typeof_value(swazi_env env, swazi_value value,
         *result = SWAZI_DATETIME;
     } else if (std::holds_alternative<RangePtr>(v)) {
         *result = SWAZI_RANGE;
+    } else if (std::holds_alternative<RegexPtr>(v)) {
+        *result = SWAZI_REGEX;
+    } else if (std::holds_alternative<ClassPtr>(v)) {
+        *result = SWAZI_CLASS;
     } else {
-        *result = SWAZI_OBJECT;
+        *result = SWAZI_COMPLEX_OBJECT;
     }
 
     return SWAZI_OK;
@@ -320,6 +331,105 @@ static swazi_status api_is_date(swazi_env env, swazi_value value,
     if (!env || !value || !result) return SWAZI_INVALID_ARG;
     *result = std::holds_alternative<DateTimePtr>(unwrap_value(value));
     return SWAZI_OK;
+}
+
+// ============================================================================
+// API Implementation - Utility Helpers
+// ============================================================================
+
+static swazi_status api_freeze_object(swazi_env env, swazi_value object) {
+    if (!env || !object) return SWAZI_INVALID_ARG;
+
+    const Value& v = unwrap_value(object);
+    if (!std::holds_alternative<ObjectPtr>(v)) {
+        set_error(env, "TypeError", "Value is not an object");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+
+    ObjectPtr obj = std::get<ObjectPtr>(v);
+    obj->is_frozen = true;
+    return SWAZI_OK;
+}
+
+static swazi_status api_is_frozen(swazi_env env, swazi_value object, bool* result) {
+    if (!env || !object || !result) return SWAZI_INVALID_ARG;
+
+    const Value& v = unwrap_value(object);
+    if (!std::holds_alternative<ObjectPtr>(v)) {
+        *result = false;
+        return SWAZI_OK;
+    }
+
+    ObjectPtr obj = std::get<ObjectPtr>(v);
+    *result = obj->is_frozen;
+    return SWAZI_OK;
+}
+
+static swazi_status api_get_own_property_names(swazi_env env, swazi_value object,
+    swazi_value* result) {
+    if (!env || !object || !result) return SWAZI_INVALID_ARG;
+
+    const Value& obj_val = unwrap_value(object);
+    if (!std::holds_alternative<ObjectPtr>(obj_val)) {
+        set_error(env, "TypeError", "Value is not an object");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+
+    ObjectPtr obj = std::get<ObjectPtr>(obj_val);
+    auto arr = std::make_shared<ArrayValue>();
+
+    for (const auto& kv : obj->properties) {
+        arr->elements.push_back(Value{kv.first});
+    }
+
+    *result = wrap_value(Value{arr}, env);
+    return SWAZI_OK;
+}
+
+static swazi_status api_is_callable(swazi_env env, swazi_value value, bool* result) {
+    if (!env || !value || !result) return SWAZI_INVALID_ARG;
+
+    const Value& v = unwrap_value(value);
+    *result = std::holds_alternative<FunctionPtr>(v) ||
+        std::holds_alternative<ClassPtr>(v);
+    return SWAZI_OK;
+}
+
+static swazi_status api_is_truthy(swazi_env env, swazi_value value, bool* result) {
+    if (!env || !value || !result) return SWAZI_INVALID_ARG;
+
+    const Value& v = unwrap_value(value);
+    *result = env->evaluator->to_bool_public(v);
+    return SWAZI_OK;
+}
+
+static swazi_status api_get_length(swazi_env env, swazi_value value, size_t* result) {
+    if (!env || !value || !result) return SWAZI_INVALID_ARG;
+
+    const Value& v = unwrap_value(value);
+
+    if (std::holds_alternative<ArrayPtr>(v)) {
+        *result = std::get<ArrayPtr>(v)->elements.size();
+        return SWAZI_OK;
+    }
+
+    if (std::holds_alternative<std::string>(v)) {
+        *result = std::get<std::string>(v).length();
+        return SWAZI_OK;
+    }
+
+    if (std::holds_alternative<BufferPtr>(v)) {
+        *result = std::get<BufferPtr>(v)->data.size();
+        return SWAZI_OK;
+    }
+
+    if (std::holds_alternative<ObjectPtr>(v)) {
+        *result = std::get<ObjectPtr>(v)->properties.size();
+        return SWAZI_OK;
+    }
+
+    set_error(env, "TypeError", "Value does not have a length property");
+    return SWAZI_GENERIC_FAILURE;
 }
 
 // ============================================================================
@@ -706,6 +816,109 @@ static swazi_status api_get_property_names(swazi_env env, swazi_value object,
     }
 
     *result = wrap_value(Value{arr}, env);
+    return SWAZI_OK;
+}
+
+// ============================================================================
+// API Implementation - Property Descriptor Operations
+// ============================================================================
+
+static swazi_status api_create_property_descriptor(
+    swazi_env env,
+    swazi_value value,
+    bool is_private,
+    bool is_locked,
+    bool is_readonly,
+    swazi_property_descriptor* result) {
+    if (!env || !value || !result) return SWAZI_INVALID_ARG;
+
+    auto* desc = new swazi_property_descriptor_s();
+    desc->value = unwrap_value(value);
+    desc->is_private = is_private;
+    desc->is_locked = is_locked;
+    desc->is_readonly = is_readonly;
+
+    *result = desc;
+    return SWAZI_OK;
+}
+
+static swazi_status api_delete_property_descriptor(
+    swazi_env env,
+    swazi_property_descriptor desc) {
+    if (!env || !desc) return SWAZI_INVALID_ARG;
+    delete desc;
+    return SWAZI_OK;
+}
+
+static swazi_status api_get_property_descriptor(
+    swazi_env env,
+    swazi_value object,
+    const char* property_name,
+    swazi_property_descriptor* result) {
+    if (!env || !object || !property_name || !result) return SWAZI_INVALID_ARG;
+
+    const Value& obj_val = unwrap_value(object);
+    if (!std::holds_alternative<ObjectPtr>(obj_val)) {
+        set_error(env, "TypeError", "Value is not an object");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+
+    ObjectPtr obj = std::get<ObjectPtr>(obj_val);
+    auto it = obj->properties.find(property_name);
+
+    if (it == obj->properties.end()) {
+        *result = nullptr;
+        return SWAZI_OK;
+    }
+
+    auto* desc = new swazi_property_descriptor_s();
+    desc->value = it->second.value;
+    desc->is_private = it->second.is_private;
+    desc->is_locked = it->second.is_locked;
+    desc->is_readonly = it->second.is_readonly;
+
+    *result = desc;
+    return SWAZI_OK;
+}
+
+static swazi_status api_define_property_with_descriptor(
+    swazi_env env,
+    swazi_value object,
+    const char* property_name,
+    swazi_property_descriptor desc) {
+    if (!env || !object || !property_name || !desc) return SWAZI_INVALID_ARG;
+
+    const Value& obj_val = unwrap_value(object);
+    if (!std::holds_alternative<ObjectPtr>(obj_val)) {
+        set_error(env, "TypeError", "Value is not an object");
+        return SWAZI_OBJECT_EXPECTED;
+    }
+
+    ObjectPtr obj = std::get<ObjectPtr>(obj_val);
+
+    if (obj->is_frozen) {
+        set_error(env, "TypeError", "Cannot modify frozen object");
+        return SWAZI_GENERIC_FAILURE;
+    }
+
+    PropertyDescriptor pd;
+    pd.value = desc->value;
+    pd.is_private = desc->is_private;
+    pd.is_locked = desc->is_locked;
+    pd.is_readonly = desc->is_readonly;
+    pd.token = Token();
+
+    obj->properties[property_name] = std::move(pd);
+    return SWAZI_OK;
+}
+
+static swazi_status api_descriptor_get_value(
+    swazi_env env,
+    swazi_property_descriptor desc,
+    swazi_value* result) {
+    if (!env || !desc || !result) return SWAZI_INVALID_ARG;
+
+    *result = wrap_value(desc->value, env);
     return SWAZI_OK;
 }
 
@@ -3332,6 +3545,12 @@ void init_addon_api() {
     g_api.is_error = api_is_error;
     g_api.is_promise = api_is_promise;
     g_api.is_date = api_is_date;
+    g_api.is_callable = api_is_callable;
+    g_api.is_truthy = api_is_truthy;
+    g_api.get_length = api_get_length;
+    g_api.freeze_object = api_freeze_object;
+    g_api.is_frozen = api_is_frozen;
+    g_api.get_own_property_names = api_get_own_property_names;
 
     // Boolean operations
     g_api.get_value_bool = api_get_value_bool;
@@ -3363,6 +3582,11 @@ void init_addon_api() {
     g_api.has_named_property = api_has_named_property;
     g_api.delete_property = api_delete_property;
     g_api.get_property_names = api_get_property_names;
+    g_api.create_property_descriptor = api_create_property_descriptor;
+    g_api.delete_property_descriptor = api_delete_property_descriptor;
+    g_api.get_property_descriptor = api_get_property_descriptor;
+    g_api.define_property_with_descriptor = api_define_property_with_descriptor;
+    g_api.descriptor_get_value = api_descriptor_get_value;
 
     // Array operations
     g_api.create_array = api_create_array;
