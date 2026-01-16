@@ -2107,6 +2107,97 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             return make_fn();
         }
 
+        if (prop == "toInt") {
+            auto make_fn = [this, objVal, env, mem]() -> Value {
+                auto native_impl = [this, objVal](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    // Handle numbers - convert to integer
+                    if (std::holds_alternative<double>(objVal)) {
+                        double num = std::get<double>(objVal);
+
+                        // Check for NaN
+                        if (std::isnan(num)) {
+                            return Value{std::numeric_limits<double>::quiet_NaN()};
+                        }
+
+                        // Check for infinity
+                        if (!std::isfinite(num)) {
+                            return Value{std::numeric_limits<double>::infinity()};
+                        }
+
+                        // Check if number is too large for safe integer conversion
+                        constexpr double MAX_SAFE_INTEGER = 9007199254740992.0;  // 2^53
+                        if (std::fabs(num) > MAX_SAFE_INTEGER) {
+                            return Value{std::numeric_limits<double>::infinity()};
+                        }
+
+                        // Convert to integer (truncate decimal part)
+                        return Value{static_cast<double>(static_cast<long long>(num))};
+                    }
+
+                    // Handle booleans
+                    if (std::holds_alternative<bool>(objVal)) {
+                        return Value{std::get<bool>(objVal) ? 1.0 : 0.0};
+                    }
+
+                    // Handle strings - try to parse as number
+                    if (std::holds_alternative<std::string>(objVal)) {
+                        const std::string& s = std::get<std::string>(objVal);
+
+                        // Empty string -> NaN
+                        if (s.empty()) {
+                            return Value{std::numeric_limits<double>::quiet_NaN()};
+                        }
+
+                        try {
+                            size_t idx = 0;
+                            double d = std::stod(s, &idx);
+
+                            // If no characters were parsed or not all consumed -> NaN
+                            if (idx == 0 || idx != s.size()) {
+                                return Value{std::numeric_limits<double>::quiet_NaN()};
+                            }
+
+                            // Apply same checks as numeric path
+                            if (std::isnan(d)) {
+                                return Value{std::numeric_limits<double>::quiet_NaN()};
+                            }
+
+                            if (!std::isfinite(d)) {
+                                return Value{std::numeric_limits<double>::infinity()};
+                            }
+
+                            constexpr double MAX_SAFE_INTEGER = 9007199254740992.0;
+                            if (std::fabs(d) > MAX_SAFE_INTEGER) {
+                                return Value{std::numeric_limits<double>::infinity()};
+                            }
+
+                            return Value{static_cast<double>(static_cast<long long>(d))};
+
+                        } catch (...) {
+                            // Parse failed -> NaN
+                            return Value{std::numeric_limits<double>::quiet_NaN()};
+                        }
+                    }
+
+                    // Handle null/undefined -> NaN
+                    if (std::holds_alternative<std::monostate>(objVal)) {
+                        return Value{std::numeric_limits<double>::quiet_NaN()};
+                    }
+
+                    // All other types (arrays, objects, functions, etc.) -> NaN
+                    return Value{std::numeric_limits<double>::quiet_NaN()};
+                };
+
+                auto fn = std::make_shared<FunctionValue>(
+                    std::string("native:universal.toInt"),
+                    native_impl,
+                    env,
+                    mem->token);
+                return Value{fn};
+            };
+            return make_fn();
+        }
+
         // aina -> type name
         if (prop == "aina") {
             return type_name(objVal);
