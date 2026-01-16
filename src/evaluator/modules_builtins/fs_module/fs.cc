@@ -302,9 +302,18 @@ static Value build_stat_object(const std::string& path, bool use_lstat, const To
 
         // Get filesystem status (follow or don't follow symlinks)
         auto status = use_lstat ? std::filesystem::symlink_status(path) : std::filesystem::status(path);
-        bool isFile = std::filesystem::is_regular_file(status);
-        bool isDir = std::filesystem::is_directory(status);
-        bool isSymlink = std::filesystem::is_symlink(path);
+        bool isSymlink = std::filesystem::is_symlink(status);
+        bool isFile = false;
+        bool isDir = false;
+
+        if (isSymlink && use_lstat) {
+            // For lstat on symlink, don't follow - just report it's a symlink
+            isFile = false;
+            isDir = false;
+        } else {
+            isFile = std::filesystem::is_regular_file(status);
+            isDir = std::filesystem::is_directory(status);
+        }
 
         // Unix-specific: detect sockets, FIFOs, devices
         bool isSocket = false;
@@ -315,6 +324,13 @@ static Value build_stat_object(const std::string& path, bool use_lstat, const To
         uintmax_t size = 0;
         if (isFile) {
             size = std::filesystem::file_size(path);
+        } else if (isSymlink && use_lstat) {
+            // Symlink size is length of target path
+            try {
+                size = std::filesystem::read_symlink(path).string().length();
+            } catch (...) {
+                size = 0;
+            }
         }
 
         // Get timestamps
@@ -2366,137 +2382,146 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     // Options: { cwd: ".", absolute: false, onlyFiles: false, onlyDirectories: false, deep: Infinity }
     {
         auto fn = make_native_fn("fs.glob", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-    if (args.empty()) {
-        throw SwaziError("RuntimeError", "fs.glob requires a pattern argument. Usage: glob(pattern, options?) -> [matches]", token.loc);
-    }
-    
-    std::string pattern = value_to_string_simple(args[0]);
-    std::string cwd = ".";
-    bool absolute = false;
-    bool onlyFiles = false;
-    bool onlyDirectories = false;
-    
-    // Parse options
-    if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
-        ObjectPtr opts = std::get<ObjectPtr>(args[1]);
-        
-        auto cwd_it = opts->properties.find("cwd");
-        if (cwd_it != opts->properties.end() && std::holds_alternative<std::string>(cwd_it->second.value)) {
-            cwd = std::get<std::string>(cwd_it->second.value);
+        if (args.empty()) {
+            throw SwaziError("RuntimeError", "fs.glob requires a pattern argument. Usage: glob(pattern, options?) -> [matches]", token.loc);
         }
         
-        auto abs_it = opts->properties.find("absolute");
-        if (abs_it != opts->properties.end() && std::holds_alternative<bool>(abs_it->second.value)) {
-            absolute = std::get<bool>(abs_it->second.value);
-        }
+        std::string pattern = value_to_string_simple(args[0]);
+        std::string cwd = ".";
+        bool absolute = false;
+        bool onlyFiles = false;
+        bool onlyDirectories = false;
+        bool dot = false;
         
-        auto files_it = opts->properties.find("onlyFiles");
-        if (files_it != opts->properties.end() && std::holds_alternative<bool>(files_it->second.value)) {
-            onlyFiles = std::get<bool>(files_it->second.value);
-        }
-        
-        auto dirs_it = opts->properties.find("onlyDirectories");
-        if (dirs_it != opts->properties.end() && std::holds_alternative<bool>(dirs_it->second.value)) {
-            onlyDirectories = std::get<bool>(dirs_it->second.value);
-        }
-    }
-    
-    auto result = std::make_shared<ArrayValue>();
-    
-    try {
-        // Check if pattern has ** (globstar - recursive wildcard)
-        bool has_globstar = (pattern.find("**") != std::string::npos);
-        
-        if (!has_globstar) {
-            // Non-recursive glob - use filesystem iteration with exact depth matching
-            // Split pattern into directory parts and filename part
-            fs::path pattern_path(pattern);
-            fs::path search_base = fs::path(cwd);
+        // Parse options
+        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr opts = std::get<ObjectPtr>(args[1]);
             
-            // Build the search path by processing non-wildcard directory components
-            std::vector<std::string> parts;
-            for (const auto& part : pattern_path) {
-                parts.push_back(part.string());
+            auto cwd_it = opts->properties.find("cwd");
+            if (cwd_it != opts->properties.end() && std::holds_alternative<std::string>(cwd_it->second.value)) {
+                cwd = std::get<std::string>(cwd_it->second.value);
             }
             
-            // Recursive function to match each level
-            std::function<void(const fs::path&, size_t)> match_level;
-            match_level = [&](const fs::path& current_dir, size_t part_idx) {
-                if (part_idx >= parts.size()) return;
+            auto abs_it = opts->properties.find("absolute");
+            if (abs_it != opts->properties.end() && std::holds_alternative<bool>(abs_it->second.value)) {
+                absolute = std::get<bool>(abs_it->second.value);
+            }
+            
+            auto files_it = opts->properties.find("onlyFiles");
+            if (files_it != opts->properties.end() && std::holds_alternative<bool>(files_it->second.value)) {
+                onlyFiles = std::get<bool>(files_it->second.value);
+            }
+            
+            auto dirs_it = opts->properties.find("onlyDirectories");
+            if (dirs_it != opts->properties.end() && std::holds_alternative<bool>(dirs_it->second.value)) {
+                onlyDirectories = std::get<bool>(dirs_it->second.value);
+            }
+            
+            auto dot_it = opts->properties.find("dot");
+            if (dot_it != opts->properties.end() && std::holds_alternative<bool>(dot_it->second.value)) {
+                dot = std::get<bool>(dot_it->second.value);
+            }
+        }
+        
+        auto result = std::make_shared<ArrayValue>();
+        
+        try {
+            // Check if pattern has ** (globstar - recursive wildcard)
+            bool has_globstar = (pattern.find("**") != std::string::npos);
+            
+            if (!has_globstar) {
+                // Non-recursive glob
+                fs::path pattern_path(pattern);
+                fs::path search_base = fs::path(cwd);
                 
-                std::string current_pattern = parts[part_idx];
-                bool is_last = (part_idx == parts.size() - 1);
+                std::vector<std::string> parts;
+                for (const auto& part : pattern_path) {
+                    parts.push_back(part.string());
+                }
                 
-                try {
-                    for (auto& entry : fs::directory_iterator(current_dir)) {
-                        std::string name = entry.path().filename().string();
-                        
-                        // Check if this entry matches the current pattern part
-                        if (matches_pattern(name, current_pattern)) {
-                            if (is_last) {
-                                // Last part - this is a match
-                                if (onlyFiles && !entry.is_regular_file()) continue;
-                                if (onlyDirectories && !entry.is_directory()) continue;
-                                
-                                std::string path_to_add = absolute ? 
-                                    fs::absolute(entry.path()).string() : 
-                                    fs::relative(entry.path(), cwd).string();
-                                result->elements.push_back(Value{path_to_add});
-                            } else {
-                                // Not last part - continue matching if it's a directory
-                                if (entry.is_directory()) {
-                                    match_level(entry.path(), part_idx + 1);
+                // Recursive function to match each level
+                std::function<void(const fs::path&, size_t)> match_level;
+                match_level = [&](const fs::path& current_dir, size_t part_idx) {
+                    if (part_idx >= parts.size()) return;
+                    
+                    std::string current_pattern = parts[part_idx];
+                    bool is_last = (part_idx == parts.size() - 1);
+                    
+                    try {
+                        for (auto& entry : fs::directory_iterator(current_dir)) {
+                            std::string name = entry.path().filename().string();
+                            if (!dot && !name.empty() && name[0] == '.') continue;
+                            if (matches_pattern(name, current_pattern)) {
+                                if (is_last) {
+                                    // Last part - this is a potential match
+                                    // Apply filters ONLY to output, not to traversal
+                                    if (onlyFiles && !entry.is_regular_file()) continue;
+                                    if (onlyDirectories && !entry.is_directory()) continue;
+                                    
+                                    std::string path_to_add = absolute ? 
+                                        fs::absolute(entry.path()).string() : 
+                                        fs::relative(entry.path(), cwd).string();
+                                    result->elements.push_back(Value{path_to_add});
+                                } else {
+                                    // Not last part - ALWAYS continue if directory (regardless of filters)
+                                    if (entry.is_directory()) {
+                                        match_level(entry.path(), part_idx + 1);
+                                    }
                                 }
                             }
                         }
+                    } catch (const fs::filesystem_error&) {
+                        // Skip directories we can't read
                     }
-                } catch (const fs::filesystem_error&) {
-                    // Skip directories we can't read
-                }
-            };
-            
-            match_level(search_base, 0);
-            
-        } else {
-            // Has ** - recursive glob
-            std::function<void(const fs::path&)> walk;
-            walk = [&](const fs::path& dir) {
-                try {
-                    for (auto& entry : fs::directory_iterator(dir)) {
-                        std::string relative_path = fs::relative(entry.path(), cwd).string();
-                        
-                        // Normalize path separators
-                        std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
-                        
-                        // Check if matches pattern
-                        if (matches_pattern(relative_path, pattern)) {
-                            if (onlyFiles && !entry.is_regular_file()) continue;
-                            if (onlyDirectories && !entry.is_directory()) continue;
+                };
+                
+                match_level(search_base, 0);
+                
+            } else {
+                // Has ** - recursive glob
+                std::function<void(const fs::path&)> walk;
+                walk = [&](const fs::path& dir) {
+                    try {
+                        for (auto& entry : fs::directory_iterator(dir)) {
+                            std::string relative_path = fs::relative(entry.path(), cwd).string();
+                            std::string name = entry.path().filename().string();
+                            if (!dot && !name.empty() && name[0] == '.') continue;
+                            // Normalize path separators
+                            std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
                             
-                            std::string path_to_add = absolute ? 
-                                fs::absolute(entry.path()).string() : 
-                                relative_path;
-                            result->elements.push_back(Value{path_to_add});
+                            // Check if matches pattern
+                            if (matches_pattern(relative_path, pattern)) {
+                                // Apply filters ONLY to output
+                                if (onlyFiles && !entry.is_regular_file()) {
+                                    // Don't add to results, but STILL recurse if directory
+                                } else if (onlyDirectories && !entry.is_directory()) {
+                                    // Don't add to results, but STILL recurse if directory
+                                } else {
+                                    std::string path_to_add = absolute ? 
+                                        fs::absolute(entry.path()).string() : 
+                                        relative_path;
+                                    result->elements.push_back(Value{path_to_add});
+                                }
+                            }
+                            
+                            // ALWAYS recurse into directories (regardless of filters)
+                            if (entry.is_directory()) {
+                                walk(entry.path());
+                            }
                         }
-                        
-                        // Always recurse for ** patterns
-                        if (entry.is_directory()) {
-                            walk(entry.path());
-                        }
+                    } catch (const fs::filesystem_error&) {
+                        // Skip directories we can't read
                     }
-                } catch (const fs::filesystem_error&) {
-                    // Skip directories we can't read
-                }
-            };
+                };
+                
+                walk(fs::path(cwd));
+            }
             
-            walk(fs::path(cwd));
+        } catch (const fs::filesystem_error& e) {
+            // Return empty array on error
         }
         
-    } catch (const fs::filesystem_error& e) {
-        // Return empty array on error
-    }
-    
-    return Value{result}; }, env);
+        return Value{result}; }, env);
         obj->properties["glob"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
