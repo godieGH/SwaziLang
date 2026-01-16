@@ -2482,6 +2482,49 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 return false;
             };
             
+            // Helper: check if any path component is a dotfile
+            auto has_dotfile_component = [](const std::string& path) -> bool {
+                size_t pos = 0;
+                while (pos < path.length()) {
+                    size_t next_sep = path.find_first_of("/\\", pos);
+                    size_t component_start = pos;
+                    size_t component_end = (next_sep == std::string::npos) ? path.length() : next_sep;
+                    
+                    if (component_end > component_start && path[component_start] == '.') {
+                        return true;
+                    }
+                    
+                    if (next_sep == std::string::npos) break;
+                    pos = next_sep + 1;
+                }
+                return false;
+            };
+            
+            // Helper: enhanced pattern matching for glob
+            auto glob_matches = [](const std::string& path, const std::string& pattern) -> bool {
+                // Special case: pattern ends with /** (matches everything recursively after prefix)
+                if (pattern.length() >= 3 && pattern.substr(pattern.length() - 3) == "/**") {
+                    std::string prefix = pattern.substr(0, pattern.length() - 3);
+                    if (prefix.empty()) {
+                        return true; // "**" matches everything
+                    }
+                    // Check if path starts with prefix and has content after it
+                    if (path.find(prefix) == 0) {
+                        // Path must either equal prefix or have / after prefix
+                        if (path.length() == prefix.length()) {
+                            return false; // "src/**" doesn't match "src" itself
+                        }
+                        if (path.length() > prefix.length() && path[prefix.length()] == '/') {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                
+                // Otherwise use standard pattern matching
+                return matches_pattern(path, pattern);
+            };
+            
             // Check if pattern has ** (globstar - recursive wildcard)
             bool has_globstar = (pattern.find("**") != std::string::npos);
             
@@ -2512,16 +2555,10 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                             }
                             
                             std::string name = entry.path().filename().string();
-                            
-                            // Check dotfile filtering
-                            if (!dot && !name.empty() && name[0] == '.') {
-                                continue;
-                            }
-                            
-                            // Check ignore patterns (relative to cwd)
                             std::string relative_path = fs::relative(entry.path(), cwd).string();
                             std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
                             
+                            // Check ignore patterns first
                             if (should_ignore(relative_path) || should_ignore(name)) {
                                 continue;
                             }
@@ -2529,6 +2566,11 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                             // Match pattern
                             if (matches_pattern(name, current_pattern)) {
                                 if (is_last) {
+                                    // Check dotfile AFTER pattern match
+                                    if (!dot && has_dotfile_component(relative_path)) {
+                                        continue;
+                                    }
+                                    
                                     // Last part - this is a potential match
                                     bool is_file = entry.is_regular_file();
                                     bool is_dir = entry.is_directory();
@@ -2559,6 +2601,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 
             } else {
                 // ============= RECURSIVE GLOB (with **) =============
+                
                 std::function<void(const fs::path&, int)> walk;
                 walk = [&](const fs::path& dir, int depth) {
                     if (depth > maxDepth) return;
@@ -2571,23 +2614,22 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                             }
                             
                             std::string name = entry.path().filename().string();
-                            
-                            // Check dotfile filtering
-                            if (!dot && !name.empty() && name[0] == '.') {
-                                continue;
-                            }
-                            
                             std::string relative_path = fs::relative(entry.path(), cwd).string();
                             // Normalize path separators
                             std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
                             
-                            // Check ignore patterns
+                            // Check ignore patterns first
                             if (should_ignore(relative_path) || should_ignore(name)) {
                                 continue;
                             }
                             
-                            // Check if matches pattern
-                            if (matches_pattern(relative_path, pattern)) {
+                            // Check if matches pattern using enhanced matching
+                            if (glob_matches(relative_path, pattern)) {
+                                // Check dotfile AFTER pattern match
+                                if (!dot && has_dotfile_component(relative_path)) {
+                                    continue;
+                                }
+                                
                                 bool is_file = entry.is_regular_file();
                                 bool is_dir = entry.is_directory();
                                 
