@@ -2379,7 +2379,16 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     }
 
     // fs.glob(pattern, options?) -> array of paths
-    // Options: { cwd: ".", absolute: false, onlyFiles: false, onlyDirectories: false, deep: Infinity }
+    // Options: {
+    //   cwd: ".",                  // Working directory
+    //   absolute: false,           // Return absolute paths
+    //   onlyFiles: false,          // Only match files
+    //   onlyDirectories: false,    // Only match directories
+    //   dot: false,                // Include dotfiles
+    //   followSymlinks: false,     // Follow symbolic links
+    //   ignore: [],                // Patterns to ignore
+    //   depth: Infinity            // Max recursion depth for **
+    // }
     {
         auto fn = make_native_fn("fs.glob", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         if (args.empty()) {
@@ -2392,6 +2401,9 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         bool onlyFiles = false;
         bool onlyDirectories = false;
         bool dot = false;
+        bool followSymlinks = false;
+        int maxDepth = std::numeric_limits<int>::max();
+        std::vector<std::string> ignore_patterns;
         
         // Parse options
         if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
@@ -2421,19 +2433,64 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
             if (dot_it != opts->properties.end() && std::holds_alternative<bool>(dot_it->second.value)) {
                 dot = std::get<bool>(dot_it->second.value);
             }
+            
+            auto symlink_it = opts->properties.find("followSymlinks");
+            if (symlink_it != opts->properties.end() && std::holds_alternative<bool>(symlink_it->second.value)) {
+                followSymlinks = std::get<bool>(symlink_it->second.value);
+            }
+            
+            auto depth_it = opts->properties.find("depth");
+            if (depth_it != opts->properties.end() && std::holds_alternative<double>(depth_it->second.value)) {
+                maxDepth = static_cast<int>(std::get<double>(depth_it->second.value));
+            }
+            
+            // Parse ignore patterns
+            auto ignore_it = opts->properties.find("ignore");
+            if (ignore_it != opts->properties.end()) {
+                if (std::holds_alternative<std::string>(ignore_it->second.value)) {
+                    ignore_patterns.push_back(std::get<std::string>(ignore_it->second.value));
+                } else if (std::holds_alternative<ArrayPtr>(ignore_it->second.value)) {
+                    ArrayPtr arr = std::get<ArrayPtr>(ignore_it->second.value);
+                    for (const auto& elem : arr->elements) {
+                        if (std::holds_alternative<std::string>(elem)) {
+                            ignore_patterns.push_back(std::get<std::string>(elem));
+                        }
+                    }
+                }
+            }
         }
         
         auto result = std::make_shared<ArrayValue>();
         
         try {
+            // Validate cwd exists
+            if (!fs::exists(cwd)) {
+                throw SwaziError("IOError", "fs.glob: cwd does not exist: " + cwd, token.loc);
+            }
+            
+            if (!fs::is_directory(cwd)) {
+                throw SwaziError("IOError", "fs.glob: cwd is not a directory: " + cwd, token.loc);
+            }
+            
+            // Helper: check if path should be ignored
+            auto should_ignore = [&](const std::string& relative_path) -> bool {
+                for (const auto& ignore_pattern : ignore_patterns) {
+                    if (matches_pattern(relative_path, ignore_pattern)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
             // Check if pattern has ** (globstar - recursive wildcard)
             bool has_globstar = (pattern.find("**") != std::string::npos);
             
             if (!has_globstar) {
-                // Non-recursive glob
+                // ============= NON-RECURSIVE GLOB =============
                 fs::path pattern_path(pattern);
                 fs::path search_base = fs::path(cwd);
                 
+                // Split pattern into parts
                 std::vector<std::string> parts;
                 for (const auto& part : pattern_path) {
                     parts.push_back(part.string());
@@ -2449,21 +2506,44 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                     
                     try {
                         for (auto& entry : fs::directory_iterator(current_dir)) {
+                            // Handle symlinks
+                            if (fs::is_symlink(entry) && !followSymlinks) {
+                                continue;
+                            }
+                            
                             std::string name = entry.path().filename().string();
-                            if (!dot && !name.empty() && name[0] == '.') continue;
+                            
+                            // Check dotfile filtering
+                            if (!dot && !name.empty() && name[0] == '.') {
+                                continue;
+                            }
+                            
+                            // Check ignore patterns (relative to cwd)
+                            std::string relative_path = fs::relative(entry.path(), cwd).string();
+                            std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
+                            
+                            if (should_ignore(relative_path) || should_ignore(name)) {
+                                continue;
+                            }
+                            
+                            // Match pattern
                             if (matches_pattern(name, current_pattern)) {
                                 if (is_last) {
                                     // Last part - this is a potential match
-                                    // Apply filters ONLY to output, not to traversal
-                                    if (onlyFiles && !entry.is_regular_file()) continue;
-                                    if (onlyDirectories && !entry.is_directory()) continue;
+                                    bool is_file = entry.is_regular_file();
+                                    bool is_dir = entry.is_directory();
+                                    
+                                    // Apply type filters
+                                    if (onlyFiles && !is_file) continue;
+                                    if (onlyDirectories && !is_dir) continue;
                                     
                                     std::string path_to_add = absolute ? 
                                         fs::absolute(entry.path()).string() : 
-                                        fs::relative(entry.path(), cwd).string();
+                                        relative_path;
+                                    
                                     result->elements.push_back(Value{path_to_add});
                                 } else {
-                                    // Not last part - ALWAYS continue if directory (regardless of filters)
+                                    // Not last part - continue if directory
                                     if (entry.is_directory()) {
                                         match_level(entry.path(), part_idx + 1);
                                     }
@@ -2478,35 +2558,56 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                 match_level(search_base, 0);
                 
             } else {
-                // Has ** - recursive glob
-                std::function<void(const fs::path&)> walk;
-                walk = [&](const fs::path& dir) {
+                // ============= RECURSIVE GLOB (with **) =============
+                std::function<void(const fs::path&, int)> walk;
+                walk = [&](const fs::path& dir, int depth) {
+                    if (depth > maxDepth) return;
+                    
                     try {
                         for (auto& entry : fs::directory_iterator(dir)) {
-                            std::string relative_path = fs::relative(entry.path(), cwd).string();
+                            // Handle symlinks
+                            if (fs::is_symlink(entry) && !followSymlinks) {
+                                continue;
+                            }
+                            
                             std::string name = entry.path().filename().string();
-                            if (!dot && !name.empty() && name[0] == '.') continue;
+                            
+                            // Check dotfile filtering
+                            if (!dot && !name.empty() && name[0] == '.') {
+                                continue;
+                            }
+                            
+                            std::string relative_path = fs::relative(entry.path(), cwd).string();
                             // Normalize path separators
                             std::replace(relative_path.begin(), relative_path.end(), '\\', '/');
                             
+                            // Check ignore patterns
+                            if (should_ignore(relative_path) || should_ignore(name)) {
+                                continue;
+                            }
+                            
                             // Check if matches pattern
                             if (matches_pattern(relative_path, pattern)) {
-                                // Apply filters ONLY to output
-                                if (onlyFiles && !entry.is_regular_file()) {
-                                    // Don't add to results, but STILL recurse if directory
-                                } else if (onlyDirectories && !entry.is_directory()) {
-                                    // Don't add to results, but STILL recurse if directory
-                                } else {
+                                bool is_file = entry.is_regular_file();
+                                bool is_dir = entry.is_directory();
+                                
+                                // Apply type filters to output
+                                bool should_add = true;
+                                if (onlyFiles && !is_file) should_add = false;
+                                if (onlyDirectories && !is_dir) should_add = false;
+                                
+                                if (should_add) {
                                     std::string path_to_add = absolute ? 
                                         fs::absolute(entry.path()).string() : 
                                         relative_path;
+                                    
                                     result->elements.push_back(Value{path_to_add});
                                 }
                             }
                             
                             // ALWAYS recurse into directories (regardless of filters)
                             if (entry.is_directory()) {
-                                walk(entry.path());
+                                walk(entry.path(), depth + 1);
                             }
                         }
                     } catch (const fs::filesystem_error&) {
@@ -2514,11 +2615,11 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
                     }
                 };
                 
-                walk(fs::path(cwd));
+                walk(fs::path(cwd), 0);
             }
             
         } catch (const fs::filesystem_error& e) {
-            // Return empty array on error
+            throw SwaziError("FilesystemError", std::string("fs.glob failed: ") + e.what(), token.loc);
         }
         
         return Value{result}; }, env);
