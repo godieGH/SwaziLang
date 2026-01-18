@@ -307,7 +307,10 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                 pnode->defaultValue = nullptr;
 
                 // optional default initializer: '=' expression
-                if (peek().type == TokenType::ASSIGN) {
+                if (peek().type == TokenType::QUESTIONMARK) {
+                    Token qm = consume();
+                    pnode->defaultValue = std::make_unique<NullNode>(pTok);
+                } else if (peek().type == TokenType::ASSIGN) {
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
@@ -379,7 +382,10 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
                 pnode->defaultValue = nullptr;
 
                 // optional default initializer: '=' expression (only allowed in paren form semantically; but accept here for consistency)
-                if (peek().type == TokenType::ASSIGN) {
+                if (peek().type == TokenType::QUESTIONMARK) {
+                    Token qm = consume();
+                    pnode->defaultValue = std::make_unique<NullNode>(pTok);
+                } else if (peek().type == TokenType::ASSIGN) {
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {

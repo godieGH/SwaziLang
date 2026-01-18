@@ -1283,8 +1283,12 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                 pnode->rest_required_count = 0;
                 pnode->defaultValue = nullptr;
 
-                // optional default initializer: '=' expression
-                if (peek().type == TokenType::ASSIGN) {
+                // new: optional '?' syntactic sugar -> defaultValue = null
+                if (peek().type == TokenType::QUESTIONMARK) {
+                    Token qm = consume();
+                    pnode->defaultValue = std::make_unique<NullNode>(nameTok);
+                } else if (peek().type == TokenType::ASSIGN) {
+                    // optional default initializer: '=' expression
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
@@ -1356,8 +1360,12 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
                 pnode->rest_required_count = 0;
                 pnode->defaultValue = nullptr;
 
-                // optional default initializer: '=' expression (allow in bare form for compatibility)
-                if (peek().type == TokenType::ASSIGN) {
+                // new: optional '?' syntactic sugar -> defaultValue = null
+                if (peek().type == TokenType::QUESTIONMARK) {
+                    Token qm = consume();
+                    pnode->defaultValue = std::make_unique<NullNode>(pTok);
+                } else if (peek().type == TokenType::ASSIGN) {
+                    // optional default initializer: '=' expression
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {

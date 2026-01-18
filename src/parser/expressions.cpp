@@ -612,7 +612,10 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
                 pnode->defaultValue = nullptr;
 
                 // optional default initializer: '=' expression
-                if (peek().type == TokenType::ASSIGN) {
+                if (peek().type == TokenType::QUESTIONMARK) {
+                    Token qm = consume();
+                    pnode->defaultValue = std::make_unique<NullNode>(pTok);
+                } else if (peek().type == TokenType::ASSIGN) {
                     consume();  // consume '='
                     pnode->defaultValue = parse_expression();
                     if (!pnode->defaultValue) {
@@ -687,7 +690,10 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
             pnode->defaultValue = nullptr;
 
             // optional default initializer: '=' expression (allow in bare form for consistency)
-            if (peek().type == TokenType::ASSIGN) {
+            if (peek().type == TokenType::QUESTIONMARK) {
+                Token qm = consume();
+                pnode->defaultValue = std::make_unique<NullNode>(idTok);
+            } else if (peek().type == TokenType::ASSIGN) {
                 consume();  // consume '='
                 pnode->defaultValue = parse_expression();
                 if (!pnode->defaultValue) {
@@ -1021,8 +1027,11 @@ std::unique_ptr<ExpressionNode> Parser::parse_lambda() {
             pnode->rest_required_count = 0;
             pnode->defaultValue = nullptr;
 
-            // optional default initializer: '=' expression
-            if (peek().type == TokenType::ASSIGN) {
+            // Allow `id?` shorthand for default null for lambdas as well
+            if (peek().type == TokenType::QUESTIONMARK) {
+                Token qm = consume();
+                pnode->defaultValue = std::make_unique<NullNode>(id);
+            } else if (peek().type == TokenType::ASSIGN) {
                 consume();  // consume '='
                 pnode->defaultValue = parse_expression();
                 if (!pnode->defaultValue) {
