@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
                   << "  start            Run the project\n"
                   << "  publish          Publish to registry\n"
                   << "  install          Install dependencies\n"
-                  << "  fmt              Format code\n"
+                  << "  format           Format code\n"
                   << "\n"
                   << "If a filename starts with '-', either use `--` to end options\n"
                   << "or prefix the filename with a path (for example `./-file.sl`):\n"
@@ -173,7 +173,7 @@ int main(int argc, char* argv[]) {
     // Check if first argument is a CLI command
     std::string first_arg = argv[1];
     std::vector<std::string> known_commands = {
-        "init", "project", "vendor", "cache", "start", "run", "publish", "install", "fmt"};
+        "init", "project", "vendor", "cache", "start", "run", "publish", "install", "format"};
 
     bool is_command = std::find(known_commands.begin(), known_commands.end(), first_arg) != known_commands.end();
 

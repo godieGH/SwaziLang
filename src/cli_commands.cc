@@ -17,7 +17,7 @@
 #include "parser.hpp"
 
 namespace fs = std::filesystem;
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace swazi {
 namespace cli {
@@ -93,7 +93,7 @@ std::optional<ProjectConfig> find_and_parse_swazi_json(const std::string& start_
         return std::nullopt;
     }
 
-    return parse_swazi_json(root + "/swazi.json");
+    return parse_swazi_json((fs::path(root) / "swazi.json").string());
 }
 
 int count_swazi_files(const std::string& dir) {
@@ -155,8 +155,8 @@ CommandResult execute_command(const std::vector<std::string>& args) {
         return cmd_publish(sub_args);
     } else if (command == "install") {
         return cmd_install(sub_args);
-    } else if (command == "fmt") {
-        return cmd_fmt(sub_args);
+    } else if (command == "format") {
+        return cmd_format(sub_args);
     } else {
         return {1, "Unknown command: " + command};
     }
@@ -316,7 +316,7 @@ CommandResult cmd_init(const std::vector<std::string>& args) {
     }
 
     // Generate default engine version based on current SWAZI_VERSION
-    std::string default_engine = ">=2.11.0 <=" + std::string(SWAZI_VERSION);
+    std::string default_engine = "^" + std::string(SWAZI_VERSION);
     std::cout << "Swazi engine version (" << default_engine << "): ";
     std::getline(std::cin, engine);
     if (engine.empty()) engine = default_engine;
@@ -502,7 +502,7 @@ CommandResult cmd_project(const std::vector<std::string>& args) {
             }
 
             std::string root = get_project_root(".");
-            std::string config_path = root + "/swazi.json";
+            std::string config_path = (fs::path(root) / "swazi.json").string();
 
             if (!update_swazi_json_version(config_path, new_version)) {
                 return {1, "Error: Failed to update swazi.json"};
@@ -841,9 +841,9 @@ CommandResult cmd_install(const std::vector<std::string>& args) {
     return {0, "Not yet implemented"};
 }
 
-CommandResult cmd_fmt(const std::vector<std::string>& args) {
+CommandResult cmd_format(const std::vector<std::string>& args) {
     auto print_usage = []() {
-        std::cout << R"(Usage: swazi fmt [options] <src> [dest]
+        std::cout << R"(Usage: swazi format [options] <src> [dest]
 
 Options:
   -r, --recursive    Recursively format files in the source path
@@ -877,11 +877,11 @@ Note: For filenames starting with '-', use a path prefix like './-file.sl'
             } else if (arg == "-p" || arg == "--print") {
                 print_mode = true;
             } else {
-                return {1, "Invalid option `" + arg + "` in fmt command."};
+                return {1, "Invalid option `" + arg + "` in format command."};
             }
         } else {
             if (is_parsed) {
-                return {1, "Too many arguments passed.\nUsage: \n--> swazi fmt <src> [dest]"};
+                return {1, "Too many arguments passed.\nUsage: \n--> swazi format <src> [dest]"};
             }
             arguments.push_back(arg);
 
@@ -895,7 +895,7 @@ Note: For filenames starting with '-', use a path prefix like './-file.sl'
 
     // validate arguments
     if (arguments.size() < 1) {
-        return {1, "fmt command requires a source path\nUsage: \n--> swazi fmt <src>"};
+        return {1, "format command requires a source path\nUsage: \n--> swazi format <src>"};
     }
 
     try {

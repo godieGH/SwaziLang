@@ -55,7 +55,7 @@ CommandResult cmd_start(const std::vector<std::string>& args);
 CommandResult cmd_run(const std::vector<std::string>& args);
 CommandResult cmd_publish(const std::vector<std::string>& args);
 CommandResult cmd_install(const std::vector<std::string>& args);
-CommandResult cmd_fmt(const std::vector<std::string>& args);
+CommandResult cmd_format(const std::vector<std::string>& args);
 
 // Helper functions
 std::optional<ProjectConfig> find_and_parse_swazi_json(const std::string& start_dir = ".");
