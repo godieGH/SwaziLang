@@ -68,17 +68,15 @@ bool Parser::is_lambda_ahead() {
 
     // optional leading ASYNC
     if (peek().type == TokenType::ASYNC) {
-        consume();  // consume ASYNC for lookahead
+        consume();
         skip_layout();
     }
 
-    // helper to detect ellipsis token tolerant to lexer differences
     auto is_ellipsis_token = [&]() -> bool {
         Token p = peek();
         return p.type == TokenType::ELLIPSIS || p.value == "...";
     };
 
-    // helper to advance over a "default expression" in a tolerant way:
     auto skip_default_expr = [&]() -> bool {
         int depth = 0;
         while (true) {
@@ -112,17 +110,13 @@ bool Parser::is_lambda_ahead() {
 
     // Parenthesized lambda form: (...) => ...
     if (peek().type == TokenType::OPENPARENTHESIS) {
-        consume();  // consume '('
-
+        consume();
         bool ok = true;
         bool seen_rest = false;
-
-        // Skip initial layout inside parens
         skip_layout();
 
-        // Empty parameter list
         if (peek().type == TokenType::CLOSEPARENTHESIS) {
-            consume();  // consume ')'
+            consume();
             skip_layout();
             bool found = (peek().type == TokenType::LAMBDA);
             position = saved;
@@ -131,21 +125,20 @@ bool Parser::is_lambda_ahead() {
 
         while (peek().type != TokenType::CLOSEPARENTHESIS &&
             peek().type != TokenType::EOF_TOKEN) {
-            // skip layout between parameters
             if (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) {
                 consume();
                 continue;
             }
 
-            // rest param '...name' (optional [...number])
+            // rest param
             if (is_ellipsis_token()) {
-                Token loc_token = peek();  // capture loc for possible error
+                Token loc_token = peek();
                 if (seen_rest) {
                     position = saved;
                     throw SwaziError("SyntaxError", "Multiple rest parameters are not allowed.", loc_token.loc);
                 }
 
-                consume();  // consume '...'
+                consume();
                 skip_layout();
 
                 if (peek().type != TokenType::IDENTIFIER) {
@@ -153,7 +146,7 @@ bool Parser::is_lambda_ahead() {
                     position = saved;
                     throw SwaziError("SyntaxError", "Expected identifier after rest parameter '...'.", err_tok.loc);
                 }
-                consume();  // identifier
+                consume();
 
                 skip_layout();
                 if (peek().type == TokenType::OPENBRACKET) {
@@ -163,57 +156,48 @@ bool Parser::is_lambda_ahead() {
                         position = saved;
                         return false;
                     }
-                    consume();  // number
+                    consume();
                     skip_layout();
                     if (peek().type != TokenType::CLOSEBRACKET) {
                         position = saved;
                         return false;
                     }
-                    consume();  // ]
+                    consume();
                 }
 
-                // rest must be last or followed only by a trailing comma before ')'
                 skip_layout();
                 if (peek().type == TokenType::COMMA) {
-                    // if comma and next isn't closeparen, it's invalid (parameter follows rest)
                     if (peek_next().type != TokenType::CLOSEPARENTHESIS) {
                         Token err_tok = peek_next();
                         position = saved;
                         throw SwaziError("SyntaxError", "Parameter not allowed after rest parameter.", err_tok.loc);
                     }
-                    consume();  // consume trailing comma
+                    consume();
                 }
 
                 seen_rest = true;
                 continue;
             }
 
-            // If we've already seen a rest parameter, any other parameter is an error.
             if (seen_rest) {
                 Token err_tok = peek();
                 position = saved;
                 throw SwaziError("SyntaxError", "Cannot have parameter after rest parameter.", err_tok.loc);
             }
 
-            // identifier param (maybe with default 'id = <expr>')
+            // identifier param
             if (peek().type == TokenType::IDENTIFIER) {
-                consume();  // identifier
+                consume();
                 skip_layout();
 
-                if (peek().type == TokenType::ASSIGN) {
-                    consume();  // consume '='
+                // NEW: handle ? shorthand for optional param
+                if (peek().type == TokenType::QUESTIONMARK) {
+                    consume();  // consume '?'
                     skip_layout();
 
-                    // scan the default expression until comma or ')', leaving them unconsumed
-                    if (!skip_default_expr()) {
-                        position = saved;
-                        return false;
-                    }
-
-                    // handle the token that ended the default expression:
-                    skip_layout();
+                    // after '?' we expect comma or close-paren
                     if (peek().type == TokenType::COMMA) {
-                        consume();  // separator and continue
+                        consume();
                         skip_layout();
                         if (peek().type == TokenType::CLOSEPARENTHESIS) break;
                         continue;
@@ -225,7 +209,30 @@ bool Parser::is_lambda_ahead() {
                     }
                 }
 
-                // no default: handle comma separator if present
+                // handle = default
+                if (peek().type == TokenType::ASSIGN) {
+                    consume();
+                    skip_layout();
+
+                    if (!skip_default_expr()) {
+                        position = saved;
+                        return false;
+                    }
+
+                    skip_layout();
+                    if (peek().type == TokenType::COMMA) {
+                        consume();
+                        skip_layout();
+                        if (peek().type == TokenType::CLOSEPARENTHESIS) break;
+                        continue;
+                    } else if (peek().type == TokenType::CLOSEPARENTHESIS) {
+                        break;
+                    } else {
+                        position = saved;
+                        return false;
+                    }
+                }
+
                 skip_layout();
                 if (peek().type == TokenType::COMMA) {
                     consume();
@@ -234,22 +241,19 @@ bool Parser::is_lambda_ahead() {
                     continue;
                 }
 
-                // otherwise continue to next param or close-paren
                 continue;
             }
 
-            // anything else is invalid inside a lambda param-list
             position = saved;
             return false;
         }
 
-        // must end with ')'
         if (peek().type != TokenType::CLOSEPARENTHESIS) {
             position = saved;
             return false;
         }
 
-        consume();  // consume ')'
+        consume();
         skip_layout();
 
         bool found = (peek().type == TokenType::LAMBDA);
@@ -257,16 +261,15 @@ bool Parser::is_lambda_ahead() {
         return found;
     }
 
-    // Single-identifier lambda form: id => ...
+    // Single-identifier lambda form: id => ... (no ? support in bare form)
     if (peek().type == TokenType::IDENTIFIER) {
-        consume();  // identifier
+        consume();
         skip_layout();
         bool found = (peek().type == TokenType::LAMBDA);
         position = saved;
         return found;
     }
 
-    // Not a lambda
     position = saved;
     return false;
 }
