@@ -264,7 +264,7 @@ static Value builtin_object_values(const std::vector<Value>& args, EnvPtr env, c
     return arr;
 }
 
-static Value builtin_object_entry(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
+static Value builtin_object_entries(const std::vector<Value>& args, EnvPtr env, const Token& tok) {
     auto arr = std::make_shared<ArrayValue>();
     if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) return arr;
 
@@ -1089,8 +1089,8 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
             Token{}};
     }
     {
-        auto fn = std::make_shared<FunctionValue>("entry", builtin_object_entry, env, Token{});
-        objectVal->properties["entry"] = {
+        auto fn = std::make_shared<FunctionValue>("entries", builtin_object_entries, env, Token{});
+        objectVal->properties["entries"] = {
             fn,
             false,
             false,
