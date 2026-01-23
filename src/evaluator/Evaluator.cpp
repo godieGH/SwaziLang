@@ -76,6 +76,10 @@ void Evaluator::remove_suspended_frame(CallFramePtr f) {
     }
 }
 
+std::vector<CallFramePtr> Evaluator::get_call_stack_snapshot() {
+    return call_stack_;
+}
+
 // Public wrapper so native builtins can invoke interpreter functions synchronously.
 // This simply forwards to the private call_function implementation.
 Value Evaluator::invoke_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken) {

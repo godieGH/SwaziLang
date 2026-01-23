@@ -1169,6 +1169,8 @@ class Evaluator {
         return evaluate_expression(expr, env);
     }
 
+    std::vector<CallFramePtr> get_call_stack_snapshot();
+
    private:
     EnvPtr global_env;
     EnvPtr main_module_env;

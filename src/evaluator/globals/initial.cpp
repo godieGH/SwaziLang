@@ -1068,6 +1068,90 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     add_fn("rangeE", builtin_range_exclusive);
     add_fn("rangeI", builtin_range_inclusive);
 
+    // build_frame_object unchanged from your version (accepts callTokOverride)
+    std::function<ObjectPtr(CallFramePtr, const Token*)> build_frame_object =
+        [](CallFramePtr frame, const Token* callTokOverride) -> ObjectPtr {
+        auto obj = std::make_shared<ObjectValue>();
+        if (!frame) return obj;
+
+        Token callTok = callTokOverride ? *callTokOverride : frame->call_token;
+        TokenLocation loc = callTok.loc;
+
+        obj->properties["file"] = {Value{loc.filename}, false, true, true, callTok};
+        obj->properties["line"] = {Value{static_cast<double>(loc.line)}, false, true, true, callTok};
+        obj->properties["col"] = {Value{static_cast<double>(loc.col)}, false, true, true, callTok};
+        obj->properties["length"] = {Value{static_cast<double>(loc.length)}, false, true, true, callTok};
+
+        std::string fnName;
+        if (!frame->label.empty()) {
+            fnName = frame->label;
+        } else {
+            // If caller is the special top-level/global frame you want a readable name
+            // Replace this condition with frame->is_global if you add such a flag.
+            fnName = "<anonymous>";
+        }
+        obj->properties["function"] = {Value{fnName}, false, true, true, callTok};
+        obj->properties["hasReceiver"] = {frame->receiver ? true : false, false, true, true, callTok};
+
+        return obj;
+    };
+
+    // __caller__(): immediate caller frame (or undefined if none)
+    add_fn("__caller__", [evaluator, build_frame_object](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*callTok*/) -> Value {
+        auto stack = evaluator->get_call_stack_snapshot();
+
+        if (stack.empty()) {
+            // No frames at all -> nothing to report
+            return std::monostate{};
+        }
+
+        // top-of-stack is current frame
+        CallFramePtr current_frame = stack.back();
+        CallFramePtr caller_frame = nullptr;
+
+        if (stack.size() >= 2) {
+            // Normal case: there *is* a caller frame below current
+            caller_frame = stack[stack.size() - 2];
+        } else {
+            if (current_frame && current_frame->label == "global") {
+                // We're actually executing in global; no caller.
+                return std::monostate{};
+            }
+
+            caller_frame = std::make_shared<CallFrame>();
+            caller_frame->label = "global";
+            caller_frame->receiver = nullptr;
+        }
+
+        if (!caller_frame) return std::monostate{};
+
+        // Use the current (callee) frame's call token as the call-site override.
+        const Token* callTokOverride = nullptr;
+        if (current_frame) callTokOverride = &current_frame->call_token;
+
+        auto frameObj = build_frame_object(caller_frame, callTokOverride);
+        return Value{frameObj};
+    });
+
+    // __stack__() -> array of frames (current -> root)
+    add_fn("__stack__", [evaluator, build_frame_object](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*callTok*/) -> Value {
+        auto stack = evaluator->get_call_stack_snapshot();
+        auto outArr = std::make_shared<ArrayValue>();
+        if (stack.empty()) return Value{outArr};
+
+        // Iterate top->bottom: current frame first, then ancestors
+        for (int i = static_cast<int>(stack.size()) - 1; i >= 0; --i) {
+            CallFramePtr f = stack[i];
+            if (!f) {
+                outArr->elements.push_back(std::monostate{});
+                continue;
+            }
+            // pass nullptr so build_frame_object uses f->call_token
+            auto fo = build_frame_object(f, nullptr);
+            outArr->elements.push_back(Value{fo});
+        }
+        return Value{outArr};
+    });
     auto objectVal = std::make_shared<ObjectValue>();
 
     {
