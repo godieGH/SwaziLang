@@ -1158,6 +1158,27 @@ struct LineNode : public ExpressionNode {
     }
 };
 
+struct DebugStatementNode : public StatementNode {
+    Token token;
+    DebugStatementNode() = default;
+    std::unique_ptr<StatementNode> clone() const override {
+        return std::make_unique<DebugStatementNode>(*this);
+    }
+    std::string to_string() const override {
+        return "__debug__";
+    }
+};
+struct BlockStatementNode : public StatementNode {
+    Token token;
+    BlockStatementNode() = default;
+    std::unique_ptr<StatementNode> clone() const override {
+        return std::make_unique<BlockStatementNode>(*this);
+    }
+    std::string to_string() const override {
+        return "__block__";
+    }
+};
+
 struct CaseNode : StatementNode {
     std::unique_ptr<ExpressionNode> test;  // null → kaida (default)
     std::vector<std::unique_ptr<StatementNode>> body;

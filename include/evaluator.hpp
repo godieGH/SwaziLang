@@ -1229,6 +1229,15 @@ class Evaluator {
     Value call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
     void evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value = nullptr, bool* did_return = nullptr, LoopControl* lc = nullptr);
 
+    struct DebugEncounter {
+        void* debug_node_id;  // pointer to DebugStatementNode
+        size_t count;
+        TokenLocation location;
+    };
+    std::unordered_map<void*, DebugEncounter> debug_encounters_;
+
+    void enter_debugger(CallFramePtr frame, EnvPtr env_fallback, DebugEncounter* encounter = nullptr);
+
     // helpers: conversions and formatting
     std::string type_name(const Value& v);
     double to_number(const Value& v, Token token = {});

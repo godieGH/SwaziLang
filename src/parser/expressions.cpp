@@ -1281,9 +1281,6 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
 
         return node;
     }
-    if (t.type == TokenType::BLOCK_DU) {
-        return std::make_unique<NullNode>(consume());
-    }
     if (t.type == TokenType::LINE_DU) {
         return std::make_unique<LineNode>(consume());
     }

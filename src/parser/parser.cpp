@@ -595,7 +595,6 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
     if (p.type == TokenType::KAMA) {
         return parse_if_statement();
     }
-    // New loop keyword dispatch
     if (p.type == TokenType::FOR) {
         return parse_for_statement();
     }
@@ -618,5 +617,20 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
         consume();
         return parse_print_statement(false);
     }
+
+    if (p.type == TokenType::BLOCK_DU) {
+        consume();
+        auto node = std::make_unique<BlockStatementNode>();
+        node->token = tokens[position - 1];
+        return node;
+    }
+
+    if (p.type == TokenType::DEBUG) {
+        consume();  // consume 'debug'
+        auto node = std::make_unique<DebugStatementNode>();
+        node->token = tokens[position - 1];
+        return node;
+    }
+
     return parse_assignment_or_expression_statement();
 }

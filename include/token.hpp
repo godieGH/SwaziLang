@@ -218,6 +218,7 @@ enum class TokenType {
     // -----------------------
     BLOCK_DU,
     LINE_DU,
+    DEBUG,
     COMMENT,
     UNKNOWN
 };

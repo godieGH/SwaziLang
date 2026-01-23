@@ -11,6 +11,10 @@ class Parser {
     Parser(const std::vector<Token>& tokens);
     std::unique_ptr<ProgramNode> parse();
 
+    std::unique_ptr<ExpressionNode> parse_expression_public() {
+        return parse_expression();
+    }
+
    private:
     std::vector<Token> tokens;
     size_t position = 0;

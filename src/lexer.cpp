@@ -1081,6 +1081,7 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
 
         {"__block__", TokenType::BLOCK_DU},
         {"__line__", TokenType::LINE_DU},
+        {"__debug__", TokenType::DEBUG},
 
         // asyncronous async/await
         {"ASYNC", TokenType::ASYNC},

@@ -51,6 +51,32 @@ static std::string to_property_key(const Value& v, Token token) {
 void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value, bool* did_return, LoopControl* lc) {
     if (!stmt) return;
 
+    if (auto dbg = dynamic_cast<DebugStatementNode*>(stmt)) {
+        // Track this debug statement encounter
+        void* node_id = static_cast<void*>(dbg);
+        auto& encounter = debug_encounters_[node_id];
+
+        if (encounter.count == 0) {
+            // First time seeing this debug statement
+            encounter.debug_node_id = node_id;
+            encounter.location = dbg->token.loc;
+        }
+        encounter.count++;
+
+        // Use current frame if available; otherwise enter a REPL-style inspector
+        auto frame = current_frame();
+        if (!frame) {
+            enter_debugger(nullptr, env, &encounter);
+        } else {
+            enter_debugger(frame, nullptr, &encounter);
+        }
+        return;
+    }
+    if (auto block = dynamic_cast<BlockStatementNode*>(stmt)) {
+        // just a placeholder for block statements
+        return;
+    }
+
     if (auto imp = dynamic_cast<ImportDeclarationNode*>(stmt)) {
         // Load the module (may return an exports object even for circular deps)
         ObjectPtr exports = import_module(imp->module_path, imp->module_token, env);
