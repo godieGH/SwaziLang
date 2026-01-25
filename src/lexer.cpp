@@ -49,6 +49,34 @@ void Lexer::skip_line_comment() {
     while (!eof() && peek() != '\n') advance();
 }
 
+bool Lexer::encode_utf8(uint32_t codepoint, std::string& output) {
+    // Validate codepoint range (0x0000 to 0x10FFFF, excluding surrogates)
+    if (codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+        return false;
+    }
+
+    if (codepoint <= 0x7F) {
+        // 1-byte UTF-8
+        output.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7FF) {
+        // 2-byte UTF-8
+        output.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint <= 0xFFFF) {
+        // 3-byte UTF-8
+        output.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+        // 4-byte UTF-8
+        output.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+        output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    }
+    return true;
+}
+
 void Lexer::update_regex_allowed(TokenType type) {
     switch (type) {
         // Tokens that END an expression -> next '/' is division
@@ -237,62 +265,102 @@ void Lexer::scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_co
                     val.push_back('x');
                 }
             }
-            // Unicode escape: \u2713, \u00e9 (4 hex digits)
+            // Unicode escape: \u2713 (4 hex) or \u{1F600} (variable hex in braces)
             else if (nxt == 'u') {
                 advance();  // consume 'u'
 
-                // Must have exactly 4 hex digits
-                bool valid = true;
-                uint32_t codepoint = 0;
+                // Check for brace syntax: \u{...}
+                if (!eof() && peek() == '{') {
+                    advance();  // consume '{'
 
-                for (int j = 0; j < 4; j++) {
-                    if (eof() || !std::isxdigit((unsigned char)peek())) {
-                        valid = false;
-                        break;
+                    uint32_t codepoint = 0;
+                    int digits = 0;
+                    bool valid = true;
+
+                    // Parse hex digits until '}' (max 6 digits for Unicode range)
+                    while (!eof() && peek() != '}') {
+                        if (digits >= 6) {
+                            valid = false;
+                            break;
+                        }
+
+                        char hc = peek();
+                        int digit;
+                        if (hc >= '0' && hc <= '9')
+                            digit = hc - '0';
+                        else if (hc >= 'a' && hc <= 'f')
+                            digit = 10 + (hc - 'a');
+                        else if (hc >= 'A' && hc <= 'F')
+                            digit = 10 + (hc - 'A');
+                        else {
+                            valid = false;
+                            break;
+                        }
+
+                        codepoint = (codepoint << 4) | digit;
+                        advance();
+                        digits++;
                     }
 
-                    char hc = peek();
-                    int digit;
-                    if (hc >= '0' && hc <= '9')
-                        digit = hc - '0';
-                    else if (hc >= 'a' && hc <= 'f')
-                        digit = 10 + (hc - 'a');
-                    else if (hc >= 'A' && hc <= 'F')
-                        digit = 10 + (hc - 'A');
-                    else {
-                        valid = false;
-                        break;
-                    }
+                    // Must have at least 1 digit and closing brace
+                    if (valid && digits > 0 && !eof() && peek() == '}') {
+                        advance();  // consume '}'
 
-                    codepoint = (codepoint << 4) | digit;
-                    advance();
-                }
-
-                if (valid) {
-                    // Convert Unicode codepoint to UTF-8
-                    if (codepoint <= 0x7F) {
-                        // 1-byte UTF-8
-                        val.push_back(static_cast<char>(codepoint));
-                    } else if (codepoint <= 0x7FF) {
-                        // 2-byte UTF-8
-                        val.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-                        val.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-                    } else if (codepoint <= 0xFFFF) {
-                        // 3-byte UTF-8
-                        val.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-                        val.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-                        val.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                        if (!encode_utf8(codepoint, val)) {
+                            std::ostringstream ss;
+                            ss << "Invalid Unicode codepoint U+" << std::hex << codepoint
+                               << " at " << (filename.empty() ? "<repl>" : filename)
+                               << " line " << tok_line << ", col " << tok_col;
+                            throw std::runtime_error(ss.str());
+                        }
                     } else {
-                        // 4-byte UTF-8 (for completeness, though \u only goes to 0xFFFF)
-                        val.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
-                        val.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
-                        val.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-                        val.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                        // Invalid \u{...} escape - keep literal
+                        val.push_back('\\');
+                        val.push_back('u');
+                        val.push_back('{');
                     }
-                } else {
-                    // Invalid unicode escape - keep literal \u
-                    val.push_back('\\');
-                    val.push_back('u');
+                }
+                // Standard \uXXXX (4 hex digits)
+                else {
+                    bool valid = true;
+                    uint32_t codepoint = 0;
+
+                    for (int j = 0; j < 4; j++) {
+                        if (eof() || !std::isxdigit((unsigned char)peek())) {
+                            valid = false;
+                            break;
+                        }
+
+                        char hc = peek();
+                        int digit;
+                        if (hc >= '0' && hc <= '9')
+                            digit = hc - '0';
+                        else if (hc >= 'a' && hc <= 'f')
+                            digit = 10 + (hc - 'a');
+                        else if (hc >= 'A' && hc <= 'F')
+                            digit = 10 + (hc - 'A');
+                        else {
+                            valid = false;
+                            break;
+                        }
+
+                        codepoint = (codepoint << 4) | digit;
+                        advance();
+                    }
+
+                    if (valid) {
+                        if (!encode_utf8(codepoint, val)) {
+                            std::ostringstream ss;
+                            ss << "Invalid Unicode codepoint U+" << std::hex << codepoint
+                               << " at " << (filename.empty() ? "<repl>" : filename)
+                               << " line " << tok_line << ", col " << tok_col;
+                            throw std::runtime_error(ss.str());
+                        }
+                    } else {
+                        // Invalid unicode escape - keep literal \u
+                        val.push_back('\\');
+                        val.push_back('u');
+                    }
                 }
             }
             // Unknown escape - keep the character as-is (e.g., \a remains as 'a')
@@ -439,62 +507,102 @@ void Lexer::scan_template(std::vector<Token>& out, int tok_line, int tok_col, si
                     chunk.push_back('x');
                 }
             }
-            // Unicode escape: \u2713, \u00e9 (4 hex digits)
+            // Unicode escape: \u2713 (4 hex) or \u{1F600} (variable hex in braces)
             else if (nxt == 'u') {
                 advance();  // consume 'u'
 
-                // Must have exactly 4 hex digits
-                bool valid = true;
-                uint32_t codepoint = 0;
+                // Check for brace syntax: \u{...}
+                if (!eof() && peek() == '{') {
+                    advance();  // consume '{'
 
-                for (int j = 0; j < 4; j++) {
-                    if (eof() || !std::isxdigit((unsigned char)peek())) {
-                        valid = false;
-                        break;
+                    uint32_t codepoint = 0;
+                    int digits = 0;
+                    bool valid = true;
+
+                    // Parse hex digits until '}' (max 6 digits for Unicode range)
+                    while (!eof() && peek() != '}') {
+                        if (digits >= 6) {
+                            valid = false;
+                            break;
+                        }
+
+                        char hc = peek();
+                        int digit;
+                        if (hc >= '0' && hc <= '9')
+                            digit = hc - '0';
+                        else if (hc >= 'a' && hc <= 'f')
+                            digit = 10 + (hc - 'a');
+                        else if (hc >= 'A' && hc <= 'F')
+                            digit = 10 + (hc - 'A');
+                        else {
+                            valid = false;
+                            break;
+                        }
+
+                        codepoint = (codepoint << 4) | digit;
+                        advance();
+                        digits++;
                     }
 
-                    char hc = peek();
-                    int digit;
-                    if (hc >= '0' && hc <= '9')
-                        digit = hc - '0';
-                    else if (hc >= 'a' && hc <= 'f')
-                        digit = 10 + (hc - 'a');
-                    else if (hc >= 'A' && hc <= 'F')
-                        digit = 10 + (hc - 'A');
-                    else {
-                        valid = false;
-                        break;
-                    }
+                    // Must have at least 1 digit and closing brace
+                    if (valid && digits > 0 && !eof() && peek() == '}') {
+                        advance();  // consume '}'
 
-                    codepoint = (codepoint << 4) | digit;
-                    advance();
-                }
-
-                if (valid) {
-                    // Convert Unicode codepoint to UTF-8
-                    if (codepoint <= 0x7F) {
-                        // 1-byte UTF-8
-                        chunk.push_back(static_cast<char>(codepoint));
-                    } else if (codepoint <= 0x7FF) {
-                        // 2-byte UTF-8
-                        chunk.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-                        chunk.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-                    } else if (codepoint <= 0xFFFF) {
-                        // 3-byte UTF-8
-                        chunk.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-                        chunk.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-                        chunk.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                        if (!encode_utf8(codepoint, chunk)) {  // CHANGED: val -> chunk
+                            std::ostringstream ss;
+                            ss << "Invalid Unicode codepoint U+" << std::hex << codepoint
+                               << " at " << (filename.empty() ? "<repl>" : filename)
+                               << " line " << tok_line << ", col " << tok_col;
+                            throw std::runtime_error(ss.str());
+                        }
                     } else {
-                        // 4-byte UTF-8 (for completeness)
-                        chunk.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
-                        chunk.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
-                        chunk.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-                        chunk.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                        // Invalid \u{...} escape - keep literal
+                        chunk.push_back('\\');  // CHANGED: val -> chunk
+                        chunk.push_back('u');   // CHANGED: val -> chunk
+                        chunk.push_back('{');   // CHANGED: val -> chunk
                     }
-                } else {
-                    // Invalid unicode escape - keep literal \u
-                    chunk.push_back('\\');
-                    chunk.push_back('u');
+                }
+                // Standard \uXXXX (4 hex digits)
+                else {
+                    bool valid = true;
+                    uint32_t codepoint = 0;
+
+                    for (int j = 0; j < 4; j++) {
+                        if (eof() || !std::isxdigit((unsigned char)peek())) {
+                            valid = false;
+                            break;
+                        }
+
+                        char hc = peek();
+                        int digit;
+                        if (hc >= '0' && hc <= '9')
+                            digit = hc - '0';
+                        else if (hc >= 'a' && hc <= 'f')
+                            digit = 10 + (hc - 'a');
+                        else if (hc >= 'A' && hc <= 'F')
+                            digit = 10 + (hc - 'A');
+                        else {
+                            valid = false;
+                            break;
+                        }
+
+                        codepoint = (codepoint << 4) | digit;
+                        advance();
+                    }
+
+                    if (valid) {
+                        if (!encode_utf8(codepoint, chunk)) {  // CHANGED: val -> chunk
+                            std::ostringstream ss;
+                            ss << "Invalid Unicode codepoint U+" << std::hex << codepoint
+                               << " at " << (filename.empty() ? "<repl>" : filename)
+                               << " line " << tok_line << ", col " << tok_col;
+                            throw std::runtime_error(ss.str());
+                        }
+                    } else {
+                        // Invalid unicode escape - keep literal \u
+                        chunk.push_back('\\');  // CHANGED: val -> chunk
+                        chunk.push_back('u');   // CHANGED: val -> chunk
+                    }
                 }
             }
             // Unknown escape - keep the character as-is

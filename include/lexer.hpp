@@ -43,6 +43,8 @@ class Lexer {
     void scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
     void scan_regex_literal(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index);
 
+    bool encode_utf8(uint32_t codepoint, std::string& output);
+
     // scan quoted (single/double) string (handles escapes)
     void scan_quoted_string(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index, char quote);
 
