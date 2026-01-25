@@ -117,14 +117,16 @@ struct HttpClientRequest {
 
 static void emit_event(std::shared_ptr<StreamEventHandlers> handlers,
     const std::string& event,
-    const Value& data);
+    const Value& data = std::monostate{});
 
 static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data,
     FunctionPtr callback);
 
 static void stream_next_file_chunk(HttpClientRequest* req);
 
-static void close_connection(HttpClientRequest* req);
+static void close_connection(HttpClientRequest* req, bool emit_close_event);
+
+static void cleanup_ssl(HttpClientRequest* req);
 
 // ============================================================================
 // GLOBAL STATE
@@ -151,13 +153,52 @@ static std::string value_to_string_simple(const Value& v) {
     return std::string();
 }
 
+static void close_connection_internal(HttpClientRequest* req, bool emit_close_event) {
+    // This MUST be called on the event loop thread
+
+    if (req->closed.exchange(true)) {
+        // Already closed, do nothing
+        return;
+    }
+
+    // Decrement active requests counter ONCE
+    g_active_http_requests.fetch_sub(1);
+
+    // Capture handlers in shared_ptr to keep it alive
+    auto handlers = req->handlers;
+
+    // Emit close event if requested
+    if (emit_close_event && handlers) {
+        emit_event(handlers, "close");
+    }
+
+#ifdef HAVE_OPENSSL
+    if (req->use_ssl) {
+        cleanup_ssl(req);
+    }
+#endif
+
+    // Close the socket handle
+    // The deletion happens in the uv_close callback
+    if (!uv_is_closing((uv_handle_t*)&req->socket)) {
+        uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
+            auto* req = static_cast<HttpClientRequest*>(handle->data);
+            delete req;
+        });
+    } else {
+        // Socket is already closing, just delete
+        // This shouldn't normally happen with proper coordination
+        // delete req;
+    }
+}
+
 // ============================================================================
 // EVENT EMISSION
 // ============================================================================
 
 static void emit_event(std::shared_ptr<StreamEventHandlers> handlers,
     const std::string& event,
-    const Value& data = std::monostate{}) {
+    const Value& data) {
     if (!handlers) return;
 
     FunctionPtr fn = nullptr;
@@ -356,17 +397,15 @@ static int on_body(llhttp_t* parser, const char* at, size_t length) {
 
 static int on_message_complete(llhttp_t* parser) {
     auto* req = static_cast<HttpClientRequest*>(parser->data);
-    auto handlers = req->handlers;
 
+    if (req->closed.load()) {
+        return 0;
+    }
+
+    auto handlers = req->handlers;
     emit_event(handlers, "end");
 
-    g_active_http_requests.fetch_sub(1);
-
-    // Always close connection after response is complete
-    scheduler_run_on_loop([req, handlers]() {
-        emit_event(handlers, "close");
-        close_connection(req);
-    });
+    close_connection(req, true);
 
     return 0;
 }
@@ -390,16 +429,7 @@ static void on_write_complete(uv_write_t* write_req, int status) {
     if (status < 0) {
         std::string error = std::string("Write error: ") + uv_strerror(status);
         emit_event(handlers, "error", Value{error});
-
-        if (!req->closed.exchange(true)) {
-            scheduler_run_on_loop([req, handlers]() {
-                emit_event(handlers, "close");
-                uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* h) {
-                    auto* req = static_cast<HttpClientRequest*>(h->data);
-                    delete req;
-                });
-            });
-        }
+        close_connection(req, true);
         return;
     }
 
@@ -525,6 +555,12 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     auto* req = static_cast<HttpClientRequest*>(stream->data);
     auto handlers = req->handlers;
 
+    // Early exit if already closed
+    if (req->closed.load()) {
+        if (buf->base) free(buf->base);
+        return;
+    }
+
     if (nread > 0) {
 #ifdef HAVE_OPENSSL
         if (req->use_ssl && req->ssl) {
@@ -535,14 +571,8 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
 
                 if (hs_result < 0) {
                     emit_event(handlers, "error", Value{std::string("SSL handshake failed")});
-                    scheduler_run_on_loop([req, handlers]() {
-                        emit_event(handlers, "close");
-                        uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* h) {
-                            auto* req = static_cast<HttpClientRequest*>(h->data);
-                            delete req;
-                        });
-                    });
                     if (buf->base) free(buf->base);
+                    close_connection(req, true);
                     return;
                 }
 
@@ -588,14 +618,8 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                 if (err != HPE_OK) {
                     std::string error = std::string("HTTP parse error: ") + llhttp_errno_name(err);
                     emit_event(handlers, "error", Value{error});
-                    scheduler_run_on_loop([req, handlers]() {
-                        emit_event(handlers, "close");
-                        uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* h) {
-                            auto* req = static_cast<HttpClientRequest*>(h->data);
-                            delete req;
-                        });
-                    });
                     if (buf->base) free(buf->base);
+                    close_connection(req, true);
                     return;
                 }
             }
@@ -605,35 +629,27 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
         }
 #endif
 
+        // Plain HTTP parsing
         llhttp_errno_t err = llhttp_execute(&req->parser, buf->base, nread);
 
         if (err != HPE_OK) {
             std::string error = std::string("HTTP parse error: ") + llhttp_errno_name(err);
             emit_event(handlers, "error", Value{error});
-
-            scheduler_run_on_loop([req, handlers]() {
-                emit_event(handlers, "close");
-                uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* h) {
-                    auto* req = static_cast<HttpClientRequest*>(h->data);
-                    delete req;
-                });
-            });
+            if (buf->base) free(buf->base);
+            close_connection(req, true);
+            return;
         }
+
     } else if (nread < 0) {
+        // Connection closed or error
         if (nread != UV_EOF) {
             std::string error = std::string("Read error: ") + uv_strerror(nread);
             emit_event(handlers, "error", Value{error});
         }
 
-        g_active_http_requests.fetch_sub(1);
-
-        scheduler_run_on_loop([req, handlers]() {
-            emit_event(handlers, "close");
-            uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* h) {
-                auto* req = static_cast<HttpClientRequest*>(h->data);
-                delete req;
-            });
-        });
+        if (buf->base) free(buf->base);
+        close_connection(req, true);
+        return;
     }
 
     if (buf->base) free(buf->base);
@@ -700,18 +716,9 @@ static void on_connect(uv_connect_t* connect_req, int status) {
     auto handlers = req->handlers;
 
     if (status < 0) {
-        g_active_http_requests.fetch_sub(1);
-
         std::string error = std::string("Connection failed: ") + uv_strerror(status);
         emit_event(handlers, "error", Value{error});
-
-        scheduler_run_on_loop([req, handlers]() {
-            emit_event(handlers, "close");
-            uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
-                auto* req = static_cast<HttpClientRequest*>(handle->data);
-                delete req;
-            });
-        });
+        close_connection(req, true);
         return;
     }
 
@@ -762,17 +769,13 @@ static void stream_next_file_chunk(HttpClientRequest* req) {
     }
 }
 
-static void close_connection(HttpClientRequest* req) {
-#ifdef HAVE_OPENSSL
-    cleanup_ssl(req);
-#endif
+static void close_connection(HttpClientRequest* req, bool emit_close_event = true) {
+    // Always schedule on the loop to ensure thread safety
+    auto handlers = req->handlers;  // Keep handlers alive
 
-    if (!req->closed.exchange(true)) {
-        uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
-            auto* req = static_cast<HttpClientRequest*>(handle->data);
-            delete req;
-        });
-    }
+    scheduler_run_on_loop([req, emit_close_event, handlers]() {
+        close_connection_internal(req, emit_close_event);
+    });
 }
 
 // ============================================================================
@@ -1122,23 +1125,11 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
 
         auto handlers = req->handlers;
 
-        scheduler_run_on_loop([req, reason, handlers]() {
-            if (!req->closed.exchange(true)) {
-                g_active_http_requests.fetch_sub(1);
+        // Emit error before closing
+        emit_event(handlers, "error", Value{reason});
 
-                emit_event(handlers, "error", Value{reason});
-                emit_event(handlers, "close");
-
-#ifdef HAVE_OPENSSL
-                cleanup_ssl(req);
-#endif
-
-                uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
-                    auto* req = static_cast<HttpClientRequest*>(handle->data);
-                    delete req;
-                });
-            }
-        });
+        // Close will emit "close" event
+        close_connection(req, true);
 
         return std::monostate{};
     };
@@ -1242,18 +1233,13 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
                 HttpClientRequest* req = static_cast<HttpClientRequest*>(addrinfo_req->data);
 
                 if (status != 0 || !res) {
-                    g_active_http_requests.fetch_sub(1);
-
                     std::string error = std::string("DNS lookup failed: ") + uv_strerror(status);
                     emit_event(req->handlers, "error", Value{error});
 
-                    uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
-                        HttpClientRequest* req = static_cast<HttpClientRequest*>(handle->data);
-                        delete req;
-                    });
-
                     if (res) uv_freeaddrinfo(res);
                     delete addrinfo_req;
+
+                    close_connection(req, true);
                     return;
                 }
 
@@ -1272,15 +1258,12 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
             &hints);
 
         if (r != 0) {
-            g_active_http_requests.fetch_sub(1);
-
+            // uv_getaddrinfo couldn't be started; centralize cleanup
             std::string error = std::string("Failed to start DNS lookup: ") + uv_strerror(r);
             emit_event(req->handlers, "error", Value{error});
 
-            uv_close((uv_handle_t*)&req->socket, [](uv_handle_t* handle) {
-                HttpClientRequest* req = static_cast<HttpClientRequest*>(handle->data);
-                delete req;
-            });
+            // Use centralized close (will decrement active count and delete on loop)
+            close_connection(req, true);
             delete addrinfo_req;
         }
     });
