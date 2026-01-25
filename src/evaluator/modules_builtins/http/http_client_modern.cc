@@ -49,6 +49,7 @@ struct StreamEventHandlers {
 struct WriteRequest {
     std::vector<uint8_t> data;
     FunctionPtr callback;
+    size_t body_bytes = 0;
 };
 
 struct HttpClientRequest {
@@ -81,6 +82,7 @@ struct HttpClientRequest {
     size_t total_bytes_received = 0;
     size_t content_length = 0;
     size_t total_bytes_sent = 0;
+    size_t body_bytes_sent = 0;
     size_t upload_size = 0;
 
     std::shared_ptr<StreamEventHandlers> handlers;
@@ -120,7 +122,7 @@ static void emit_event(std::shared_ptr<StreamEventHandlers> handlers,
     const Value& data = std::monostate{});
 
 static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data,
-    FunctionPtr callback);
+    FunctionPtr callback = nullptr, size_t body_bytes = 0);
 
 static void stream_next_file_chunk(HttpClientRequest* req);
 
@@ -452,15 +454,36 @@ static void process_write_queue(HttpClientRequest* req) {
     }
 
     req->writing.store(true);
+
+    // wire bytes (diagnostic)
     req->total_bytes_sent += wr.data.size();
 
-    // Emit upload progress
+    // body bytes (logical payload) — only increment by declared amount
+    if (wr.body_bytes > 0) {
+        req->body_bytes_sent += wr.body_bytes;
+        // Avoid overflow past upload_size
+        if (req->upload_size > 0 && req->body_bytes_sent > req->upload_size) {
+            req->body_bytes_sent = req->upload_size;
+        }
+    }
+
+    // Emit uploadProgress based on logical body bytes (backwards-compatible shape)
+    // Also provide wireBytes (diagnostic) so future consumers can inspect physical bytes.
     if (req->upload_size > 0) {
         auto progress = std::make_shared<ObjectValue>();
         progress->properties["loaded"] = PropertyDescriptor{
-            Value{static_cast<double>(req->total_bytes_sent)}, false, false, true, Token{}};
+            Value{static_cast<double>(req->body_bytes_sent)}, false, false, true, Token{}};
         progress->properties["total"] = PropertyDescriptor{
             Value{static_cast<double>(req->upload_size)}, false, false, true, Token{}};
+
+        // extra, non-breaking field for diagnostics
+        progress->properties["wireBytes"] = PropertyDescriptor{
+            Value{static_cast<double>(req->total_bytes_sent)}, false, false, true, Token{}};
+
+        // optional percentage (keeps semantics)
+        progress->properties["percentage"] = PropertyDescriptor{
+            Value{(req->upload_size > 0) ? (static_cast<double>(req->body_bytes_sent) / req->upload_size) * 100.0 : 0.0},
+            false, false, true, Token{}};
 
         emit_event(req->handlers, "uploadProgress", Value{progress});
     }
@@ -525,10 +548,11 @@ static void process_write_queue(HttpClientRequest* req) {
     }
 }
 
-static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data, FunctionPtr callback = nullptr) {
+static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data, FunctionPtr callback, size_t body_bytes) {
     WriteRequest wr;
     wr.data = data;
     wr.callback = callback;
+    wr.body_bytes = body_bytes;
 
     {
         std::lock_guard<std::mutex> lock(req->write_mutex);
@@ -582,7 +606,7 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                     int read = BIO_read(req->bio_write, out_buf, std::min(pending, (int)sizeof(out_buf)));
                     if (read > 0) {
                         std::vector<uint8_t> data(out_buf, out_buf + read);
-                        queue_write(req, data);
+                        queue_write(req, data, nullptr, 0);
                     }
                 }
 
@@ -690,7 +714,7 @@ static void send_initial_request(HttpClientRequest* req) {
     std::vector<uint8_t> req_data(req_str.begin(), req_str.end());
 
     // Send Headers
-    queue_write(req, req_data);
+    queue_write(req, req_data, nullptr, 0);
     req->headers_sent.store(true);
     emit_event(req->handlers, "connect");
 
@@ -704,7 +728,7 @@ static void send_initial_request(HttpClientRequest* req) {
         } else {
             // Strategy: Memory Buffer
             if (!req->body_buffer.empty()) {
-                queue_write(req, req->body_buffer);
+                queue_write(req, req->body_buffer, nullptr, req->body_buffer.size());
             }
             req->request_complete.store(true);
         }
@@ -761,7 +785,7 @@ static void stream_next_file_chunk(HttpClientRequest* req) {
             nullptr,
             Token{});
 
-        queue_write(req, buffer, callback_fn);
+        queue_write(req, buffer, callback_fn, buffer.size());
     } else {
         // EOF or Error
         req->request_complete.store(true);
@@ -1006,9 +1030,9 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
                 chunked_packet.push_back('\r');
                 chunked_packet.push_back('\n');
 
-                queue_write(req, chunked_packet, callback);
+                queue_write(req, chunked_packet, callback, data.size());  // data is the payload length
             } else {
-                queue_write(req, data, callback);
+                queue_write(req, data, callback, data.size());
             }
         }
 
@@ -1066,16 +1090,16 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
                 chunked.push_back('\r');
                 chunked.push_back('\n');
 
-                queue_write(req, chunked);
+                queue_write(req, chunked, nullptr, final_data.size());
             } else {
-                queue_write(req, final_data);
+                queue_write(req, final_data, nullptr, final_data.size());
             }
         }
 
         if (req->is_chunked) {
             std::string term = "0\r\n\r\n";
             std::vector<uint8_t> term_data(term.begin(), term.end());
-            queue_write(req, term_data);
+            queue_write(req, term_data, nullptr, 0);  // not body
         }
 
         req->request_complete.store(true);
