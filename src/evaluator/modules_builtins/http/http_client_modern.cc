@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "../streams/streams.h"
 #include "AsyncBridge.hpp"
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
@@ -235,7 +236,7 @@ bool http_has_active_work() {
 // HELPER: String conversions
 // ============================================================================
 
-static std::string value_to_string_simple(const Value& v) {
+static std::string value_to_string_simple_http(const Value& v) {
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
@@ -529,52 +530,71 @@ static void on_write_complete(uv_write_t* write_req, int status) {
         return;
     }
 
-    req->writing.store(false);
-    process_write_queue(req);
-}
+    bool should_emit_drain = false;
 
-static void process_write_queue(HttpClientRequest* req) {
-    if (req->closed.load() || req->writing.load()) return;
-
-    WriteRequest wr;
     {
         std::lock_guard<std::mutex> lock(req->write_mutex);
+        req->writing.store(false);
+
         if (req->write_queue.empty()) {
-            emit_event(req->handlers, "drain");
-            return;
+            should_emit_drain = true;  // ✅ Remember to emit, don't emit yet
         }
-        wr = std::move(req->write_queue.front());
-        req->write_queue.pop_front();
     }
 
-    req->writing.store(true);
+    // ✅ Emit drain AFTER releasing lock and setting writing=false
+    if (should_emit_drain) {
+        emit_event(handlers, "drain");
+    } else {
+        // Queue has more items, process next
+        scheduler_run_on_loop([req]() {
+            process_write_queue(req);
+        });
+    }
+}
+static void process_write_queue(HttpClientRequest* req) {
+    WriteRequest wr;
+    bool got_work = false;
 
-    // wire bytes (diagnostic)
+    {
+        std::lock_guard<std::mutex> lock(req->write_mutex);
+
+        // ✅ All checks inside lock
+        if (req->closed.load() || req->writing.load()) {
+            return;
+        }
+
+        if (req->write_queue.empty()) {
+            return;  // Don't emit drain here
+        }
+
+        wr = std::move(req->write_queue.front());
+        req->write_queue.pop_front();
+        req->writing.store(true);  // ✅ Set inside lock
+        got_work = true;
+    }
+
+    if (!got_work) return;
+
+    // Wire bytes (diagnostic)
     req->total_bytes_sent += wr.data.size();
 
-    // body bytes (logical payload) — only increment by declared amount
+    // Body bytes (logical payload)
     if (wr.body_bytes > 0) {
         req->body_bytes_sent += wr.body_bytes;
-        // Avoid overflow past upload_size
         if (req->upload_size > 0 && req->body_bytes_sent > req->upload_size) {
             req->body_bytes_sent = req->upload_size;
         }
     }
 
-    // Emit uploadProgress based on logical body bytes (backwards-compatible shape)
-    // Also provide wireBytes (diagnostic) so future consumers can inspect physical bytes.
+    // Emit uploadProgress
     if (req->upload_size > 0) {
         auto progress = std::make_shared<ObjectValue>();
         progress->properties["loaded"] = PropertyDescriptor{
             Value{static_cast<double>(req->body_bytes_sent)}, false, false, true, Token{}};
         progress->properties["total"] = PropertyDescriptor{
             Value{static_cast<double>(req->upload_size)}, false, false, true, Token{}};
-
-        // extra, non-breaking field for diagnostics
         progress->properties["wireBytes"] = PropertyDescriptor{
             Value{static_cast<double>(req->total_bytes_sent)}, false, false, true, Token{}};
-
-        // optional percentage (keeps semantics)
         progress->properties["percentage"] = PropertyDescriptor{
             Value{(req->upload_size > 0) ? (static_cast<double>(req->body_bytes_sent) / req->upload_size) * 100.0 : 0.0},
             false, false, true, Token{}};
@@ -584,10 +604,8 @@ static void process_write_queue(HttpClientRequest* req) {
 
 #ifdef HAVE_OPENSSL
     if (req->use_ssl && req->ssl) {
-        // Write to SSL
         int written = SSL_write(req->ssl, wr.data.data(), wr.data.size());
 
-        // Get encrypted data from BIO
         char buf[16384];
         int pending = BIO_pending(req->bio_write);
         if (pending > 0) {
@@ -608,8 +626,14 @@ static void process_write_queue(HttpClientRequest* req) {
             }
         }
 
-        req->writing.store(false);
-        process_write_queue(req);
+        // ✅ If SSL write didn't trigger UV write, reset writing flag
+        {
+            std::lock_guard<std::mutex> lock(req->write_mutex);
+            req->writing.store(false);
+        }
+        scheduler_run_on_loop([req]() {
+            process_write_queue(req);
+        });
         return;
     }
 #endif
@@ -631,35 +655,45 @@ static void process_write_queue(HttpClientRequest* req) {
         free(send_buf);
         delete uvbuf;
         delete write_req;
-        req->writing.store(false);
+
+        {
+            std::lock_guard<std::mutex> lock(req->write_mutex);
+            req->writing.store(false);
+        }
 
         std::string error = std::string("Write failed: ") + uv_strerror(result);
         emit_event(req->handlers, "error", Value{error});
     }
 
-    if (wr.callback) {
-        emit_event(req->handlers, "drain");
-    }
+    // ✅ Remove this - callback is what matters
+    // if (wr.callback) {
+    //     emit_event(req->handlers, "drain");
+    // }
 }
-
-static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data, FunctionPtr callback, size_t body_bytes) {
+static void queue_write(HttpClientRequest* req, const std::vector<uint8_t>& data,
+    FunctionPtr callback, size_t body_bytes) {
     WriteRequest wr;
     wr.data = data;
     wr.callback = callback;
     wr.body_bytes = body_bytes;
 
+    bool should_process = false;
+
     {
         std::lock_guard<std::mutex> lock(req->write_mutex);
         req->write_queue.push_back(std::move(wr));
+
+        if (!req->writing.load()) {
+            should_process = true;
+        }
     }
 
-    if (!req->writing.load()) {
+    if (should_process) {
         scheduler_run_on_loop([req]() {
             process_write_queue(req);
         });
     }
 }
-
 // ============================================================================
 // READ OPERATIONS
 // ============================================================================
@@ -885,7 +919,17 @@ static void stream_next_file_chunk(HttpClientRequest* req) {
     } else {
         // EOF or Error
         req->request_complete.store(true);
-        emit_event(req->handlers, "drain");
+
+        // Emit drain only if nothing remains to be written
+        bool should_emit = false;
+        {
+            std::lock_guard<std::mutex> lock(req->write_mutex);
+            should_emit = !req->writing.load() && req->write_queue.empty();
+        }
+
+        if (should_emit) {
+            emit_event(req->handlers, "drain");
+        }
     }
 }
 
@@ -907,7 +951,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
         throw SwaziError("TypeError", "http.open requires url", token.loc);
     }
 
-    std::string url = value_to_string_simple(args[0]);
+    std::string url = value_to_string_simple_http(args[0]);
 
     // Parse URL
     std::regex url_regex(R"(^(https?)://([^/:]+)(?::(\d+))?(/.*)?$)");
@@ -949,7 +993,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
 
         auto method_it = opts->properties.find("method");
         if (method_it != opts->properties.end()) {
-            req->method = value_to_string_simple(method_it->second.value);
+            req->method = value_to_string_simple_http(method_it->second.value);
             method = req->method;
         }
 
@@ -958,7 +1002,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
             std::holds_alternative<ObjectPtr>(headers_it->second.value)) {
             ObjectPtr hdrs = std::get<ObjectPtr>(headers_it->second.value);
             for (const auto& kv : hdrs->properties) {
-                headers.set(kv.first, value_to_string_simple(kv.second.value));
+                headers.set(kv.first, value_to_string_simple_http(kv.second.value));
             }
         }
         auto it_body = opts->properties.find("body");
@@ -1105,7 +1149,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
             std::string str = std::get<std::string>(args[0]);
             data.assign(str.begin(), str.end());
         } else {
-            std::string str = value_to_string_simple(args[0]);
+            std::string str = value_to_string_simple_http(args[0]);
             data.assign(str.begin(), str.end());
         }
 
@@ -1156,7 +1200,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
                     std::string str = std::get<std::string>(args[0]);
                     final_data.assign(str.begin(), str.end());
                 } else {
-                    std::string str = value_to_string_simple(args[0]);
+                    std::string str = value_to_string_simple_http(args[0]);
                     final_data.assign(str.begin(), str.end());
                 }
             }
@@ -1264,8 +1308,8 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
             throw SwaziError("Error", "Cannot set headers after they have been sent", token.loc);
         }
 
-        std::string name = value_to_string_simple(args[0]);
-        std::string value = value_to_string_simple(args[1]);
+        std::string name = value_to_string_simple_http(args[0]);
+        std::string value = value_to_string_simple_http(args[1]);
 
         req->request_headers.set(name, value);  // ✅ Use HeaderMap
 
@@ -1281,7 +1325,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
             throw SwaziError("TypeError", "getHeader(name) requires name argument", token.loc);
         }
 
-        std::string name = value_to_string_simple(args[0]);
+        std::string name = value_to_string_simple_http(args[0]);
         auto val = req->request_headers.get(name);  // ✅ Use HeaderMap
         if (!val.has_value()) return Value{std::monostate{}};
 
@@ -1301,7 +1345,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
             throw SwaziError("Error", "Cannot remove headers after they have been sent", token.loc);
         }
 
-        std::string name = value_to_string_simple(args[0]);
+        std::string name = value_to_string_simple_http(args[0]);
         req->request_headers.remove(name);  // ✅ Use HeaderMap
 
         return std::monostate{};
@@ -1309,6 +1353,188 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
     stream_obj->properties["removeHeader"] = {
         Value{std::make_shared<FunctionValue>("request.removeHeader", removeHeader_impl, nullptr, tok)},
         false, false, false, tok};
+
+    // pipe(destination) - Pipe response data to writable stream
+    auto pipe_impl = [stream_obj, req](const std::vector<Value>& args, EnvPtr env, const Token& tok) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "client.pipe(writable) requires destination", tok.loc);
+        }
+
+        if (!std::holds_alternative<ObjectPtr>(args[0])) {
+            throw SwaziError("TypeError", "pipe destination must be a stream object", tok.loc);
+        }
+
+        ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
+
+        // Extract destination stream ID
+        auto id_it = dest_obj->properties.find("_id");
+        if (id_it == dest_obj->properties.end() ||
+            !std::holds_alternative<double>(id_it->second.value)) {
+            throw SwaziError("TypeError", "Invalid stream object", tok.loc);
+        }
+
+        long long dest_id = static_cast<long long>(std::get<double>(id_it->second.value));
+
+        // Try to find writable stream
+        WritableStreamStatePtr writable_state;
+        {
+            std::lock_guard<std::mutex> lock(g_writable_streams_mutex);
+            auto it = g_writable_streams.find(dest_id);
+            if (it != g_writable_streams.end()) {
+                writable_state = it->second;
+            }
+        }
+
+        // Parse options
+        bool end_on_finish = true;
+        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+            auto end_it = opts->properties.find("end");
+            if (end_it != opts->properties.end() && std::holds_alternative<bool>(end_it->second.value)) {
+                end_on_finish = std::get<bool>(end_it->second.value);
+            }
+        }
+
+        Token evt_tok{};
+        evt_tok.loc = TokenLocation("<http-pipe>", 0, 0, 0);
+
+        // DATA HANDLER - Write response data to destination
+        auto data_handler = [dest_obj, req](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+            if (args.empty()) return std::monostate{};
+
+            auto write_it = dest_obj->properties.find("write");
+            if (write_it == dest_obj->properties.end()) return std::monostate{};
+
+            if (!std::holds_alternative<FunctionPtr>(write_it->second.value)) return std::monostate{};
+
+            FunctionPtr write_fn = std::get<FunctionPtr>(write_it->second.value);
+
+            if (write_fn->is_native && write_fn->native_impl) {
+                try {
+                    Value result = write_fn->native_impl({args[0]}, env, token);
+
+                    // Handle backpressure - pause reading if write returns false
+                    if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                        scheduler_run_on_loop([req]() {
+                            if (!req->paused.exchange(true)) {
+                                uv_read_stop((uv_stream_t*)&req->socket);
+                            }
+                        });
+                    }
+
+                    return result;
+                } catch (...) {
+                    return Value{false};
+                }
+            }
+
+            return Value{false};
+        };
+
+        auto data_fn = std::make_shared<FunctionValue>("http-pipe.data", data_handler, nullptr, evt_tok);
+
+        // Register data listener
+        {
+            std::lock_guard<std::mutex> lock(req->handlers->mutex);
+            req->handlers->on_data = data_fn;
+        }
+
+        // DRAIN HANDLER - Resume reading when destination is ready
+        auto drain_handler = [req](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            scheduler_run_on_loop([req]() {
+                if (req->paused.exchange(false)) {
+                    uv_read_start((uv_stream_t*)&req->socket, alloc_buffer, on_read);
+                }
+            });
+            return std::monostate{};
+        };
+
+        auto drain_fn = std::make_shared<FunctionValue>("http-pipe.drain", drain_handler, nullptr, evt_tok);
+
+        // Attach drain listener to destination
+        auto on_it = dest_obj->properties.find("on");
+        if (on_it != dest_obj->properties.end() && std::holds_alternative<FunctionPtr>(on_it->second.value)) {
+            FunctionPtr on_fn = std::get<FunctionPtr>(on_it->second.value);
+            if (on_fn->is_native && on_fn->native_impl) {
+                try {
+                    on_fn->native_impl({Value{std::string("drain")}, Value{drain_fn}}, env, evt_tok);
+                } catch (...) {}
+            }
+        }
+
+        // END HANDLER - End destination when response ends
+        if (end_on_finish) {
+            auto end_handler = [dest_obj](const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
+                auto end_it = dest_obj->properties.find("end");
+                if (end_it == dest_obj->properties.end()) return std::monostate{};
+
+                if (!std::holds_alternative<FunctionPtr>(end_it->second.value)) return std::monostate{};
+
+                FunctionPtr end_fn = std::get<FunctionPtr>(end_it->second.value);
+
+                if (end_fn->is_native && end_fn->native_impl) {
+                    try {
+                        return end_fn->native_impl({}, env, token);
+                    } catch (...) {
+                        return std::monostate{};
+                    }
+                }
+
+                return std::monostate{};
+            };
+
+            auto end_fn = std::make_shared<FunctionValue>("http-pipe.end", end_handler, nullptr, evt_tok);
+
+            {
+                std::lock_guard<std::mutex> lock(req->handlers->mutex);
+                req->handlers->on_end = end_fn;
+            }
+        }
+
+        // ERROR HANDLER - Forward errors to destination
+        auto error_handler = [dest_obj](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+            auto on_it = dest_obj->properties.find("on");
+            if (on_it == dest_obj->properties.end()) return std::monostate{};
+
+            if (!std::holds_alternative<FunctionPtr>(on_it->second.value)) return std::monostate{};
+
+            FunctionPtr on_fn = std::get<FunctionPtr>(on_it->second.value);
+
+            if (on_fn->is_native && on_fn->native_impl) {
+                try {
+                    // Create error listener
+                    auto error_cb = [args](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                        // Just log the error
+                        return std::monostate{};
+                    };
+                    auto error_cb_fn = std::make_shared<FunctionValue>("http-pipe.error-cb", error_cb, nullptr, Token{});
+
+                    on_fn->native_impl({Value{std::string("error")}, Value{error_cb_fn}}, env, token);
+                } catch (...) {}
+            }
+
+            return std::monostate{};
+        };
+
+        auto error_fn = std::make_shared<FunctionValue>("http-pipe.error", error_handler, nullptr, evt_tok);
+
+        {
+            std::lock_guard<std::mutex> lock(req->handlers->mutex);
+            req->handlers->on_error = error_fn;
+        }
+
+        // Return client for chaining (duplex behavior)
+        return Value{stream_obj};
+    };
+    stream_obj->properties["pipe"] = {
+        Value{std::make_shared<FunctionValue>("request.pipe", pipe_impl, nullptr, tok)},
+        false, false, false, tok};
+
+    // _id property so client can be piped TO
+    static std::atomic<long long> g_next_http_client_id{1000000000};  // Start very high
+    stream_obj->properties["_id"] = {
+        Value{static_cast<double>(g_next_http_client_id.fetch_add(1))},
+        false, false, true, tok};
 
     // Properties
     stream_obj->properties["url"] = {Value{url}, false, false, true, tok};

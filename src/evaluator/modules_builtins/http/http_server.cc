@@ -160,6 +160,10 @@ struct HttpResponse {
     std::atomic<int> pending_writes{0};
     static const int MAX_PENDING_WRITES = 16;  // Configurable limit
 
+    EnvPtr env = nullptr;
+    Evaluator* evaluator = nullptr;
+    std::vector<FunctionPtr> drain_listeners;
+
     static std::string reason_for_code(int code) {
         switch (code) {
             case 200:
@@ -189,6 +193,19 @@ struct HttpResponse {
         }
     }
 
+    void emit_drain() {
+        if (drain_listeners.empty()) return;
+        for (auto& cb : drain_listeners) {
+            if (!cb) continue;
+            FunctionPtr callback = cb;
+            scheduler_run_on_loop([callback]() {
+                try {
+                    CallbackPayload* payload = new CallbackPayload(callback, {});
+                    enqueue_callback_global(static_cast<void*>(payload));
+                } catch (...) {}
+            });
+        }
+    }
     bool write_chunk(const std::vector<uint8_t>& data) {
         if (!client || finished) return false;
 
@@ -229,20 +246,33 @@ struct HttpResponse {
         auto* ctx = new WriteContext{buf, this};
         req->data = ctx;
 
+        // increment pending_writes (we know it's below MAX here)
         pending_writes.fetch_add(1);
 
         uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
             auto* ctx = static_cast<WriteContext*>(req->data);
-            ctx->response->pending_writes.fetch_sub(1);
+            HttpResponse* resp = ctx->response;
+
+            // decrement pending_writes
+            int prev = resp->pending_writes.fetch_sub(1);
 
             if (ctx->buffer) free(ctx->buffer);
             delete ctx;
             delete req;
+
+            // If we just crossed below the MAX_PENDING_WRITES threshold,
+            // notify drain listeners so a paused source can resume.
+            // prev was the value before decrement; if prev == MAX_PENDING_WRITES
+            // then now pending_writes == MAX_PENDING_WRITES - 1.
+            if (prev == HttpResponse::MAX_PENDING_WRITES) {
+                resp->emit_drain();
+            }
         });
 
         return true;
     }
 
+    // ... rest of HttpResponse as before (end_response, sendfile, stream_file_chunk, etc.) ...
     void end_response(const std::vector<uint8_t>& final_data = {}) {
         if (finished) return;
 
@@ -331,12 +361,19 @@ struct HttpResponse {
         if (!rp.empty()) response << " " << rp;
         response << "\r\n";
 
-        // ✅ Add default Content-Type if missing (case-insensitive check)
         if (!headers.has("Content-Type")) {
             headers.set("Content-Type", "text/plain");
         }
 
-        // ✅ Iterate with original casing preserved
+        if (headers.has("Content-Length")) {
+            chunked_mode = false;
+        } else {
+            if (!headers.has("Transfer-Encoding")) {
+                headers.set("Transfer-Encoding", "chunked");
+            }
+            chunked_mode = true;
+        }
+
         for (auto it = headers.begin(); it != headers.end(); ++it) {
             auto kv = *it;
             response << kv.first << ": " << kv.second << "\r\n";
@@ -768,10 +805,127 @@ static int on_headers_complete(llhttp_t* parser) {
         Value{std::make_shared<FunctionValue>("req.resume", req_resume_impl, nullptr, Token{})},
         false, false, false, Token{}};
 
+    // req.pipe(writable)
+    auto pipe_impl = [state](const std::vector<Value>& args, EnvPtr env, const Token& tok) -> Value {
+        if (args.empty() || !std::holds_alternative<ObjectPtr>(args[0])) {
+            throw SwaziError("TypeError", "req.pipe() requires writable stream", tok.loc);
+        }
+
+        ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
+
+        // Parse options for end behavior
+        bool end_on_finish = true;
+        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
+            ObjectPtr opts = std::get<ObjectPtr>(args[1]);
+            auto end_it = opts->properties.find("end");
+            if (end_it != opts->properties.end() && std::holds_alternative<bool>(end_it->second.value)) {
+                end_on_finish = std::get<bool>(end_it->second.value);
+            }
+        }
+
+        Token evt_tok{};
+        evt_tok.loc = TokenLocation("<req-pipe>", 0, 0, 0);
+
+        // ✅ DATA HANDLER - with backpressure support
+        auto data_handler = [dest_obj, state](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+            if (args.empty()) return std::monostate{};
+
+            auto write_it = dest_obj->properties.find("write");
+            if (write_it == dest_obj->properties.end()) return std::monostate{};
+
+            if (!std::holds_alternative<FunctionPtr>(write_it->second.value)) return std::monostate{};
+
+            FunctionPtr write_fn = std::get<FunctionPtr>(write_it->second.value);
+
+            if (write_fn->is_native && write_fn->native_impl) {
+                try {
+                    Value result = write_fn->native_impl({args[0]}, env, token);
+
+                    // ✅ BACKPRESSURE - if write returns false, pause req
+                    if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                        // Pause reading from socket
+                        if (!state->reading_paused && state->client) {
+                            uv_read_stop(state->client);
+                            state->reading_paused = true;
+                        }
+                    }
+
+                    return result;
+                } catch (...) {
+                    return Value{false};
+                }
+            }
+
+            return Value{false};
+        };
+
+        auto data_fn = std::make_shared<FunctionValue>("req-pipe.data", data_handler, nullptr, evt_tok);
+        state->data_listeners.push_back(data_fn);
+
+        // ✅ DRAIN HANDLER - resume req when writable drains
+        auto drain_handler = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            // Resume reading from socket
+            if (state->reading_paused && state->client) {
+                uv_read_start(state->client, alloc_buffer, on_read);
+                state->reading_paused = false;
+            }
+            return std::monostate{};
+        };
+
+        auto drain_fn = std::make_shared<FunctionValue>("req-pipe.drain", drain_handler, nullptr, evt_tok);
+
+        // Attach drain listener to destination
+        auto on_it = dest_obj->properties.find("on");
+        if (on_it != dest_obj->properties.end() && std::holds_alternative<FunctionPtr>(on_it->second.value)) {
+            FunctionPtr on_fn = std::get<FunctionPtr>(on_it->second.value);
+            if (on_fn->is_native && on_fn->native_impl) {
+                try {
+                    on_fn->native_impl({Value{std::string("drain")}, Value{drain_fn}}, env, evt_tok);
+                } catch (...) {}
+            }
+        }
+
+        // ✅ END HANDLER - call end() on writable when req ends
+        if (end_on_finish) {
+            auto end_handler = [dest_obj](const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
+                auto end_it = dest_obj->properties.find("end");
+                if (end_it == dest_obj->properties.end()) return std::monostate{};
+
+                if (!std::holds_alternative<FunctionPtr>(end_it->second.value)) return std::monostate{};
+
+                FunctionPtr end_fn = std::get<FunctionPtr>(end_it->second.value);
+
+                if (end_fn->is_native && end_fn->native_impl) {
+                    try {
+                        return end_fn->native_impl({}, env, token);
+                    } catch (...) {
+                        return std::monostate{};
+                    }
+                }
+
+                return std::monostate{};
+            };
+
+            auto end_fn = std::make_shared<FunctionValue>("req-pipe.end", end_handler, nullptr, evt_tok);
+            state->end_listeners.push_back(end_fn);
+        }
+
+        // Return destination for chaining
+        return Value{dest_obj};
+    };
+    req_obj->properties["pipe"] = {
+        Value{std::make_shared<FunctionValue>("req.pipe", pipe_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
     state->req_stream_obj = req_obj;
 
     // Build response object
     auto res_obj = std::make_shared<ObjectValue>();
+
+    static std::atomic<long long> g_next_http_response_id{1000000};  // Start high to avoid collision
+    res_obj->properties["_id"] = {
+        Value{static_cast<double>(g_next_http_response_id.fetch_add(1))},
+        false, false, true, Token{}};
 
     // res.writeHead(statusCode, headers?)
     auto writeHead_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
@@ -938,6 +1092,33 @@ static int on_headers_complete(llhttp_t* parser) {
     };
     res_obj->properties["end"] = {
         Value{std::make_shared<FunctionValue>("res.end", end_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.on(event, callback)
+    auto res_on_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.size() < 2 || !std::holds_alternative<std::string>(args[0]) ||
+            !std::holds_alternative<FunctionPtr>(args[1])) {
+            throw SwaziError("TypeError", "res.on(event, callback) requires event and function", token.loc);
+        }
+
+        std::string event = std::get<std::string>(args[0]);
+        FunctionPtr callback = std::get<FunctionPtr>(args[1]);
+
+        if (event == "drain") {
+            // Store on the response object so write completion can fire it
+            state->response->drain_listeners.push_back(callback);
+        } else if (event == "finish") {
+            // Optional: map to end/finish semantics if you want
+        } else if (event == "error") {
+            // Optional: store error listeners if desired
+        } else {
+            // Unknown event: ignore or throw depending on your policy
+        }
+
+        return std::monostate{};
+    };
+    res_obj->properties["on"] = {
+        Value{std::make_shared<FunctionValue>("res.on", res_on_impl, nullptr, Token{})},
         false, false, false, Token{}};
 
     // res.status(code)
@@ -1194,6 +1375,8 @@ static void on_connection(uv_stream_t* server, int status) {
         state->evaluator = srv->evaluator;
         state->response = std::make_shared<HttpResponse>();
         state->response->client = (uv_stream_t*)client;
+        state->response->env = state->env;
+        state->response->evaluator = state->evaluator;
 
         llhttp_settings_init(&state->settings);
         state->settings.on_url = on_url;
