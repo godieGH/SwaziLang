@@ -20,6 +20,110 @@
 #include "builtins.hpp"
 #include "evaluator.hpp"
 
+// ============================================================================
+// CASE-INSENSITIVE HEADER MAP
+// ============================================================================
+
+struct CaseInsensitiveCompare {
+    bool operator()(const std::string& a, const std::string& b) const {
+        return std::lexicographical_compare(
+            a.begin(), a.end(),
+            b.begin(), b.end(),
+            [](unsigned char ca, unsigned char cb) {
+                return std::tolower(ca) < std::tolower(cb);
+            });
+    }
+};
+
+// Wrapper class for headers that preserves original case
+class HeaderMap {
+   private:
+    std::map<std::string, std::string, CaseInsensitiveCompare> headers_;
+    std::map<std::string, std::string, CaseInsensitiveCompare> original_case_;
+
+   public:
+    void set(const std::string& name, const std::string& value) {
+        headers_[name] = value;
+        // Preserve the FIRST casing used (Node.js behavior)
+        if (original_case_.find(name) == original_case_.end()) {
+            original_case_[name] = name;
+        }
+    }
+
+    std::optional<std::string> get(const std::string& name) const {
+        auto it = headers_.find(name);
+        if (it == headers_.end()) return std::nullopt;
+        return it->second;
+    }
+
+    bool has(const std::string& name) const {
+        return headers_.find(name) != headers_.end();
+    }
+
+    void remove(const std::string& name) {
+        headers_.erase(name);
+        original_case_.erase(name);
+    }
+
+    void clear() {
+        headers_.clear();
+        original_case_.clear();
+    }
+
+    // Iterator support for sending headers with original casing
+    class iterator {
+       private:
+        std::map<std::string, std::string, CaseInsensitiveCompare>::const_iterator it_;
+        const std::map<std::string, std::string, CaseInsensitiveCompare>* original_case_;
+
+       public:
+        iterator(
+            std::map<std::string, std::string, CaseInsensitiveCompare>::const_iterator it,
+            const std::map<std::string, std::string, CaseInsensitiveCompare>* original_case)
+            : it_(it), original_case_(original_case) {}
+
+        iterator& operator++() {
+            ++it_;
+            return *this;
+        }
+        bool operator!=(const iterator& other) const { return it_ != other.it_; }
+
+        std::pair<std::string, std::string> operator*() const {
+            auto orig_it = original_case_->find(it_->first);
+            std::string original_name = (orig_it != original_case_->end())
+                ? orig_it->second
+                : it_->first;
+            return {original_name, it_->second};
+        }
+    };
+
+    iterator begin() const {
+        return iterator(headers_.begin(), &original_case_);
+    }
+
+    iterator end() const {
+        return iterator(headers_.end(), &original_case_);
+    }
+
+    size_t size() const {
+        return headers_.size();
+    }
+
+    bool empty() const {
+        return headers_.empty();
+    }
+
+    // Get all headers as object (for JavaScript)
+    std::map<std::string, std::string> to_map() const {
+        std::map<std::string, std::string> result;
+        for (auto it = begin(); it != end(); ++it) {
+            auto kv = *it;
+            result[kv.first] = kv.second;
+        }
+        return result;
+    }
+};
+
 static void alloc_buffer(uv_handle_t*, size_t suggested_size, uv_buf_t* buf);
 static void on_read(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
 
@@ -45,13 +149,10 @@ static std::string value_to_string_simple_local(const Value& v) {
 struct HttpResponse {
     int status_code = 200;
     std::string reason;
-    std::map<std::string, std::string> headers;
-    bool headers_sent = false;
+    HeaderMap headers;
     uv_stream_t* client = nullptr;
     bool chunked_mode = false;
     bool finished = false;
-
-    std::map<std::string, std::string>* request_headers = nullptr;
 
     bool sendfile_active = false;
     FunctionPtr sendfile_callback = nullptr;
@@ -88,42 +189,6 @@ struct HttpResponse {
         }
     }
 
-    void send_headers() {
-        if (headers_sent || !client) return;
-
-        std::ostringstream response;
-        std::string rp = !reason.empty() ? reason : reason_for_code(status_code);
-
-        response << "HTTP/1.1 " << status_code;
-        if (!rp.empty()) response << " " << rp;
-        response << "\r\n";
-
-        if (headers.find("Content-Type") == headers.end() &&
-            headers.find("content-type") == headers.end()) {
-            headers["Content-Type"] = "text/plain";
-        }
-
-        for (const auto& kv : headers) {
-            response << kv.first << ": " << kv.second << "\r\n";
-        }
-        response << "\r\n";
-
-        std::string out = response.str();
-        char* buf = static_cast<char*>(malloc(out.size()));
-        memcpy(buf, out.data(), out.size());
-        uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(out.size()));
-
-        uv_write_t* req = new uv_write_t;
-        req->data = buf;
-
-        uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
-            if (req->data) free(req->data);
-            delete req;
-        });
-
-        headers_sent = true;
-    }
-
     bool write_chunk(const std::vector<uint8_t>& data) {
         if (!client || finished) return false;
 
@@ -133,10 +198,10 @@ struct HttpResponse {
             return false;
         }
 
-        if (!headers_sent) {
+        if (!headers_flushed) {
             chunked_mode = true;
-            headers["Transfer-Encoding"] = "chunked";
-            send_headers();
+            headers.set("Transfer-Encoding", "chunked");
+            flush_headers();
         }
 
         if (data.empty()) return true;
@@ -185,14 +250,18 @@ struct HttpResponse {
 
         finished = true;
 
-        headers["Connection"] = "close";
+        headers.set("Connection", "close");
+
+        if (!headers_flushed) {
+            if (!final_data.empty()) {
+                headers.set("Content-Length", std::to_string(final_data.size()));
+            } else {
+                headers.set("Content-Length", "0");
+            }
+            flush_headers();
+        }
 
         if (chunked_mode) {
-            if (!headers_sent) {
-                headers["Transfer-Encoding"] = "chunked";
-                send_headers();
-            }
-
             if (!final_data.empty()) {
                 std::ostringstream chunk_header;
                 chunk_header << std::hex << final_data.size() << "\r\n";
@@ -229,11 +298,6 @@ struct HttpResponse {
                 delete req;
             });
         } else {
-            if (!headers_sent) {
-                headers["Content-Length"] = std::to_string(final_data.size());
-                send_headers();
-            }
-
             if (!final_data.empty()) {
                 char* buf = static_cast<char*>(malloc(final_data.size()));
                 memcpy(buf, final_data.data(), final_data.size());
@@ -253,6 +317,45 @@ struct HttpResponse {
     FilePtr file_source = nullptr;
     uint64_t file_bytes_sent = 0;
     uint64_t file_total_size = 0;
+
+    bool headers_flushed = false;
+
+    void flush_headers() {
+        if (headers_flushed || !client) return;
+        headers_flushed = true;
+
+        std::ostringstream response;
+        std::string rp = !reason.empty() ? reason : reason_for_code(status_code);
+
+        response << "HTTP/1.1 " << status_code;
+        if (!rp.empty()) response << " " << rp;
+        response << "\r\n";
+
+        // ✅ Add default Content-Type if missing (case-insensitive check)
+        if (!headers.has("Content-Type")) {
+            headers.set("Content-Type", "text/plain");
+        }
+
+        // ✅ Iterate with original casing preserved
+        for (auto it = headers.begin(); it != headers.end(); ++it) {
+            auto kv = *it;
+            response << kv.first << ": " << kv.second << "\r\n";
+        }
+        response << "\r\n";
+
+        std::string out = response.str();
+        char* buf = static_cast<char*>(malloc(out.size()));
+        memcpy(buf, out.data(), out.size());
+        uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(out.size()));
+
+        uv_write_t* req = new uv_write_t;
+        req->data = buf;
+
+        uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
+            if (req->data) free(req->data);
+            delete req;
+        });
+    }
 
     struct FileStreamContext {
         HttpResponse* response;
@@ -417,8 +520,10 @@ struct HttpResponse {
 
         // Start streaming
         chunked_mode = true;
-        headers["Transfer-Encoding"] = "chunked";
-        send_headers();
+        if (!headers_flushed) {
+            headers.set("Transfer-Encoding", "chunked");
+            flush_headers();
+        }
         stream_file_chunk();
     }
 };
@@ -439,7 +544,7 @@ struct HttpRequestState {
     std::string url;
     std::string path;
     std::string query;
-    std::map<std::string, std::string> headers;
+    HeaderMap headers;
     std::string current_header_field;
 
     bool headers_complete = false;
@@ -546,10 +651,10 @@ static int on_header_field(llhttp_t* parser, const char* at, size_t length) {
 
 static int on_header_value(llhttp_t* parser, const char* at, size_t length) {
     auto* state = static_cast<HttpRequestState*>(parser->data);
-    state->headers[state->current_header_field].assign(at, length);
+    std::string value(at, length);
+    state->headers.set(state->current_header_field, value);  // ✅ Case-insensitive
     return 0;
 }
-
 static int on_headers_complete(llhttp_t* parser) {
     auto* state = static_cast<HttpRequestState*>(parser->data);
     state->headers_complete = true;
@@ -599,7 +704,8 @@ static int on_headers_complete(llhttp_t* parser) {
     req_obj->properties["url"] = {Value{state->url}, false, false, true, Token{}};
 
     auto headers_obj = std::make_shared<ObjectValue>();
-    for (const auto& kv : state->headers) {
+    for (auto it = state->headers.begin(); it != state->headers.end(); ++it) {
+        auto kv = *it;
         headers_obj->properties[kv.first] = {Value{kv.second}, false, false, true, Token{}};
     }
     req_obj->properties["headers"] = {Value{headers_obj}, false, false, true, Token{}};
@@ -669,22 +775,32 @@ static int on_headers_complete(llhttp_t* parser) {
 
     // res.writeHead(statusCode, headers?)
     auto writeHead_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (state->response->headers_flushed) {
+            throw SwaziError("Error", "Cannot write head after headers sent", token.loc);
+        }
         if (args.empty()) {
             throw SwaziError("TypeError", "writeHead requires status code", token.loc);
         }
 
         int code = static_cast<int>(std::get<double>(args[0]));
         state->response->status_code = code;
-        state->response->reason = HttpResponse::reason_for_code(code);
 
-        if (args.size() >= 2 && std::holds_alternative<ObjectPtr>(args[1])) {
-            ObjectPtr hdrs = std::get<ObjectPtr>(args[1]);
+        // Optional reason phrase
+        if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) {
+            state->response->reason = std::get<std::string>(args[1]);
+        } else {
+            state->response->reason = HttpResponse::reason_for_code(code);
+        }
+
+        // Optional headers object
+        size_t headers_idx = (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) ? 2 : 1;
+        if (args.size() > headers_idx && std::holds_alternative<ObjectPtr>(args[headers_idx])) {
+            ObjectPtr hdrs = std::get<ObjectPtr>(args[headers_idx]);
             for (const auto& kv : hdrs->properties) {
-                state->response->headers[kv.first] = value_to_string_simple_local(kv.second.value);
+                state->response->headers.set(kv.first, value_to_string_simple_local(kv.second.value));
             }
         }
 
-        state->response->send_headers();
         return std::monostate{};
     };
     res_obj->properties["writeHead"] = {
@@ -698,12 +814,70 @@ static int on_headers_complete(llhttp_t* parser) {
         }
         std::string name = value_to_string_simple_local(args[0]);
         std::string value = value_to_string_simple_local(args[1]);
-        state->response->headers[name] = value;
+        state->response->headers.set(name, value);  // ✅ Case-insensitive
         return std::monostate{};
     };
     res_obj->properties["setHeader"] = {
         Value{std::make_shared<FunctionValue>("res.setHeader", setHeader_impl, nullptr, Token{})},
         false, false, false, Token{}};
+
+    // res.removeHeader(name)
+    auto removeHeader_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (state->response->headers_flushed) {
+            throw SwaziError("Error", "Cannot remove headers after they are sent", token.loc);
+        }
+        if (args.empty()) {
+            throw SwaziError("TypeError", "removeHeader requires name", token.loc);
+        }
+        std::string name = value_to_string_simple_local(args[0]);
+        state->response->headers.remove(name);  // ✅ Case-insensitive
+        return std::monostate{};
+    };
+    res_obj->properties["removeHeader"] = {
+        Value{std::make_shared<FunctionValue>("res.removeHeader", removeHeader_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.hasHeader(name)
+    auto hasHeader_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "hasHeader requires name", token.loc);
+        }
+        std::string name = value_to_string_simple_local(args[0]);
+        return Value{state->response->headers.has(name)};  // ✅ Case-insensitive
+    };
+    res_obj->properties["hasHeader"] = {
+        Value{std::make_shared<FunctionValue>("res.hasHeader", hasHeader_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.getHeaders()
+    auto getHeaders_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        auto headers_obj = std::make_shared<ObjectValue>();
+        for (auto it = state->response->headers.begin(); it != state->response->headers.end(); ++it) {
+            auto kv = *it;
+            headers_obj->properties[kv.first] = {Value{kv.second}, false, false, true, Token{}};
+        }
+        return Value{headers_obj};
+    };
+    res_obj->properties["getHeaders"] = {
+        Value{std::make_shared<FunctionValue>("res.getHeaders", getHeaders_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.flushHeaders()
+    auto flushHeaders_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        state->response->flush_headers();
+        return std::monostate{};
+    };
+    res_obj->properties["flushHeaders"] = {
+        Value{std::make_shared<FunctionValue>("res.flushHeaders", flushHeaders_impl, nullptr, Token{})},
+        false, false, false, Token{}};
+
+    // res.headersSent (property)
+    auto headersSent_getter = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        return Value{state->response->headers_flushed};
+    };
+    res_obj->properties["headersSent"] = {
+        Value{std::make_shared<FunctionValue>("get_headersSent", headersSent_getter, nullptr, Token{})},
+        false, true /* second true means a getter */, true, Token{}};
 
     // res.getHeader(name)
     auto getHeader_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
@@ -711,8 +885,9 @@ static int on_headers_complete(llhttp_t* parser) {
             throw SwaziError("TypeError", "getHeader requires name", token.loc);
         }
         std::string name = value_to_string_simple_local(args[0]);
-        auto it = state->response->headers.find(name);
-        return (it != state->response->headers.end()) ? Value{it->second} : Value{std::monostate{}};
+        auto val = state->response->headers.get(name);
+        if (!val.has_value()) return Value{std::monostate{}};
+        return Value{val.value()};
     };
     res_obj->properties["getHeader"] = {
         Value{std::make_shared<FunctionValue>("res.getHeader", getHeader_impl, nullptr, Token{})},
@@ -804,20 +979,19 @@ static int on_headers_complete(llhttp_t* parser) {
         }
 
         std::string location = std::get<std::string>(args[0]);
-        int status = 302;  // Default to 302 Found
+        int status = 302;
 
         if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
             status = static_cast<int>(std::get<double>(args[1]));
         }
 
-        // Validate redirect status codes
         if (status != 301 && status != 302 && status != 303 &&
             status != 307 && status != 308) {
-            status = 302;  // Default to safe redirect
+            status = 302;
         }
 
         state->response->status_code = status;
-        state->response->headers["Location"] = location;
+        state->response->headers.set("Location", location);  // ✅ Case-insensitive
         state->response->end_response();
 
         return std::monostate{};
@@ -839,6 +1013,13 @@ static int on_headers_complete(llhttp_t* parser) {
                 state->env,
                 Token{});
         } catch (const std::exception& e) {
+            if (!state->response->headers_flushed && !state->response->finished) {
+                state->response->status_code = 500;
+                state->response->headers.set("Content-Type", "text/plain");  // ✅
+                std::string error_msg = "Internal Server Error\n";
+                std::vector<uint8_t> data(error_msg.begin(), error_msg.end());
+                state->response->end_response(data);
+            }
             // Handler threw - emit error to error listeners
             for (const auto& listener : state->error_listeners) {
                 if (listener) {
@@ -852,6 +1033,13 @@ static int on_headers_complete(llhttp_t* parser) {
                 }
             }
         } catch (...) {
+            if (!state->response->headers_flushed && !state->response->finished) {
+                state->response->status_code = 500;
+                state->response->headers.set("Content-Type", "text/plain");  // ✅
+                std::string error_msg = "Internal Server Error\n";
+                std::vector<uint8_t> data(error_msg.begin(), error_msg.end());
+                state->response->end_response(data);
+            }
             // Unknown error
             for (const auto& listener : state->error_listeners) {
                 if (listener) {

@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <string>
 #include <vector>
@@ -26,6 +27,97 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #endif
+
+// ============================================================================
+// CASE-INSENSITIVE HEADER MAP (shared with server)
+// ============================================================================
+
+struct CaseInsensitiveCompare {
+    bool operator()(const std::string& a, const std::string& b) const {
+        return std::lexicographical_compare(
+            a.begin(), a.end(),
+            b.begin(), b.end(),
+            [](unsigned char ca, unsigned char cb) {
+                return std::tolower(ca) < std::tolower(cb);
+            });
+    }
+};
+
+class HeaderMap {
+   private:
+    std::map<std::string, std::string, CaseInsensitiveCompare> headers_;
+    std::map<std::string, std::string, CaseInsensitiveCompare> original_case_;
+
+   public:
+    void set(const std::string& name, const std::string& value) {
+        headers_[name] = value;
+        if (original_case_.find(name) == original_case_.end()) {
+            original_case_[name] = name;
+        }
+    }
+
+    std::optional<std::string> get(const std::string& name) const {
+        auto it = headers_.find(name);
+        if (it == headers_.end()) return std::nullopt;
+        return it->second;
+    }
+
+    bool has(const std::string& name) const {
+        return headers_.find(name) != headers_.end();
+    }
+
+    void remove(const std::string& name) {
+        headers_.erase(name);
+        original_case_.erase(name);
+    }
+
+    void clear() {
+        headers_.clear();
+        original_case_.clear();
+    }
+
+    class iterator {
+       private:
+        std::map<std::string, std::string, CaseInsensitiveCompare>::const_iterator it_;
+        const std::map<std::string, std::string, CaseInsensitiveCompare>* original_case_;
+
+       public:
+        iterator(
+            std::map<std::string, std::string, CaseInsensitiveCompare>::const_iterator it,
+            const std::map<std::string, std::string, CaseInsensitiveCompare>* original_case)
+            : it_(it), original_case_(original_case) {}
+
+        iterator& operator++() {
+            ++it_;
+            return *this;
+        }
+        bool operator!=(const iterator& other) const { return it_ != other.it_; }
+
+        std::pair<std::string, std::string> operator*() const {
+            auto orig_it = original_case_->find(it_->first);
+            std::string original_name = (orig_it != original_case_->end())
+                ? orig_it->second
+                : it_->first;
+            return {original_name, it_->second};
+        }
+    };
+
+    iterator begin() const {
+        return iterator(headers_.begin(), &original_case_);
+    }
+
+    iterator end() const {
+        return iterator(headers_.end(), &original_case_);
+    }
+
+    size_t size() const {
+        return headers_.size();
+    }
+
+    bool empty() const {
+        return headers_.empty();
+    }
+};
 
 // ============================================================================
 // STRUCTURES
@@ -63,9 +155,8 @@ struct HttpClientRequest {
     int port = 80;
     std::string method;
     std::string path;
-    std::map<std::string, std::string> request_headers;
-
-    std::shared_ptr<std::map<std::string, std::string>> response_headers;
+    HeaderMap request_headers;
+    std::shared_ptr<HeaderMap> response_headers;
     long status_code = 0;
     std::shared_ptr<std::string> status_text;
 
@@ -329,11 +420,13 @@ static int on_header_field(llhttp_t* parser, const char* at, size_t length) {
 
 static int on_header_value(llhttp_t* parser, const char* at, size_t length) {
     auto* req = static_cast<HttpClientRequest*>(parser->data);
-    (*req->response_headers)[req->current_header_field].assign(at, length);
+    std::string value(at, length);
+
+    req->response_headers->set(req->current_header_field, value);
 
     if (req->current_header_field == "content-length") {
         try {
-            req->content_length = std::stoull(std::string(at, length));
+            req->content_length = std::stoull(value);
         } catch (...) {
             req->content_length = 0;
         }
@@ -356,7 +449,8 @@ static int on_headers_complete(llhttp_t* parser) {
         Value{req->url}, false, false, true, Token{}};
 
     auto headers_obj = std::make_shared<ObjectValue>();
-    for (const auto& kv : *req->response_headers) {
+    for (auto it = req->response_headers->begin(); it != req->response_headers->end(); ++it) {
+        auto kv = *it;
         headers_obj->properties[kv.first] = PropertyDescriptor{
             Value{kv.second}, false, false, true, Token{}};
     }
@@ -615,8 +709,9 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                     request_stream << req->method << " " << req->path << " HTTP/1.1\r\n";
                     request_stream << "Host: " << req->host << "\r\n";
 
-                    for (const auto& hdr : req->request_headers) {
-                        request_stream << hdr.first << ": " << hdr.second << "\r\n";
+                    for (auto it = req->request_headers.begin(); it != req->request_headers.end(); ++it) {
+                        auto kv = *it;
+                        request_stream << kv.first << ": " << kv.second << "\r\n";
                     }
 
                     request_stream << "\r\n";
@@ -704,8 +799,9 @@ static void send_initial_request(HttpClientRequest* req) {
     request_stream << "Host: " << req->host << "\r\n";
     request_stream << "Connection: close\r\n";  // Always close connection
 
-    for (const auto& hdr : req->request_headers) {
-        request_stream << hdr.first << ": " << hdr.second << "\r\n";
+    for (auto it = req->request_headers.begin(); it != req->request_headers.end(); ++it) {
+        auto kv = *it;
+        request_stream << kv.first << ": " << kv.second << "\r\n";
     }
 
     request_stream << "\r\n";
@@ -837,7 +933,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
 
     // Parse options
     std::string method = "GET";
-    std::map<std::string, std::string> headers;
+    HeaderMap headers;
 
     // Create request object
     auto* req = new HttpClientRequest();
@@ -858,14 +954,13 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
         }
 
         auto headers_it = opts->properties.find("headers");
-        if (headers_it != opts->properties.end() &&
+        if (headers_it != opts->properties.end() &&  // ✅ Compare to opts->properties.end()
             std::holds_alternative<ObjectPtr>(headers_it->second.value)) {
             ObjectPtr hdrs = std::get<ObjectPtr>(headers_it->second.value);
             for (const auto& kv : hdrs->properties) {
-                headers[kv.first] = value_to_string_simple(kv.second.value);
+                headers.set(kv.first, value_to_string_simple(kv.second.value));
             }
         }
-
         auto it_body = opts->properties.find("body");
         if (it_body != opts->properties.end()) {
             const Value& body_val = it_body->second.value;
@@ -905,7 +1000,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
     req->request_headers = headers;
     req->evaluator = evaluator;
 
-    req->response_headers = std::make_shared<std::map<std::string, std::string>>();
+    req->response_headers = std::make_shared<HeaderMap>();
     req->status_text = std::make_shared<std::string>();
 
     req->handlers = std::make_shared<StreamEventHandlers>();
@@ -925,15 +1020,13 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
     req->parser.data = req;
 
     if (req->has_fixed_body) {
-        // Strategy A: Fixed Body (Buffer or File) -> Content-Length
         uint64_t len = req->file_source ? req->file_size : req->body_buffer.size();
-        req->request_headers["Content-Length"] = std::to_string(len);
-        req->upload_size = len;  // For progress events
+        req->request_headers.set("Content-Length", std::to_string(len));  // ✅
+        req->upload_size = len;
     } else if (req->method != "GET" && req->method != "HEAD") {
-        // Strategy B: No body provided -> Assume Streaming (Chunked)
-        // Only if user didn't manually set Content-Length
-        if (req->request_headers.find("Content-Length") == req->request_headers.end()) {
-            req->request_headers["Transfer-Encoding"] = "chunked";
+        // ✅ Use has() instead of find()
+        if (!req->request_headers.has("Content-Length")) {
+            req->request_headers.set("Transfer-Encoding", "chunked");  // ✅
             req->is_chunked = true;
         }
     }
@@ -1174,7 +1267,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
         std::string name = value_to_string_simple(args[0]);
         std::string value = value_to_string_simple(args[1]);
 
-        req->request_headers[name] = value;
+        req->request_headers.set(name, value);  // ✅ Use HeaderMap
 
         return std::monostate{};
     };
@@ -1189,13 +1282,10 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
         }
 
         std::string name = value_to_string_simple(args[0]);
-        auto it = req->request_headers.find(name);
+        auto val = req->request_headers.get(name);  // ✅ Use HeaderMap
+        if (!val.has_value()) return Value{std::monostate{}};
 
-        if (it != req->request_headers.end()) {
-            return Value{it->second};
-        }
-
-        return std::monostate{};
+        return Value{val.value()};
     };
     stream_obj->properties["getHeader"] = {
         Value{std::make_shared<FunctionValue>("request.getHeader", getHeader_impl, nullptr, tok)},
@@ -1212,7 +1302,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
         }
 
         std::string name = value_to_string_simple(args[0]);
-        req->request_headers.erase(name);
+        req->request_headers.remove(name);  // ✅ Use HeaderMap
 
         return std::monostate{};
     };
