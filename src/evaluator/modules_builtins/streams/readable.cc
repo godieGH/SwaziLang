@@ -329,7 +329,7 @@ void schedule_next_read(ReadableStreamStatePtr state) {
 
     if (state->fd < 0 || state->current_position >= state->stream_end) {
         state->ended = true;
-        emit_readable_event_sync(state, state->end_listeners, {});  // ✅ FIXED
+        emit_readable_event_sync(state, state->end_listeners, {});  // ��� FIXED
         if (state->auto_close) {
             state->close_file();
         }
@@ -468,7 +468,7 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
     };
     obj->properties["pause"] = {Value{std::make_shared<FunctionValue>("stream.pause", pause_impl, nullptr, tok)}, false, false, true, tok};
 
-    auto resume_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+    auto resume_impl = [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
         bool was_paused = state->paused;
         state->paused = false;
         state->flowing = true;
@@ -480,7 +480,7 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
     };
     obj->properties["resume"] = {Value{std::make_shared<FunctionValue>("stream.resume", resume_impl, nullptr, tok)}, false, false, true, tok};
 
-    auto destroy_impl = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+    auto destroy_impl = [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
         if (state->destroyed) return std::monostate{};
         state->destroyed = true;
         state->ended = true;
@@ -563,14 +563,13 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
             }
         }
 
-        // If not found in writable streams, assume it's a duplex and wire manually
+        // If not found in writable streams, wire up readable -> duplex manually using direct function calls
         if (!writable_state) {
-            // Wire up readable -> duplex manually using direct function calls
             Token evt_tok{};
             evt_tok.loc = TokenLocation("<pipe-to-duplex>", 0, 0, 0);
 
-            // Data handler: calls duplex.write(chunk) when data arrives
-            auto data_handler = [dest_obj, state](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+            // Data handler: calls dest.write(chunk) when data arrives
+            auto data_handler = [dest_obj, state, env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 if (args.empty()) return std::monostate{};
 
                 auto write_it = dest_obj->properties.find("write");
@@ -583,7 +582,17 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
                 // Call the write function - it's a native function so call native_impl directly
                 if (write_fn->is_native && write_fn->native_impl) {
                     try {
-                        return write_fn->native_impl({args[0]}, env, token);
+                        Value result = write_fn->native_impl({args[0]}, env, token);
+
+                        // BACKPRESSURE: if destination signals false, pause readable
+                        if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                            if (!state->paused) {
+                                state->paused = true;
+                                state->flowing = false;
+                            }
+                        }
+
+                        return result;
                     } catch (...) {
                         return Value{false};
                     }
@@ -597,7 +606,32 @@ ObjectPtr create_readable_stream_object(ReadableStreamStatePtr state) {
             auto data_fn = std::make_shared<FunctionValue>("pipe.data", data_handler, nullptr, evt_tok);
             state->data_listeners.push_back(data_fn);
 
-            // End handler: calls duplex.end() when readable ends (if end_on_finish is true)
+            // DRAIN handler - resume readable when destination signals drain
+            auto drain_handler = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                if (state->paused && !state->ended && !state->destroyed) {
+                    state->paused = false;
+                    state->flowing = true;
+                    if (!state->reading && !state->ended && !state->destroyed) {
+                        schedule_next_read(state);
+                    }
+                }
+                return std::monostate{};
+            };
+
+            auto drain_fn = std::make_shared<FunctionValue>("pipe.drain", drain_handler, nullptr, evt_tok);
+
+            // Attach drain listener to destination if it exposes an on() function
+            auto on_it = dest_obj->properties.find("on");
+            if (on_it != dest_obj->properties.end() && std::holds_alternative<FunctionPtr>(on_it->second.value)) {
+                FunctionPtr on_fn = std::get<FunctionPtr>(on_it->second.value);
+                if (on_fn->is_native && on_fn->native_impl) {
+                    try {
+                        on_fn->native_impl({Value{std::string("drain")}, Value{drain_fn}}, nullptr, evt_tok);
+                    } catch (...) {}
+                }
+            }
+
+            // End handler: calls dest.end() when readable ends (if end_on_finish is true)
             if (end_on_finish) {
                 auto end_handler = [dest_obj](const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
                     auto end_it = dest_obj->properties.find("end");
