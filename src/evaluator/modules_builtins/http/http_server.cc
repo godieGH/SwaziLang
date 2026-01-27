@@ -1,5 +1,6 @@
 // http_server.cc
 #include <llhttp.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <uv.h>
 
@@ -9,12 +10,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <optional>
-#include <sys/stat.h>
 
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"
@@ -222,36 +222,162 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
 
     // Process queued writes when capacity becomes available.
     void process_queued_writes() {
-        // We rely on the fact that writes and queue manipulation occur on the loop thread in current architecture.
-        // This method will pop from the queue while we have capacity and schedule writes.
         while (!write_queue.empty() && pending_writes.load() < MAX_PENDING_WRITES && client && !finished) {
             auto data = std::move(write_queue.front());
             write_queue.pop_front();
 
-            // Build chunk header
             if (!headers_flushed) {
-                chunked_mode = true;
-                headers.set("Transfer-Encoding", "chunked");
+                if (!headers.has("Content-Length")) {
+                    chunked_mode = true;
+                    headers.set("Transfer-Encoding", "chunked");
+                }
                 flush_headers();
             }
 
             if (data.empty()) {
-                continue;  // nothing to write
+                continue;
             }
 
-            std::ostringstream chunk_header;
-            chunk_header << std::hex << data.size() << "\r\n";
-            std::string hdr = chunk_header.str();
+            if (!chunked_mode) {
+                // Send raw data without chunk framing
+                char* buf = static_cast<char*>(malloc(data.size()));
+                memcpy(buf, data.data(), data.size());
+                uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(data.size()));
+                uv_write_t* req = new uv_write_t;
 
-            size_t total_size = hdr.size() + data.size() + 2;
-            char* buf = static_cast<char*>(malloc(total_size));
+                struct WriteContext {
+                    char* buffer;
+                    std::shared_ptr<HttpResponse> response;
+                };
 
-            memcpy(buf, hdr.data(), hdr.size());
-            memcpy(buf + hdr.size(), data.data(), data.size());
-            buf[total_size - 2] = '\r';
-            buf[total_size - 1] = '\n';
+                std::shared_ptr<HttpResponse> self = shared_from_this();
+                auto* ctx = new WriteContext{buf, self};
+                req->data = ctx;
 
-            uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(total_size));
+                pending_writes.fetch_add(1);
+
+                uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
+                    auto* ctx = static_cast<WriteContext*>(req->data);
+                    std::shared_ptr<HttpResponse> resp = ctx->response;
+
+                    resp->pending_writes.fetch_sub(1);
+
+                    if (ctx->buffer) free(ctx->buffer);
+                    delete ctx;
+                    delete req;
+
+                    resp->process_queued_writes();
+
+                    if (resp->write_queue_backpressure && resp->write_queue.empty() && resp->pending_writes.load() < HttpResponse::MAX_PENDING_WRITES) {
+                        resp->write_queue_backpressure = false;
+                        resp->emit_drain();
+                    }
+
+                    if (resp->close_requested.load() && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
+                        resp->perform_close();
+                    }
+                });
+            } else {
+                // Chunked mode: apply chunk framing
+                std::ostringstream chunk_header;
+                chunk_header << std::hex << data.size() << "\r\n";
+                std::string hdr = chunk_header.str();
+
+                size_t total_size = hdr.size() + data.size() + 2;
+                char* buf = static_cast<char*>(malloc(total_size));
+
+                memcpy(buf, hdr.data(), hdr.size());
+                memcpy(buf + hdr.size(), data.data(), data.size());
+                buf[total_size - 2] = '\r';
+                buf[total_size - 1] = '\n';
+
+                uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(total_size));
+                uv_write_t* req = new uv_write_t;
+
+                struct WriteContext {
+                    char* buffer;
+                    std::shared_ptr<HttpResponse> response;
+                };
+
+                std::shared_ptr<HttpResponse> self = shared_from_this();
+                auto* ctx = new WriteContext{buf, self};
+                req->data = ctx;
+
+                pending_writes.fetch_add(1);
+
+                uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
+                    auto* ctx = static_cast<WriteContext*>(req->data);
+                    std::shared_ptr<HttpResponse> resp = ctx->response;
+
+                    resp->pending_writes.fetch_sub(1);
+
+                    if (ctx->buffer) free(ctx->buffer);
+                    delete ctx;
+                    delete req;
+
+                    resp->process_queued_writes();
+
+                    if (resp->write_queue_backpressure && resp->write_queue.empty() && resp->pending_writes.load() < HttpResponse::MAX_PENDING_WRITES) {
+                        resp->write_queue_backpressure = false;
+                        resp->emit_drain();
+                    }
+
+                    if (resp->finished && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
+                        if (resp->chunked_mode) {
+                            const char* terminator = "0\r\n\r\n";
+                            char* term_buf = static_cast<char*>(malloc(5));
+                            memcpy(term_buf, terminator, 5);
+                            uv_buf_t term_uvbuf = uv_buf_init(term_buf, 5);
+
+                            uv_write_t* term_req = new uv_write_t;
+                            term_req->data = term_buf;
+
+                            uv_write(term_req, resp->client, &term_uvbuf, 1, [](uv_write_t* req, int) {
+                                if (req->data) free(req->data);
+                                delete req;
+                            });
+                        }
+                    }
+
+                    if (resp->close_requested.load() && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
+                        resp->perform_close();
+                    }
+                });
+            }
+        }
+
+        if (write_queue_backpressure && write_queue.empty() && pending_writes.load() < MAX_PENDING_WRITES) {
+            write_queue_backpressure = false;
+            emit_drain();
+        }
+    }
+    bool write_chunk(const std::vector<uint8_t>& data) {
+        if (!client || finished) return false;
+
+        if (sendfile_active) return false;
+
+        if (pending_writes.load() >= MAX_PENDING_WRITES) {
+            write_queue.emplace_back(data);
+            write_queue_backpressure = true;
+            return false;
+        }
+
+        if (!headers_flushed) {
+            if (!headers.has("Content-Length")) {
+                chunked_mode = true;
+                headers.set("Transfer-Encoding", "chunked");
+            }
+            flush_headers();
+        }
+
+        if (data.empty()) return true;
+
+        if (!chunked_mode) {
+            // Send raw data without chunk framing
+            char* buf = static_cast<char*>(malloc(data.size()));
+            memcpy(buf, data.data(), data.size());
+
+            uv_buf_t uvbuf = uv_buf_init(buf, static_cast<unsigned int>(data.size()));
             uv_write_t* req = new uv_write_t;
 
             struct WriteContext {
@@ -259,7 +385,6 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
                 std::shared_ptr<HttpResponse> response;
             };
 
-            // Keep response alive for the lifetime of the write
             std::shared_ptr<HttpResponse> self = shared_from_this();
             auto* ctx = new WriteContext{buf, self};
             req->data = ctx;
@@ -268,77 +393,31 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
 
             uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
                 auto* ctx = static_cast<WriteContext*>(req->data);
-                std::shared_ptr<HttpResponse> resp = ctx->response;  // shared_ptr keeps it alive here
+                std::shared_ptr<HttpResponse> resp = ctx->response;
 
-                // decrement pending_writes
                 resp->pending_writes.fetch_sub(1);
 
                 if (ctx->buffer) free(ctx->buffer);
                 delete ctx;
                 delete req;
 
-                // After freeing capacity, let resp process more queued writes
                 resp->process_queued_writes();
 
-                // If we've drained the queue and are below the threshold, fire drain
-                if (resp->write_queue_backpressure && resp->write_queue.empty() && resp->pending_writes.load() < HttpResponse::MAX_PENDING_WRITES) {
+                if (resp->write_queue_backpressure && resp->write_queue.empty() &&
+                    resp->pending_writes.load() < HttpResponse::MAX_PENDING_WRITES) {
                     resp->write_queue_backpressure = false;
                     resp->emit_drain();
                 }
 
-                // If response finished and nothing outstanding, send terminator if chunked
-                if (resp->finished && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
-                    if (resp->chunked_mode) {
-                        const char* terminator = "0\r\n\r\n";
-                        char* term_buf = static_cast<char*>(malloc(5));
-                        memcpy(term_buf, terminator, 5);
-                        uv_buf_t term_uvbuf = uv_buf_init(term_buf, 5);
-
-                        uv_write_t* term_req = new uv_write_t;
-                        term_req->data = term_buf;
-
-                        uv_write(term_req, resp->client, &term_uvbuf, 1, [](uv_write_t* req, int) {
-                            if (req->data) free(req->data);
-                            delete req;
-                        });
-                    }
-                }
-
-                // If a close was requested and we're now fully drained, perform close
                 if (resp->close_requested.load() && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
                     resp->perform_close();
                 }
             });
+
+            return true;
         }
 
-        // If we queued earlier and have now emptied the queue & are below MAX, emit drain
-        if (write_queue_backpressure && write_queue.empty() && pending_writes.load() < MAX_PENDING_WRITES) {
-            write_queue_backpressure = false;
-            emit_drain();
-        }
-    }
-
-    bool write_chunk(const std::vector<uint8_t>& data) {
-        if (!client || finished) return false;
-
-        if (sendfile_active) return false;
-
-        // If we're at capacity, enqueue the chunk instead of dropping it.
-        if (pending_writes.load() >= MAX_PENDING_WRITES) {
-            write_queue.emplace_back(data);
-            write_queue_backpressure = true;
-            // Return false to indicate backpressure to caller
-            return false;
-        }
-
-        if (!headers_flushed) {
-            chunked_mode = true;
-            headers.set("Transfer-Encoding", "chunked");
-            flush_headers();
-        }
-
-        if (data.empty()) return true;
-
+        // Chunked mode: apply chunk framing
         std::ostringstream chunk_header;
         chunk_header << std::hex << data.size() << "\r\n";
         std::string hdr = chunk_header.str();
@@ -363,31 +442,26 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
         auto* ctx = new WriteContext{buf, self};
         req->data = ctx;
 
-        // increment pending_writes
         pending_writes.fetch_add(1);
 
         uv_write(req, client, &uvbuf, 1, [](uv_write_t* req, int) {
             auto* ctx = static_cast<WriteContext*>(req->data);
             std::shared_ptr<HttpResponse> resp = ctx->response;
 
-            // decrement pending_writes
             resp->pending_writes.fetch_sub(1);
 
             if (ctx->buffer) free(ctx->buffer);
             delete ctx;
             delete req;
 
-            // After capacity freed, try to process any queued writes.
             resp->process_queued_writes();
 
-            // NOTE: we only emit drain when queue is empty and pending < MAX
             if (resp->write_queue_backpressure && resp->write_queue.empty() &&
                 resp->pending_writes.load() < HttpResponse::MAX_PENDING_WRITES) {
                 resp->write_queue_backpressure = false;
                 resp->emit_drain();
             }
 
-            // If response finished and nothing outstanding, send terminator if chunked
             if (resp->finished && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
                 if (resp->chunked_mode) {
                     const char* terminator = "0\r\n\r\n";
@@ -405,7 +479,6 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
                 }
             }
 
-            // If a close was requested and we're now fully drained, perform close
             if (resp->close_requested.load() && resp->write_queue.empty() && resp->pending_writes.load() == 0) {
                 resp->perform_close();
             }
@@ -426,24 +499,23 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
         if (!headers_flushed) {
             if (!final_data.empty()) {
                 headers.set("Content-Length", std::to_string(final_data.size()));
+                chunked_mode = false;
             } else {
                 headers.set("Content-Length", "0");
+                chunked_mode = false;
             }
             flush_headers();
         }
 
         if (chunked_mode) {
-            // If we have outstanding writes or queued writes, enqueue the final_data
             if (!write_queue.empty() || pending_writes.load() > 0) {
                 if (!final_data.empty()) {
                     write_queue.emplace_back(final_data);
                 }
-                // actual terminator will be written in uv_write completion when pending==0 && queue empty
                 write_queue_backpressure = write_queue_backpressure || (pending_writes.load() >= MAX_PENDING_WRITES);
                 return;
             }
 
-            // No outstanding writes, write final_data then terminator asynchronously (uv_write)
             if (!final_data.empty()) {
                 std::ostringstream chunk_header;
                 chunk_header << std::hex << final_data.size() << "\r\n";
@@ -480,7 +552,6 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
                 delete req;
             });
         } else {
-            // Non-chunked path; if pending writes or queue exist we should enqueue final_data to preserve ordering
             if (!write_queue.empty() || pending_writes.load() > 0) {
                 if (!final_data.empty()) {
                     write_queue.emplace_back(final_data);
@@ -503,12 +574,10 @@ struct HttpResponse : public std::enable_shared_from_this<HttpResponse> {
             }
         }
 
-        // If a close was requested and we're drained, perform close
         if (close_requested.load() && write_queue.empty() && pending_writes.load() == 0) {
             perform_close();
         }
     }
-
     FilePtr file_source = nullptr;
     uint64_t file_bytes_sent = 0;
     uint64_t file_total_size = 0;
@@ -811,7 +880,7 @@ struct HttpRequestState {
     size_t current_buffer_size = 0;
     bool backpressure_active = false;
 
-    bool closing = false; // whether close was requested for this state
+    bool closing = false;  // whether close was requested for this state
 
     void check_backpressure() {
         if (!backpressure_active && current_buffer_size > max_buffer_size) {
