@@ -1724,22 +1724,43 @@ Value native_createServer(const std::vector<Value>& args, EnvPtr env, const Toke
             throw SwaziError("RuntimeError", "No event loop available", token.loc);
         }
 
-        scheduler_run_on_loop([inst, port, cb, loop]() {
+        scheduler_run_on_loop([inst, port, cb, loop, token]() {
             inst->server_handle = new uv_tcp_t;
             inst->server_handle->data = inst.get();
             uv_tcp_init(loop, inst->server_handle);
 
             struct sockaddr_in addr;
             uv_ip4_addr("0.0.0.0", port, &addr);
-            uv_tcp_bind(inst->server_handle, (const struct sockaddr*)&addr, 0);
+
+            int s = uv_tcp_bind(inst->server_handle, (const struct sockaddr*)&addr, 0);
+            if (s != 0) {
+                if (cb) {
+                    // pass error as first argument like Node.js: cb(error)
+                    CallbackPayload* payload = new CallbackPayload(cb, {Value{std::string(uv_strerror(s))}});
+                    enqueue_callback_global(static_cast<void*>(payload));
+                } else {
+                    std::cerr << ("Server failed to bind port " + std::to_string(port) + ": " + uv_strerror(s)) << "\n";
+                }
+                return;  // stop, don't try to listen
+            }
 
             int r = uv_listen((uv_stream_t*)inst->server_handle, 128, on_connection);
-            if (r == 0 && cb) {
-                CallbackPayload* payload = new CallbackPayload(cb, {});
+            if (r != 0) {
+                if (cb) {
+                    CallbackPayload* payload = new CallbackPayload(cb, {Value{std::string(uv_strerror(r))}});
+                    enqueue_callback_global(static_cast<void*>(payload));
+                } else {
+                    std::cerr << ("Server failed to listen on port " + std::to_string(port) + ": " + uv_strerror(r)) << "\n";
+                }
+                return;
+            }
+
+            // success, call callback with no error
+            if (cb) {
+                CallbackPayload* payload = new CallbackPayload(cb, {Value{}});  // no error
                 enqueue_callback_global(static_cast<void*>(payload));
             }
         });
-
         return std::monostate{};
     };
     server_obj->properties["listen"] = {
