@@ -1090,7 +1090,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
     tok.loc = TokenLocation("<http>", 0, 0, 0);
 
     // on(event, callback)
-    auto on_impl = [req](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+    auto on_impl = [req, stream_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (args.size() < 2 || !std::holds_alternative<std::string>(args[0]) ||
             !std::holds_alternative<FunctionPtr>(args[1])) {
             throw SwaziError("TypeError", "on(event, callback) requires event name and function", token.loc);
@@ -1119,7 +1119,7 @@ Value native_http_open(const std::vector<Value>& args, EnvPtr callEnv, const Tok
         else if (event == "uploadProgress")
             req->handlers->on_upload_progress = callback;
 
-        return std::monostate{};
+        return Value{stream_obj};
     };
     stream_obj->properties["on"] = {
         Value{std::make_shared<FunctionValue>("request.on", on_impl, nullptr, tok)},
