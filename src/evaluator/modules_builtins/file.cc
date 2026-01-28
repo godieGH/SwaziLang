@@ -27,6 +27,59 @@ void FileValue::close_internal() {
 
     is_open = false;
 }
+
+ssize_t FileValue::read(void* out, size_t len) {
+#ifdef _WIN32
+    DWORD bytesRead = 0;
+    BOOL ok = ReadFile(
+        handle,
+        out,
+        (DWORD)len,
+        &bytesRead,
+        nullptr);
+
+    if (!ok) {
+        last_error = "ReadFile failed";
+        return -1;
+    }
+
+    file_pos += bytesRead;
+    return (ssize_t)bytesRead;
+#else
+    ssize_t r = ::read(fd, out, len);
+    if (r >= 0) {
+        file_pos += r;
+    }
+    return r;
+#endif
+}
+
+ssize_t FileValue::write(const void* buf, size_t len) {
+#ifdef _WIN32
+    DWORD written = 0;
+    BOOL ok = WriteFile(
+        handle,
+        buf,
+        (DWORD)len,
+        &written,
+        nullptr);
+
+    if (!ok) {
+        last_error = "WriteFile failed";
+        return -1;
+    }
+
+    file_pos += written;
+    return (ssize_t)written;
+#else
+    ssize_t w = ::write(fd, buf, len);
+    if (w >= 0) {
+        file_pos += w;
+    }
+    return w;
+#endif
+}
+
 // Helper: convert mode string to flags
 static int parse_mode_flags(const std::string& mode, bool& binary) {
     binary = (mode.find('b') != std::string::npos);

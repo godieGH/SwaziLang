@@ -84,7 +84,11 @@ struct FileValue {
             close_internal();
         }
     }
-    void close_internal();  // defined in file.cpp
+
+    // defined in file.cc
+    void close_internal();
+    ssize_t read(void* out, size_t len);  // cross platformwrite
+    ssize_t write(const void* buf, size_t len);
 };
 
 // Forward-declare GeneratorValue used for generator objects at runtime.

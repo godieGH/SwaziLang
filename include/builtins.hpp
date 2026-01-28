@@ -56,6 +56,7 @@ bool streams_have_active_work();
 bool fs_has_active_work();
 bool ipc_has_active_work();
 bool http_has_active_work();
+bool http_fetch_has_active_work();
 bool uv_module_has_active_handles();
 
 struct SignalInfo {
