@@ -448,6 +448,8 @@ static int on_headers_complete(llhttp_t* parser) {
         Value{*req->status_text}, false, false, true, Token{}};
     meta->properties["url"] = PropertyDescriptor{
         Value{req->url}, false, false, true, Token{}};
+    meta->properties["ok"] = PropertyDescriptor{
+        Value{req->status_code >= 200 && req->status_code < 300}, false, false, true, Token{}};
 
     auto headers_obj = std::make_shared<ObjectValue>();
     for (auto it = req->response_headers->begin(); it != req->response_headers->end(); ++it) {
