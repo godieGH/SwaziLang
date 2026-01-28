@@ -301,6 +301,11 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env, Evaluator* evaluator)
             if (!c) throw SwaziError("HttpError", "curl_easy_init failed", token.loc);
             
             CurlWriteCtx ctx;  // Use the struct defined at file scope
+            curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_setopt(c, CURLOPT_USERAGENT, "SwaziHttp/1.0");
+            curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+            curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
             curl_easy_setopt(c, CURLOPT_URL, url.c_str());
             curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);  // Use global function
             curl_easy_setopt(c, CURLOPT_WRITEDATA, &ctx);
@@ -341,6 +346,11 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env, Evaluator* evaluator)
             if (!c) throw SwaziError("HttpError", "curl_easy_init failed", token.loc);
             
             CurlWriteCtx ctx;  // Use the struct defined at file scope
+            curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_setopt(c, CURLOPT_USERAGENT, "SwaziHttp/1.0");
+            curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+            curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
             curl_easy_setopt(c, CURLOPT_URL, url.c_str());
             curl_easy_setopt(c, CURLOPT_POST, 1L);
             curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
@@ -506,6 +516,10 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env, Evaluator* evaluator)
                 }
                 
                 curl_easy_setopt(ctx->easy_handle, CURLOPT_NOSIGNAL, 1L);
+                curl_easy_setopt(ctx->easy_handle, CURLOPT_USERAGENT, "SwaziHttp/1.0");
+                curl_easy_setopt(ctx->easy_handle, CURLOPT_TIMEOUT, 30L);
+                curl_easy_setopt(ctx->easy_handle, CURLOPT_FOLLOWLOCATION, 1L);
+                curl_easy_setopt(ctx->easy_handle, CURLOPT_CONNECTTIMEOUT, 10L);
                 curl_easy_setopt(ctx->easy_handle, CURLOPT_URL, url.c_str());
                 curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEFUNCTION, curl_write_cb);
                 curl_easy_setopt(ctx->easy_handle, CURLOPT_WRITEDATA, &ctx->body_ctx);

@@ -733,8 +733,17 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                 if (pending > 0) {
                     int read = BIO_read(req->bio_write, out_buf, std::min(pending, (int)sizeof(out_buf)));
                     if (read > 0) {
-                        std::vector<uint8_t> data(out_buf, out_buf + read);
-                        queue_write(req, data, nullptr, 0);
+                        char* send_buf = (char*)malloc(read);
+                        memcpy(send_buf, out_buf, read);
+
+                        uv_write_t* write_req = new uv_write_t;
+                        write_req->data = req;
+
+                        uv_buf_t* uvbuf = new uv_buf_t;
+                        *uvbuf = uv_buf_init(send_buf, read);
+                        write_req->bufs = uvbuf;
+
+                        uv_write(write_req, (uv_stream_t*)&req->socket, uvbuf, 1, on_write_complete);
                     }
                 }
 
@@ -815,14 +824,36 @@ static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
 static void send_initial_request(HttpClientRequest* req) {
     if (req->use_ssl) {
 #ifdef HAVE_OPENSSL
-        char buf[16384];
+        // Kick off the TLS handshake so OpenSSL can produce ClientHello
+        int hs = do_ssl_handshake(req);
+        if (hs < 0) {
+            emit_event(req->handlers, "error", Value{std::string("SSL handshake init failed")});
+            close_connection(req, true);
+            return;
+        }
+
+        // Flush any pending TLS records produced by OpenSSL (ClientHello etc.)
+        char out_buf[16384];
         int pending = BIO_pending(req->bio_write);
-        if (pending > 0) {
-            int read = BIO_read(req->bio_write, buf, std::min(pending, (int)sizeof(buf)));
-            if (read > 0) {
-                std::vector<uint8_t> data(buf, buf + read);
-                queue_write(req, data);
+        while (pending > 0) {
+            int to_read = std::min(pending, (int)sizeof(out_buf));
+            int read_bytes = BIO_read(req->bio_write, out_buf, to_read);
+            if (read_bytes > 0) {
+                // Write raw TLS bytes directly to the socket (bypass SSL_write)
+                char* send_buf = (char*)malloc(read_bytes);
+                memcpy(send_buf, out_buf, read_bytes);
+
+                uv_write_t* write_req = new uv_write_t;
+                write_req->data = req;
+
+                uv_buf_t* uvbuf = new uv_buf_t;
+                *uvbuf = uv_buf_init(send_buf, read_bytes);
+                write_req->bufs = uvbuf;
+
+                // This runs on the loop (send_initial_request is called on the loop).
+                uv_write(write_req, (uv_stream_t*)&req->socket, uvbuf, 1, on_write_complete);
             }
+            pending = BIO_pending(req->bio_write);
         }
 #endif
         return;
