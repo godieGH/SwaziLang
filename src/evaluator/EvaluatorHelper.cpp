@@ -247,6 +247,23 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
             return print_value(v);
         }
 
+        auto external_it = op->properties.find("__external__");
+        if (external_it != op->properties.end() &&
+            external_it->second.is_private &&
+            std::holds_alternative<bool>(external_it->second.value)) {
+            std::ostringstream ss;
+            if (use_color) {
+                ss << Color::blue << "[external]" << Color::reset;
+            } else {
+                ss << "[external]";
+            }
+
+            if (op->properties.size() >= 2) {
+                ss << " " << print_object(op, 0, visited);
+            }
+            return ss.str();
+        }
+
         return print_object(op, 0, visited);  // <- you write this pretty-printer
     }
     if (std::holds_alternative<ClassPtr>(v)) {
@@ -1342,6 +1359,23 @@ std::string Evaluator::print_value(
                    << std::string(depth, ' ') << "}";
             }
 
+            return ss.str();
+        }
+
+        auto external_it = op->properties.find("__external__");
+        if (external_it != op->properties.end() &&
+            external_it->second.is_private &&
+            std::holds_alternative<bool>(external_it->second.value)) {
+            std::ostringstream ss;
+            if (use_color) {
+                ss << Color::blue << "[external]" << Color::reset;
+            } else {
+                ss << "[external]";
+            }
+
+            if (op->properties.size() >= 2) {
+                ss << " " << print_object(op, depth, visited);
+            }
             return ss.str();
         }
 
