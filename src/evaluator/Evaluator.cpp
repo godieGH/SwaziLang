@@ -107,6 +107,7 @@ void Evaluator::evaluate(ProgramNode* program) {
     } catch (...) {
         std::cerr << "Unknown error while running async callbacks\n";
     }
+    sweep_external_data();
 }
 void Evaluator::populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main) {
     if (!env) return;

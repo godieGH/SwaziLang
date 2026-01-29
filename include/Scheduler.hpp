@@ -77,4 +77,7 @@ void register_tick_callback(const std::function<void()>& cb);
 void cleanup_uv_handles();
 void clear_uv_handles();
 
+// addon external data
+void sweep_external_data();
+
 #endif  // SWAZI_SCHEDULER_HPP

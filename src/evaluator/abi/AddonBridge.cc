@@ -1,4 +1,5 @@
 // AddonBridge.cpp -
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -2092,9 +2093,13 @@ struct ExternalData {
     swazi_finalize finalize_cb;
     void* finalize_hint;
     swazi_env env;
+
+    // does NOT own the object; used to detect expiry
+    std::weak_ptr<ObjectValue> weak_obj;
+    uintptr_t raw_key = 0;
 };
 
-static std::map<ObjectPtr, std::shared_ptr<ExternalData>> g_external_data;
+static std::unordered_map<uintptr_t, std::shared_ptr<ExternalData>> g_external_data;
 static std::mutex g_external_mutex;
 
 static swazi_status api_create_external(swazi_env env, void* data,
@@ -2112,14 +2117,16 @@ static swazi_status api_create_external(swazi_env env, void* data,
     ext_data->finalize_hint = finalize_hint;
     ext_data->env = env;
 
+    ext_data->weak_obj = obj;
+    ext_data->raw_key = reinterpret_cast<uintptr_t>(obj.get());
     {
         std::lock_guard<std::mutex> lock(g_external_mutex);
-        g_external_data[obj] = ext_data;
+        g_external_data[ext_data->raw_key] = ext_data;
     }
 
     // Mark object as external
     obj->properties["__external__"] = PropertyDescriptor{
-        Value{true}, true, false, false, Token()};  // mark it private and locked so userland can not access or override
+        Value{true}, true /*@private property*/, false /*getter methods*/, false /*&locked property*/, Token()};  // mark it private so userland can not access or override
 
     *result = wrap_value(Value{obj}, env);
     return SWAZI_OK;
@@ -2137,12 +2144,14 @@ static swazi_status api_get_value_external(swazi_env env, swazi_value value,
 
     ObjectPtr obj = std::get<ObjectPtr>(v);
 
+    uintptr_t key = reinterpret_cast<uintptr_t>(obj.get());
     std::lock_guard<std::mutex> lock(g_external_mutex);
-    auto it = g_external_data.find(obj);
+    auto it = g_external_data.find(key);
     if (it == g_external_data.end()) {
         set_error(env, "TypeError", "Object is not external");
         return SWAZI_GENERIC_FAILURE;
     }
+    *result = it->second->data;
 
     *result = it->second->data;
     return SWAZI_OK;
@@ -2150,15 +2159,89 @@ static swazi_status api_get_value_external(swazi_env env, swazi_value value,
 
 // Cleanup external data when objects are destroyed
 void cleanup_external_object(ObjectPtr obj) {
-    std::lock_guard<std::mutex> lock(g_external_mutex);
-    auto it = g_external_data.find(obj);
-    if (it != g_external_data.end()) {
-        auto ext = it->second;
-        if (ext->finalize_cb) {
-            ext->finalize_cb(ext->env, ext->data, ext->finalize_hint);
-        }
+    if (!obj) return;
+    uintptr_t key = reinterpret_cast<uintptr_t>(obj.get());
+    std::shared_ptr<ExternalData> ext;
+    {
+        std::lock_guard<std::mutex> lock(g_external_mutex);
+        auto it = g_external_data.find(key);
+        if (it == g_external_data.end()) return;
+        ext = it->second;
         g_external_data.erase(it);
     }
+    if (ext && ext->finalize_cb) {
+        try {
+            ext->finalize_cb(ext->env, ext->data, ext->finalize_hint);
+        } catch (...) {
+            // swallow exceptions from finalizer to avoid tearing down runtime
+        }
+    }
+}
+
+void sweep_external_data() {
+    std::vector<std::shared_ptr<ExternalData>> to_finalize;
+
+    {
+        std::lock_guard<std::mutex> lock(g_external_mutex);
+        for (auto it = g_external_data.begin(); it != g_external_data.end();) {
+            auto& ext = it->second;
+            if (!ext) {
+                it = g_external_data.erase(it);
+                continue;
+            }
+            if (ext->weak_obj.expired()) {
+                to_finalize.push_back(ext);
+                it = g_external_data.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    if (to_finalize.empty()) return;
+
+    // If a scheduler loop exists, run finalizers on that loop thread.
+    // This is important because finalizers often interact with runtime internals.
+    if (scheduler_get_loop()) {
+        // Capture the shared_ptrs by value so they remain alive until scheduled.
+        scheduler_run_on_loop([to_finalize = std::move(to_finalize)]() mutable {
+            for (auto& ext : to_finalize) {
+                if (ext && ext->finalize_cb) {
+                    try {
+                        ext->finalize_cb(ext->env, ext->data, ext->finalize_hint);
+                    } catch (...) {
+                        // swallow finalizer exceptions — never let them unwind the loop.
+                    }
+                }
+            }
+        });
+    } else {
+        // No scheduler available: run inline on caller thread.
+        for (auto& ext : to_finalize) {
+            if (ext && ext->finalize_cb) {
+                try {
+                    ext->finalize_cb(ext->env, ext->data, ext->finalize_hint);
+                } catch (...) {
+                    // swallow
+                }
+            }
+        }
+    }
+}
+
+static swazi_status api_finalize_external(swazi_env env, swazi_value value) {
+    if (!env || !value) return SWAZI_INVALID_ARG;
+
+    const Value& v = unwrap_value(value);
+    if (!std::holds_alternative<ObjectPtr>(v)) {
+        return SWAZI_OBJECT_EXPECTED;
+    }
+
+    ObjectPtr obj = std::get<ObjectPtr>(v);
+
+    // Delegate to canonical cleanup function
+    cleanup_external_object(obj);
+    return SWAZI_OK;
 }
 
 // ============================================================================
@@ -3656,6 +3739,7 @@ void init_addon_api() {
     // External data
     g_api.create_external = api_create_external;
     g_api.get_value_external = api_get_value_external;
+    g_api.finalize_external = api_finalize_external;
 
     // DateTime operations
     g_api.create_date = api_create_date;

@@ -178,6 +178,7 @@ void Scheduler::run_until_idle(const std::function<bool()>& has_pending) {
         }
 
         uv_run(loop_, UV_RUN_ONCE);
+        sweep_external_data();  // call the cleaning of addon external data
     }
 }
 void Scheduler::stop() {

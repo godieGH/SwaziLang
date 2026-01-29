@@ -498,6 +498,8 @@ typedef struct swazi_api_s {
     swazi_status (*get_value_external)(swazi_env env, swazi_value value,
         void** result);
 
+    swazi_status (*finalize_external)(swazi_env env, swazi_value value);
+
     // ------------------------------------------------------------------------
     // DateTime Operations
     // ------------------------------------------------------------------------
