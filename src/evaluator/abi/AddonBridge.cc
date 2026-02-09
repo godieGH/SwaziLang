@@ -1904,6 +1904,10 @@ static void uv_after_wrapper(uv_work_t* req, int status) {
     delete req;
 }
 
+/**
+ * Ensure you call api_thread_will_start before calling api_queue_background_work
+ * to make evaluator and scheduler alive so that they can be used after the worker done, the program doesnt exit too earlier without waiting for a bg work
+*/
 static swazi_status api_queue_background_work(
     swazi_env env,
     void (*work_cb)(void*),
