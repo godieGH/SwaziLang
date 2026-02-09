@@ -533,11 +533,13 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         if (it != module_cache.end()) {
             return it->second->exports;
         }
+        
+        auto addon_module_env = std::make_shared<Environment>(get_global_env());
 
         // Load the addon
         ObjectPtr exports;
         try {
-            Value addon_result = load_addon(resolved_path, this, requesterEnv);
+            Value addon_result = load_addon(resolved_path, this, addon_module_env);
 
             // ABI addons can return any value type, just like script modules
             // If it's already an object, use it directly. Otherwise wrap in exports object with 'default'
