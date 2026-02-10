@@ -533,7 +533,7 @@ ObjectPtr Evaluator::import_module(const std::string& module_spec, const Token& 
         if (it != module_cache.end()) {
             return it->second->exports;
         }
-        
+
         auto addon_module_env = std::make_shared<Environment>(get_global_env());
 
         // Load the addon

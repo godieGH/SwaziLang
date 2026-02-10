@@ -470,6 +470,20 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
                     delete req;
                 });
 
+            if (r != 0) {
+                // libuv won't call the write callback on error, so clean up here
+                if (req->data) free(req->data);
+                delete req;
+
+                // notify Swazi error handler if present
+                if (sock_inst->on_error_handler) {
+                    auto err_msg = std::string("Write failed: ") + uv_strerror(r);
+                    FunctionPtr handler = sock_inst->on_error_handler;
+                    CallbackPayload* payload = new CallbackPayload(handler, {Value{err_msg}});
+                    enqueue_callback_global(static_cast<void*>(payload));
+                }
+            }
+
             return Value{r == 0};
         };
         auto write_fn = std::make_shared<FunctionValue>("socket.write", write_impl, nullptr, stok);
