@@ -1238,6 +1238,15 @@ class Evaluator {
 
     void set_entry_point(const std::string& filename);
     void set_cli_args(const std::vector<std::string>& args);
+    Value get_cli_args() {
+        auto arr = std::make_shared<ArrayValue>();
+
+        for (auto& s : cli_args) {
+            arr->elements.push_back(s);
+        }
+
+        return Value{arr};
+    };
 
     // Accessor for the scheduler (non-owning for now).
     Scheduler* scheduler() { return scheduler_.get(); }

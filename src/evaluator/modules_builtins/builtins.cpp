@@ -1632,10 +1632,17 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env, Evaluator* evaluat
 
     // process.cwd() -> string
     {
-        auto fn = make_native_fn("os.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
+        auto fn = make_native_fn("process.cwd", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{fs::current_path().string()}; }, env);
         obj->properties["cwd"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
+    // process.argv -> array
+    {
+        auto fn = make_native_fn("process.argv", [evaluator](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value { return Value{evaluator->get_cli_args()}; }, env);
+        obj->properties["argv"] = PropertyDescriptor{fn, false, true, false, Token()};
+    }
+
+    // IPC
     {
         Token t;
         t.type = TokenType::IDENTIFIER;
