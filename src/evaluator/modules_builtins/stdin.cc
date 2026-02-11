@@ -496,6 +496,156 @@ std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env) {
         Value{std::make_shared<FunctionValue>("stdin.on", on_impl, env, tok)},
         false, false, true, tok};
 
+    // stdin.pipe(writable) - pipe stdin to a writable stream
+    auto pipe_impl = [](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
+        if (args.empty()) {
+            throw SwaziError("TypeError", "stdin.pipe(writable) requires a writable stream", token.loc);
+        }
+
+        if (!std::holds_alternative<ObjectPtr>(args[0])) {
+            throw SwaziError("TypeError", "pipe destination must be a writable stream object", token.loc);
+        }
+
+        ObjectPtr dest_obj = std::get<ObjectPtr>(args[0]);
+
+        // Get the write function from destination
+        auto write_it = dest_obj->properties.find("write");
+        if (write_it == dest_obj->properties.end()) {
+            throw SwaziError("TypeError", "destination must have a write() method", token.loc);
+        }
+
+        if (!std::holds_alternative<FunctionPtr>(write_it->second.value)) {
+            throw SwaziError("TypeError", "destination.write must be a function", token.loc);
+        }
+
+        FunctionPtr write_fn = std::get<FunctionPtr>(write_it->second.value);
+
+        // Create data handler that writes to destination
+        Token evt_tok{};
+        evt_tok.loc = TokenLocation("<stdin-pipe>", 0, 0, 0);
+
+        auto data_handler = [dest_obj, write_fn, env](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty()) return std::monostate{};
+
+            // Call destination's write() method
+            if (write_fn->is_native && write_fn->native_impl) {
+                try {
+                    Value result = write_fn->native_impl({args[0]}, env, token);
+
+                    // Handle backpressure: if write returns false, pause stdin
+                    if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                        // Destination is full, pause reading
+                        if (!g_paused.load()) {
+                            g_paused.store(true);
+                            scheduler_run_on_loop([]() {
+                                uv_loop_t* loop = scheduler_get_loop();
+                                if (!loop) return;
+                                create_pause_keepalive(loop);
+                                if (g_stdin_handle) {
+                                    uv_read_stop((uv_stream_t*)g_stdin_handle);
+                                }
+                            });
+                        }
+                    }
+
+                    return result;
+                } catch (...) {
+                    return Value{false};
+                }
+            }
+
+            return Value{false};
+        };
+
+        auto data_fn = std::make_shared<FunctionValue>("stdin.pipe.data", data_handler, nullptr, evt_tok);
+
+        // Register data listener
+        {
+            std::lock_guard<std::mutex> lk(g_stdin_mutex);
+            ListenerEntry entry;
+            entry.id = g_next_listener_id.fetch_add(1);
+            entry.callback = data_fn;
+            g_data_listeners.push_back(entry);
+        }
+
+        // Set up drain listener to resume stdin
+        auto on_it = dest_obj->properties.find("on");
+        if (on_it != dest_obj->properties.end() && std::holds_alternative<FunctionPtr>(on_it->second.value)) {
+            FunctionPtr on_fn = std::get<FunctionPtr>(on_it->second.value);
+
+            auto drain_handler = [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                // Resume stdin when destination drains
+                if (g_paused.load()) {
+                    g_paused.store(false);
+                    g_discard_on_resume.store(true);
+
+                    scheduler_run_on_loop([]() {
+                        if (g_stdin_handle) {
+                            {
+                                std::lock_guard<std::mutex> lk(g_stdin_mutex);
+                                g_line_buffer.clear();
+                            }
+                            uv_read_start((uv_stream_t*)g_stdin_handle, stdin_alloc_cb, stdin_read_cb);
+                        }
+
+                        uv_loop_t* loop = scheduler_get_loop();
+                        if (loop) destroy_pause_keepalive(loop);
+                    });
+                }
+                return std::monostate{};
+            };
+
+            auto drain_fn = std::make_shared<FunctionValue>("stdin.pipe.drain", drain_handler, nullptr, evt_tok);
+
+            if (on_fn->is_native && on_fn->native_impl) {
+                try {
+                    on_fn->native_impl({Value{std::string("drain")}, Value{drain_fn}}, nullptr, evt_tok);
+                } catch (...) {}
+            }
+        }
+
+        // Ensure stdin is initialized and start flowing
+        if (!g_stdin_initialized.load()) {
+            uv_loop_t* loop = scheduler_get_loop();
+            if (!loop) {
+                throw SwaziError("RuntimeError", "stdin requires event loop", token.loc);
+            }
+
+            scheduler_run_on_loop([loop]() {
+                if (g_stdin_initialized.load()) return;
+
+                g_stdin_handle = new uv_tty_t;
+                int r = uv_tty_init(loop, g_stdin_handle, 0, 1);
+                if (r != 0) {
+                    delete g_stdin_handle;
+                    g_stdin_handle = nullptr;
+                    return;
+                }
+
+                uv_tty_set_mode(g_stdin_handle, g_raw_mode.load() ? UV_TTY_MODE_RAW : UV_TTY_MODE_NORMAL);
+                uv_read_start((uv_stream_t*)g_stdin_handle, stdin_alloc_cb, stdin_read_cb);
+
+                g_stdin_initialized.store(true);
+                g_stdin_closed.store(false);
+                g_paused.store(false);
+            });
+        } else if (g_paused.load()) {
+            // Resume if paused
+            g_paused.store(false);
+            scheduler_run_on_loop([]() {
+                if (g_stdin_handle) {
+                    uv_read_start((uv_stream_t*)g_stdin_handle, stdin_alloc_cb, stdin_read_cb);
+                }
+            });
+        }
+
+        return Value{dest_obj};
+    };
+
+    obj->properties["pipe"] = {
+        Value{std::make_shared<FunctionValue>("stdin.pipe", pipe_impl, env, tok)},
+        false, false, true, tok};
+
     auto once_impl = [ensure_init](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
         if (args.size() < 2) {
             throw SwaziError("TypeError", "stdin.once requires (event, callback)", token.loc);

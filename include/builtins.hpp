@@ -12,7 +12,7 @@ std::shared_ptr<ObjectValue> make_http_exports(EnvPtr env, Evaluator* evaluator)
 std::shared_ptr<ObjectValue> make_json_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_path_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_os_exports(EnvPtr env);
-std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr env);
 
 // Fork implementation (defined in subprocess_fork.cc)
@@ -32,6 +32,8 @@ std::shared_ptr<ObjectValue> make_archiver_exports(EnvPtr env, Evaluator* evalua
 std::shared_ptr<ObjectValue> make_datetime_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env);
 
+Value native_createStdout(EnvPtr env, Evaluator* evaluator);
+Value native_createStderr(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
 std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env);

@@ -1566,7 +1566,7 @@ Value process_on_message_ipc(const std::vector<Value>& args, EnvPtr env, const T
 Value process_off_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
 Value process_listeners_impl(const std::vector<Value>& args, EnvPtr env, const Token& token);
 
-std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
+std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
 
     // process.getEnv(name) -> string|null
@@ -1745,6 +1745,24 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env) {
 #endif
 
         obj->properties["constants"] = {constants_obj, false, false, true, Token{}};
+    }
+
+    // process.stdout
+    {
+        Value stdout_stream = native_createStdout(env, evaluator);
+        obj->properties["stdout"] = PropertyDescriptor{stdout_stream, false, false, true, Token()};
+    }
+
+    // process.stderr
+    {
+        Value stderr_stream = native_createStderr(env, evaluator);
+        obj->properties["stderr"] = PropertyDescriptor{stderr_stream, false, false, true, Token()};
+    }
+
+    // process.stdin (integrate existing stdin module)
+    {
+        auto stdin_obj = make_stdin_exports(env);
+        obj->properties["stdin"] = PropertyDescriptor{Value{stdin_obj}, false, false, true, Token()};
     }
 
     return obj;
