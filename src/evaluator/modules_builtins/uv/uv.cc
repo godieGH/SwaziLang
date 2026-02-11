@@ -9,6 +9,7 @@
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
+#include "memory_tracking.hpp"
 
 static std::atomic<long long> g_next_worker_id{1};
 
@@ -253,6 +254,84 @@ std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env) {
             
             return Value{obj}; }, env);
         obj->properties["getrusage"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // uv.memoryUsage() -> memory usage object (Node.js-style)
+    {
+        auto fn = make_native_fn("uv.memoryUsage", [](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+            auto obj = std::make_shared<ObjectValue>();
+            Token tok;
+            
+            // RSS (total process memory) - already available from libuv
+            size_t rss;
+            int r = uv_resident_set_memory(&rss);
+            if (r == 0) {
+                obj->properties["rss"] = PropertyDescriptor{
+                    Value{static_cast<double>(rss)}, false, false, true, tok};
+            }
+            
+            // Object counts (your "heap")
+            obj->properties["objects"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_object_count.load())}, 
+                false, false, true, tok};
+            obj->properties["arrays"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_array_count.load())}, 
+                false, false, true, tok};
+            obj->properties["functions"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_function_count.load())}, 
+                false, false, true, tok};
+            obj->properties["promises"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_promise_count.load())}, 
+                false, false, true, tok};
+            obj->properties["generators"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_generator_count.load())}, 
+                false, false, true, tok};
+            obj->properties["buffers"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_buffer_count.load())}, 
+                false, false, true, tok};
+            obj->properties["files"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_file_count.load())}, 
+                false, false, true, tok};
+            obj->properties["classes"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_class_count.load())}, 
+                false, false, true, tok};
+            obj->properties["proxies"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_proxy_count.load())}, 
+                false, false, true, tok};
+            obj->properties["regexes"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_regex_count.load())}, 
+                false, false, true, tok};
+            obj->properties["datetimes"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_datetime_count.load())}, 
+                false, false, true, tok};
+            obj->properties["ranges"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_range_count.load())}, 
+                false, false, true, tok};
+            obj->properties["maps"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_map_count.load())}, 
+                false, false, true, tok};
+            
+            // Buffer bytes (like Node's arrayBuffers)
+            obj->properties["bufferBytes"] = PropertyDescriptor{
+                Value{static_cast<double>(MemoryTracking::g_buffer_bytes.load())}, 
+                false, false, true, tok};
+            
+            // Estimate total managed heap
+            size_t estimated_heap = 
+                (MemoryTracking::g_object_count.load() * sizeof(ObjectValue)) +
+                (MemoryTracking::g_array_count.load() * sizeof(ArrayValue)) +
+                (MemoryTracking::g_function_count.load() * sizeof(FunctionValue)) +
+                (MemoryTracking::g_promise_count.load() * sizeof(PromiseValue)) +
+                (MemoryTracking::g_generator_count.load() * sizeof(GeneratorValue)) +
+                (MemoryTracking::g_buffer_count.load() * sizeof(BufferValue)) +
+                MemoryTracking::g_buffer_bytes.load();
+            
+            obj->properties["heapUsed"] = PropertyDescriptor{
+                Value{static_cast<double>(estimated_heap)}, 
+                false, false, true, tok};
+            
+            return Value{obj}; }, env);
+        obj->properties["memoryUsage"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
     // uv.uptime() -> number (seconds)

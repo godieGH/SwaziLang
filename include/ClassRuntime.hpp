@@ -13,6 +13,13 @@ struct ClassValue {
     // token for diagnostics
     Token token;
 
+    ClassValue() {
+        MemoryTracking::g_class_count.fetch_add(1);
+    }
+    ~ClassValue() {
+        MemoryTracking::g_class_count.fetch_sub(1);
+    }
+
     // DEFINING ENVIRONMENT:
     // The environment in which the class declaration was evaluated (module/class lexical scope).
     // Instance initializers and instance method closures must resolve free identifiers

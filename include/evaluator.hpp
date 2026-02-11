@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "ast.hpp"
+#include "memory_tracking.hpp"
 #include "token.hpp"
+#include "tracking_buffer_vector.hpp"
 
 // Forward declaration
 class Environment;
@@ -51,12 +53,22 @@ inline bool is_valid_date(int year, int month, int day) {
 }
 
 struct BufferValue {
-    std::vector<uint8_t> data;  // Raw bytes
+    // TrackedVector is std::vector under the hood but with tracking caps
+    TrackedVector<uint8_t> data;  // Raw bytes
+
+    BufferValue() {
+        MemoryTracking::g_buffer_count.fetch_add(1);
+    }
+
+    ~BufferValue() {
+        MemoryTracking::g_buffer_count.fetch_sub(1);
+    }
 
     // Optionally adding encoding info if we want to support
     // conversions to/from strings with specific encodings
     std::string encoding;  // "utf8", "latin1", "binary", etc.
 };
+
 struct FileValue {
     std::string path;
     std::string mode;  // "r", "w", "a", "r+", "w+", "a+"
@@ -78,7 +90,12 @@ struct FileValue {
     // Error tracking
     std::string last_error;
 
+    FileValue() {
+        MemoryTracking::g_file_count.fetch_add(1);
+    }
+
     ~FileValue() {
+        MemoryTracking::g_file_count.fetch_sub(1);
         // RAII: close on destruction if still open
         if (is_open) {
             close_internal();
@@ -134,8 +151,13 @@ struct RangeValue {
     // Constructor
     RangeValue(int s, int e, size_t st = 1, bool inc = false)
         : start(s), end(e), step(st), cur(s), inclusive(inc) {
-        if (step == 0) step = 1;    // step cannot be 0
-        increasing = start <= end;  // infer direction
+        if (step == 0) step = 1;
+        increasing = start <= end;
+        MemoryTracking::g_range_count.fetch_add(1);
+    }
+
+    ~RangeValue() {
+        MemoryTracking::g_range_count.fetch_sub(1);
     }
 
     // Returns true if there is a next value
@@ -363,6 +385,14 @@ struct ValueEqual {
 };
 struct MapStorage {
     std::unordered_map<Value, Value, ValueHash, ValueEqual> data;
+
+    MapStorage() {
+        MemoryTracking::g_map_count.fetch_add(1);
+    }
+
+    ~MapStorage() {
+        MemoryTracking::g_map_count.fetch_sub(1);
+    }
 };
 
 struct RegexValue {
@@ -388,6 +418,11 @@ struct RegexValue {
     RegexValue(const std::string& pat, const std::string& flgs = "")
         : pattern(pat), flags(flgs) {
         parseFlags();
+        MemoryTracking::g_regex_count.fetch_add(1);
+    }
+
+    ~RegexValue() {
+        MemoryTracking::g_regex_count.fetch_sub(1);
     }
 
     void parseFlags() {
@@ -483,9 +518,12 @@ struct DateTimeValue {
     bool isUTC;
     uint64_t epochNanoseconds;
 
-    DateTimeValue() = default;
+    DateTimeValue() {
+        MemoryTracking::g_datetime_count.fetch_add(1);
+    }
 
     DateTimeValue(const DateTimeLiteralNode* node) {
+        MemoryTracking::g_datetime_count.fetch_add(1);
         literalText = node->literalText;
         year = node->year;
         month = node->month;
@@ -498,6 +536,10 @@ struct DateTimeValue {
         tzOffsetSeconds = node->tzOffsetSeconds;
         isUTC = node->isUTC;
         epochNanoseconds = node->epochNanoseconds;
+    }
+
+    ~DateTimeValue() {
+        MemoryTracking::g_datetime_count.fetch_sub(1);
     }
 
     // Recompute calendar fields from epochNanoseconds
@@ -931,6 +973,14 @@ struct ObjectValue {
         properties;
     bool is_frozen = false;
 
+    ObjectValue() {
+        MemoryTracking::g_object_count.fetch_add(1);
+    }
+
+    ~ObjectValue() {
+        MemoryTracking::g_object_count.fetch_sub(1);
+    }
+
     // When true this ObjectValue is a proxy for an Environment (live view).
     // Reads/writes/enumeration should forward to `proxy_env->values`.
     // This is used by the builtin globals() to expose a live global/module env.
@@ -942,7 +992,13 @@ struct ProxyValue {
     ObjectPtr target;   // The wrapped object
     ObjectPtr handler;  // The handler with trap methods
 
-    ProxyValue(ObjectPtr t, ObjectPtr h) : target(t), handler(h) {}
+    ProxyValue(ObjectPtr t, ObjectPtr h) : target(t), handler(h) {
+        MemoryTracking::g_proxy_count.fetch_add(1);
+    }
+
+    ~ProxyValue() {
+        MemoryTracking::g_proxy_count.fetch_sub(1);
+    }
 };
 
 struct PromiseValue {
@@ -969,6 +1025,14 @@ struct PromiseValue {
     // set A->parent = B so we can walk ancestors and mark them handled when a downstream handler
     // is attached.
     std::weak_ptr<PromiseValue> parent;
+
+    PromiseValue() {
+        MemoryTracking::g_promise_count.fetch_add(1);
+    }
+
+    ~PromiseValue() {
+        MemoryTracking::g_promise_count.fetch_sub(1);
+    }
 };
 
 struct GeneratorValue {
@@ -979,10 +1043,26 @@ struct GeneratorValue {
     CallFramePtr frame;
     State state = State::SuspendedStart;
     bool is_done = false;
+
+    GeneratorValue() {
+        MemoryTracking::g_generator_count.fetch_add(1);
+    }
+
+    ~GeneratorValue() {
+        MemoryTracking::g_generator_count.fetch_sub(1);
+    }
 };
 
 struct ArrayValue {
     std::vector<Value> elements;
+
+    ArrayValue() {
+        MemoryTracking::g_array_count.fetch_add(1);
+    }
+
+    ~ArrayValue() {
+        MemoryTracking::g_array_count.fetch_sub(1);
+    }
 };
 
 // Function value: closure with parameters, body, and defining environment
@@ -1013,6 +1093,7 @@ struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
                             is_async(b ? b->is_async : false),
                             is_generator(b ? b->is_generator : false),
                             is_native(false) {
+        MemoryTracking::g_function_count.fetch_add(1);
         parameters.reserve(params.size());
         for (const auto& p : params) {
             if (p) {
@@ -1037,6 +1118,7 @@ struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
                             is_async(b ? b->is_async : false),
                             is_generator(b ? b->is_generator : false),
                             is_native(false) {
+        MemoryTracking::g_function_count.fetch_add(1);
     }
 
     FunctionValue(
@@ -1052,6 +1134,7 @@ struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
                             is_generator(false),
                             is_native(true),
                             native_impl(std::move(impl)) {
+        MemoryTracking::g_function_count.fetch_add(1);
     }
 
     bool is_wrapped() const { return wrapped_original != nullptr; }
@@ -1062,6 +1145,9 @@ struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
             fn = fn->wrapped_original;
         }
         return fn;
+    }
+    ~FunctionValue() {
+        MemoryTracking::g_function_count.fetch_sub(1);
     }
 };
 
