@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "AsyncBridge.hpp"
+#include "ClassRuntime.hpp"
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "evaluator.hpp"
@@ -258,79 +259,78 @@ std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env) {
 
     // uv.memoryUsage() -> memory usage object (Node.js-style)
     {
-        auto fn = make_native_fn("uv.memoryUsage", [](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+        auto fn = make_native_fn("uv.memoryUsage", [](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             auto obj = std::make_shared<ObjectValue>();
             Token tok;
-            
-            // RSS (total process memory) - already available from libuv
-            size_t rss;
-            int r = uv_resident_set_memory(&rss);
-            if (r == 0) {
-                obj->properties["rss"] = PropertyDescriptor{
-                    Value{static_cast<double>(rss)}, false, false, true, tok};
+        
+            // RSS (total process memory) - libuv fills in bytes
+            size_t rss = 0;
+            if (uv_resident_set_memory(&rss) == 0) {
+                obj->properties["rss"] = PropertyDescriptor{ Value{ static_cast<double>(rss) }, false, false, true, tok };
             }
-            
-            // Object counts (your "heap")
-            obj->properties["objects"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_object_count.load())}, 
-                false, false, true, tok};
-            obj->properties["arrays"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_array_count.load())}, 
-                false, false, true, tok};
-            obj->properties["functions"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_function_count.load())}, 
-                false, false, true, tok};
-            obj->properties["promises"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_promise_count.load())}, 
-                false, false, true, tok};
-            obj->properties["generators"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_generator_count.load())}, 
-                false, false, true, tok};
-            obj->properties["buffers"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_buffer_count.load())}, 
-                false, false, true, tok};
-            obj->properties["files"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_file_count.load())}, 
-                false, false, true, tok};
-            obj->properties["classes"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_class_count.load())}, 
-                false, false, true, tok};
-            obj->properties["proxies"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_proxy_count.load())}, 
-                false, false, true, tok};
-            obj->properties["regexes"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_regex_count.load())}, 
-                false, false, true, tok};
-            obj->properties["datetimes"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_datetime_count.load())}, 
-                false, false, true, tok};
-            obj->properties["ranges"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_range_count.load())}, 
-                false, false, true, tok};
-            obj->properties["maps"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_map_count.load())}, 
-                false, false, true, tok};
-            
-            // Buffer bytes (like Node's arrayBuffers)
-            obj->properties["bufferBytes"] = PropertyDescriptor{
-                Value{static_cast<double>(MemoryTracking::g_buffer_bytes.load())}, 
-                false, false, true, tok};
-            
-            // Estimate total managed heap
-            size_t estimated_heap = 
-                (MemoryTracking::g_object_count.load() * sizeof(ObjectValue)) +
-                (MemoryTracking::g_array_count.load() * sizeof(ArrayValue)) +
-                (MemoryTracking::g_function_count.load() * sizeof(FunctionValue)) +
-                (MemoryTracking::g_promise_count.load() * sizeof(PromiseValue)) +
-                (MemoryTracking::g_generator_count.load() * sizeof(GeneratorValue)) +
-                (MemoryTracking::g_buffer_count.load() * sizeof(BufferValue)) +
-                MemoryTracking::g_buffer_bytes.load();
-            
-            obj->properties["heapUsed"] = PropertyDescriptor{
-                Value{static_cast<double>(estimated_heap)}, 
-                false, false, true, tok};
-            
-            return Value{obj}; }, env);
+        
+            // snapshot loads (coherent view)
+            auto objCount = MemoryTracking::g_object_count.load();
+            auto arrCount = MemoryTracking::g_array_count.load();
+            auto fnCount  = MemoryTracking::g_function_count.load();
+            auto promCount= MemoryTracking::g_promise_count.load();
+            auto genCount = MemoryTracking::g_generator_count.load();
+            auto bufCount = MemoryTracking::g_buffer_count.load();
+            auto fileCount= MemoryTracking::g_file_count.load();
+            auto clsCount = MemoryTracking::g_class_count.load();
+            auto proxyCount = MemoryTracking::g_proxy_count.load();
+            auto regexCount  = MemoryTracking::g_regex_count.load();
+            auto dtCount     = MemoryTracking::g_datetime_count.load();
+            auto rangeCount  = MemoryTracking::g_range_count.load();
+            auto mapCount    = MemoryTracking::g_map_count.load();
+            auto bufferBytes = MemoryTracking::g_buffer_bytes.load();
+            auto stringBytes = MemoryTracking::g_string_bytes.load();
+        
+            obj->properties["objects"] = PropertyDescriptor{ Value{ static_cast<double>(objCount) }, false, false, true, tok };
+            obj->properties["arrays"]  = PropertyDescriptor{ Value{ static_cast<double>(arrCount) }, false, false, true, tok };
+            obj->properties["functions"] = PropertyDescriptor{ Value{ static_cast<double>(fnCount) }, false, false, true, tok };
+            obj->properties["promises"] = PropertyDescriptor{ Value{ static_cast<double>(promCount) }, false, false, true, tok };
+            obj->properties["generators"] = PropertyDescriptor{ Value{ static_cast<double>(genCount) }, false, false, true, tok };
+            obj->properties["buffers"] = PropertyDescriptor{ Value{ static_cast<double>(bufCount) }, false, false, true, tok };
+            obj->properties["files"] = PropertyDescriptor{ Value{ static_cast<double>(fileCount) }, false, false, true, tok };
+            obj->properties["classes"] = PropertyDescriptor{ Value{ static_cast<double>(clsCount) }, false, false, true, tok };
+            obj->properties["proxies"] = PropertyDescriptor{ Value{ static_cast<double>(proxyCount) }, false, false, true, tok };
+            obj->properties["regexes"] = PropertyDescriptor{ Value{ static_cast<double>(regexCount) }, false, false, true, tok };
+            obj->properties["datetimes"] = PropertyDescriptor{ Value{ static_cast<double>(dtCount) }, false, false, true, tok };
+            obj->properties["ranges"] = PropertyDescriptor{ Value{ static_cast<double>(rangeCount) }, false, false, true, tok };
+            obj->properties["maps"] = PropertyDescriptor{ Value{ static_cast<double>(mapCount) }, false, false, true, tok };
+        
+            obj->properties["bufferBytes"] = PropertyDescriptor{ Value{ static_cast<double>(bufferBytes) }, false, false, true, tok };
+            obj->properties["stringBytes"] = PropertyDescriptor{ Value{ static_cast<double>(stringBytes) }, false, false, true, tok };
+        
+        // Estimated heap (rough heuristic). Use 64-bit to avoid overflow in intermediate.
+          uint64_t estimated_heap = 0;
+          
+          estimated_heap += uint64_t(objCount)   * uint64_t(sizeof(ObjectValue));
+          estimated_heap += uint64_t(arrCount)   * uint64_t(sizeof(ArrayValue));
+          estimated_heap += uint64_t(fnCount)    * uint64_t(sizeof(FunctionValue));
+          estimated_heap += uint64_t(promCount)  * uint64_t(sizeof(PromiseValue));
+          estimated_heap += uint64_t(genCount)   * uint64_t(sizeof(GeneratorValue));
+          estimated_heap += uint64_t(bufCount)   * uint64_t(sizeof(BufferValue));
+          
+          estimated_heap += uint64_t(fileCount)  * uint64_t(sizeof(FileValue));
+          estimated_heap += uint64_t(clsCount)   * uint64_t(sizeof(ClassValue));
+          estimated_heap += uint64_t(proxyCount) * uint64_t(sizeof(ProxyValue));
+          estimated_heap += uint64_t(regexCount) * uint64_t(sizeof(RegexValue));
+          estimated_heap += uint64_t(dtCount)    * uint64_t(sizeof(DateTimeValue));
+          estimated_heap += uint64_t(rangeCount) * uint64_t(sizeof(RangeValue));
+          estimated_heap += uint64_t(mapCount)   * uint64_t(sizeof(MapStorage));
+          
+          // Dynamic byte storage
+          estimated_heap += uint64_t(bufferBytes);
+          estimated_heap += uint64_t(stringBytes);
+          
+          // expose estimated heap as double (beware precision for huge numbers)
+          obj->properties["heapUsed"] = PropertyDescriptor{
+              Value{ static_cast<double>(estimated_heap) }, false, false, true, tok
+          };
+
+            return Value{ obj }; }, env);
         obj->properties["memoryUsage"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
