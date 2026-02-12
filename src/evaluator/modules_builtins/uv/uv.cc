@@ -439,43 +439,6 @@ std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env) {
         obj->properties["random"] = PropertyDescriptor{fn, false, false, true, Token()};
     }
 
-    // ============================================================================
-    // EVENT LOOP CONTROL
-    // ============================================================================
-
-    // uv.run(mode?) -> bool
-    // Runs the event loop. Mode: "default" (0), "once" (1), "nowait" (2)
-    {
-        auto fn = make_native_fn("uv.run", [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-            uv_loop_t* loop = scheduler_get_loop();
-            if (!loop) throw SwaziError("RuntimeError", "No event loop available", token.loc);
-            
-            uv_run_mode mode = UV_RUN_DEFAULT;
-            if (!args.empty() && std::holds_alternative<std::string>(args[0])) {
-                std::string mode_str = std::get<std::string>(args[0]);
-                if (mode_str == "once") mode = UV_RUN_ONCE;
-                else if (mode_str == "nowait") mode = UV_RUN_NOWAIT;
-            } else if (!args.empty() && std::holds_alternative<double>(args[0])) {
-                int m = static_cast<int>(std::get<double>(args[0]));
-                if (m >= 0 && m <= 2) mode = static_cast<uv_run_mode>(m);
-            }
-            
-            int result = uv_run(loop, mode);
-            return Value{result != 0}; }, env);
-        obj->properties["run"] = PropertyDescriptor{fn, false, false, true, Token()};
-    }
-
-    // uv.stop() -> undefined
-    // Stops the event loop
-    {
-        auto fn = make_native_fn("uv.stop", [](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
-            uv_loop_t* loop = scheduler_get_loop();
-            if (!loop) throw SwaziError("RuntimeError", "No event loop available", token.loc);
-            uv_stop(loop);
-            return std::monostate{}; }, env);
-        obj->properties["stop"] = PropertyDescriptor{fn, false, false, true, Token()};
-    }
-
     // uv.isAlive() -> bool
     // Returns true if there are active handles or requests
     {
