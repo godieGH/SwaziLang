@@ -32,6 +32,11 @@
 // DUPLEX STREAM STATE
 // ============================================================================
 
+struct WriteRequest {
+    std::vector<char> data;
+    FunctionPtr callback;
+};
+
 struct DuplexStreamState : public std::enable_shared_from_this<DuplexStreamState> {
     long long id;
 
@@ -40,7 +45,7 @@ struct DuplexStreamState : public std::enable_shared_from_this<DuplexStreamState
     size_t read_buffer_size = 0;
 
     // Internal buffer for writable side (when not backed by file)
-    std::deque<std::vector<char>> write_buffer;
+    std::deque<std::unique_ptr<WriteRequest>> write_buffer;
     size_t write_buffer_size = 0;
 
     size_t read_high_water_mark = 65536;
@@ -58,6 +63,7 @@ struct DuplexStreamState : public std::enable_shared_from_this<DuplexStreamState
     bool destroyed = false;
     bool reading = false;
     bool writing = false;
+    bool emitting = false;
 
     EnvPtr env;
     Evaluator* evaluator = nullptr;
@@ -148,20 +154,31 @@ static bool duplex_push(DuplexStreamStatePtr state, const std::vector<char>& dat
     state->read_buffer.push_back(data);
     state->read_buffer_size += data.size();
 
-    // If flowing, emit data immediately
-    if (state->readable_flowing && !state->readable_paused) {
-        while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
-            auto chunk_data = state->read_buffer.front();
-            state->read_buffer.pop_front();
-            state->read_buffer_size -= chunk_data.size();
+    if (!state->emitting && state->readable_flowing && !state->readable_paused) {
+        state->emitting = true;
 
-            auto chunk = std::make_shared<BufferValue>();
-            chunk->data.assign(chunk_data.begin(), chunk_data.end());
-            chunk->encoding = state->read_encoding;
+        // If flowing, emit data immediately
+        Token token{};
+        token.loc = TokenLocation("<duplex-push-worker>", 0, 0, 0);
+        auto push_fn = [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+            if (state->readable_flowing && !state->readable_paused) {
+                while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
+                    auto chunk_data = state->read_buffer.front();
+                    state->read_buffer.pop_front();
+                    state->read_buffer_size -= chunk_data.size();
 
-            Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
-            emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
-        }
+                    auto chunk = std::make_shared<BufferValue>();
+                    chunk->data.assign(chunk_data.begin(), chunk_data.end());
+                    chunk->encoding = state->read_encoding;
+
+                    Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
+                    emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
+                }
+                state->emitting = false;
+            }
+            return Value{};
+        };
+        schedule_listener_call(std::make_shared<FunctionValue>("push_worker", push_fn, nullptr, token), {});
     }
 
     return state->read_buffer_size < state->read_high_water_mark;
@@ -240,6 +257,81 @@ static DuplexOptions parse_duplex_options(const Value& opts_val) {
 // ============================================================================
 // CREATE DUPLEX STREAM OBJECT
 // ============================================================================
+
+static void process_write_queue(DuplexStreamStatePtr state) {
+    // 1. If the buffer is empty, we are done for now
+    if (state->write_buffer.empty() || state->destroyed) {
+        state->writing = false;
+
+        if (state->destroyed) return;
+
+        // If the stream was told to end, and we just finished the last chunk...
+        if (state->writable_ended) {
+            state->writable_finished = true;
+            emit_duplex_event_sync(state, state->finish_listeners, {});
+
+            // Handle closing logic here once both sides are done
+            if (state->readable_ended || !state->allow_half_open) {
+                emit_duplex_event_sync(state, state->close_listeners, {});
+            }
+        } else {
+            // Otherwise, we just drained and can take more data
+            emit_duplex_event_sync(state, state->drain_listeners, {});
+        }
+        return;
+    }
+
+    // Mark as writing
+    state->writing = true;
+
+    // Grab the current chunk
+    auto req = std::move(state->write_buffer.front());
+    state->write_buffer.pop_front();  // should add this line
+    auto chunk_buf = std::make_shared<BufferValue>();
+    chunk_buf->data.assign(req->data.begin(), req->data.end());
+    chunk_buf->encoding = state->write_encoding;
+
+    FunctionPtr callback = req->callback;
+    size_t bytes_size = req->data.size();
+
+    Token tok{};
+    tok.loc = TokenLocation("<duplex-write-worker>", 0, 0, 0);
+
+    // Create the task
+    auto task_fn = [state, chunk_buf, callback, bytes_size](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+        if (state->destroyed) return std::monostate{};
+
+        // 1. Run the implementation
+        if (state->write_impl) {
+            try {
+                state->evaluator->invoke_function(state->write_impl, {Value{chunk_buf}}, state->env, token);
+            } catch (...) {}
+        }
+
+        if (state->write_buffer_size >= bytes_size) {
+            state->write_buffer_size -= bytes_size;
+        } else {
+            state->write_buffer_size = 0;
+        }
+
+        // 3. Fire callback
+        if (callback) {
+            emit_duplex_event_sync(state, {callback}, {});
+        }
+
+        // 4. TRIGGER NEXT TICK
+        // Do NOT call process_write_queue(state) directly here.
+        // Schedule it so the current task finishes and clears its stack first.
+        state->writing = false;  // Reset so the next call can proceed
+        schedule_listener_call(std::make_shared<FunctionValue>("next_write", [state](const std::vector<Value>&, EnvPtr, const Token&) {
+            process_write_queue(state);
+            return std::monostate{}; }, nullptr, token), {});
+
+        return std::monostate{};
+    };
+
+    schedule_listener_call(std::make_shared<FunctionValue>("write_worker", task_fn, nullptr, tok), {});
+}
 
 static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     auto obj = std::make_shared<ObjectValue>();
@@ -416,38 +508,20 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
             return Value{true};
         }
 
+        auto req = std::make_unique<WriteRequest>(WriteRequest{std::move(bytes), callback});
+        size_t size = req->data.size();
+
         // Add to write buffer
-        state->write_buffer.push_back(bytes);
-        state->write_buffer_size += bytes.size();
+        state->write_buffer.push_back(std::move(req));
+        state->write_buffer_size += size;
 
-        // Call user write implementation if provided
-        if (state->write_impl && !state->writing) {
+        if (!state->writing) {
             state->writing = true;
-
-            // Create buffer value for user
-            auto chunk_buf = std::make_shared<BufferValue>();
-            chunk_buf->data.assign(bytes.begin(), bytes.end());
-            chunk_buf->encoding = encoding;
-
-            try {
-                state->evaluator->invoke_function(state->write_impl, {Value{chunk_buf}}, state->env, token);
-            } catch (...) {
-                // Handle write error
-            }
-
-            state->writing = false;
-
-            // Pop from buffer since it's been written
-            state->write_buffer.pop_front();
-            state->write_buffer_size -= bytes.size();
+            process_write_queue(state);
         }
 
-        if (callback) {
-            emit_duplex_event_sync(state, {callback}, {});
-        }
-
-        bool needs_drain = (state->write_buffer_size >= state->write_high_water_mark);
-        return Value{!needs_drain};
+        bool is_under_limit = state->write_buffer_size < state->write_high_water_mark;
+        return Value{is_under_limit};
     };
     obj->properties["write"] = {
         Value{std::make_shared<FunctionValue>("duplex.write", write_impl, nullptr, tok)},
@@ -491,61 +565,58 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     // ========================================================================
 
     auto end_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-        if (state->destroyed) {
-            throw SwaziError("Error", "Cannot end destroyed stream", token.loc);
-        }
-        if (state->writable_ended) {
-            return std::monostate{};
-        }
+        if (state->destroyed || state->writable_ended) return std::monostate{};
 
         state->writable_ended = true;
 
         FunctionPtr callback = nullptr;
+        Value chunk = std::monostate{};
 
-        if (!args.empty() && !std::holds_alternative<std::monostate>(args[0])) {
+        // 1. Identify what the arguments are
+        if (args.size() >= 1) {
             if (std::holds_alternative<FunctionPtr>(args[0])) {
                 callback = std::get<FunctionPtr>(args[0]);
             } else {
-                // Write final chunk first
-                std::vector<char> bytes;
-                if (std::holds_alternative<BufferPtr>(args[0])) {
-                    auto buf = std::get<BufferPtr>(args[0]);
-                    bytes = std::vector<char>(buf->data.begin(), buf->data.end());
-                } else if (std::holds_alternative<std::string>(args[0])) {
-                    std::string str = std::get<std::string>(args[0]);
-                    bytes = std::vector<char>(str.begin(), str.end());
-                }
-
-                if (!bytes.empty() && state->write_impl) {
-                    auto chunk_buf = std::make_shared<BufferValue>();
-                    chunk_buf->data.assign(bytes.begin(), bytes.end());
-                    try {
-                        state->evaluator->invoke_function(state->write_impl, {Value{chunk_buf}}, state->env, token);
-                    } catch (...) {}
-                }
+                chunk = args[0];
             }
         }
-
         if (args.size() >= 2 && std::holds_alternative<FunctionPtr>(args[1])) {
             callback = std::get<FunctionPtr>(args[1]);
         }
 
-        // Mark as finished
-        state->writable_finished = true;
-        emit_duplex_event_sync(state, state->finish_listeners, {});
+        // 2. Handle the final chunk (if any)
+        bool has_chunk = !std::holds_alternative<std::monostate>(chunk);
+        if (has_chunk) {
+            // Convert to bytes logic (same as write_impl)
+            std::vector<char> bytes;
+            if (std::holds_alternative<BufferPtr>(chunk)) {
+                auto buf = std::get<BufferPtr>(chunk);
+                bytes = std::vector<char>(buf->data.begin(), buf->data.end());
+            } else if (std::holds_alternative<std::string>(chunk)) {
+                std::string str = std::get<std::string>(chunk);
+                bytes = std::vector<char>(str.begin(), str.end());
+            }
 
-        if (callback) {
-            emit_duplex_event_sync(state, {callback}, {});
+            auto req = std::make_unique<WriteRequest>(WriteRequest{std::move(bytes), callback});
+            size_t size = req->data.size();
+
+            state->write_buffer.push_back(std::move(req));
+            state->write_buffer_size += size;
+        } else if (callback) {
+            // No chunk, but we have a callback.
+            // We should trigger it when the stream actually finishes.
+            state->finish_listeners.push_back(callback);
         }
 
-        // If not allowHalfOpen, end readable too
+        // 3. Start processing if not already
+        if (!state->writing) {
+            state->writing = true;
+            process_write_queue(state);
+        }
+
+        // 4. Handle readable side if needed
         if (!state->allow_half_open && !state->readable_ended) {
-            duplex_push(state, {});  // Push null to end
-        }
-
-        // If both sides ended, close
-        if (state->readable_ended && state->writable_ended) {
-            emit_duplex_event_sync(state, state->close_listeners, {});
+            duplex_push(state, {});
         }
 
         return std::monostate{};
