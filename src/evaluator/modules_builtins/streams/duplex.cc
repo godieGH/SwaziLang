@@ -67,6 +67,7 @@ struct DuplexStreamState : public std::enable_shared_from_this<DuplexStreamState
 
     EnvPtr env;
     Evaluator* evaluator = nullptr;
+    ObjectPtr recv;
 
     // Event listeners
     std::vector<FunctionPtr> data_listeners;
@@ -172,6 +173,7 @@ static bool duplex_push(DuplexStreamStatePtr state, const std::vector<char>& dat
         token.loc = TokenLocation("<duplex-push-worker>", 0, 0, 0);
         auto push_fn = [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
             if (state->readable_flowing && !state->readable_paused) {
+                bool already_refill = false;
                 while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
                     auto chunk_data = state->read_buffer.front();
                     state->read_buffer.pop_front();
@@ -183,6 +185,27 @@ static bool duplex_push(DuplexStreamStatePtr state, const std::vector<char>& dat
 
                     Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
                     emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
+
+                    // refill the buffer
+                    if ((state->read_buffer_size / state->read_high_water_mark) < 0.25 && !already_refill) {
+                        if (state->read_impl && !state->reading) {
+                            schedule_listener_call(std::make_shared<FunctionValue>("rifill_worker", [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+                                state->reading = true;
+                                try {
+                                    state->evaluator->call_function_with_receiver_public(state->read_impl, state->recv, {}, state->env, token);
+                                } catch (const SwaziError& e) {
+                                  if (state->error_listeners.empty()) {
+                                    std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
+                                  } else {
+                                    Value error{std::string(e.what())};
+                                    emit_duplex_event_sync(state, state->error_listeners, {error});
+                                  }
+                                } catch (...) {}
+                              state->reading = false;
+                              return Value{}; }, nullptr, token), {});
+                        }
+                        already_refill = true;
+                    }
                 }
                 state->emitting = false;
             }
@@ -268,7 +291,7 @@ static DuplexOptions parse_duplex_options(const Value& opts_val) {
 // CREATE DUPLEX STREAM OBJECT
 // ============================================================================
 
-static void process_write_queue(DuplexStreamStatePtr state, ObjectPtr recv) {
+static void process_write_queue(DuplexStreamStatePtr state) {
     // 1. If the buffer is empty, we are done for now
     if (state->write_buffer.empty() || state->destroyed) {
         state->writing = false;
@@ -316,13 +339,20 @@ static void process_write_queue(DuplexStreamStatePtr state, ObjectPtr recv) {
     tok.loc = TokenLocation("<duplex-write-worker>", 0, 0, 0);
 
     // Create the task
-    auto task_fn = [recv, state, chunk_buf, callback, bytes_size](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+    auto task_fn = [state, chunk_buf, callback, bytes_size](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
         if (state->destroyed) return std::monostate{};
 
         // 1. Run the implementation
         if (state->write_impl) {
             try {
-                state->evaluator->call_function_with_receiver_public(state->write_impl, recv, {Value{chunk_buf}}, state->env, token);
+                state->evaluator->call_function_with_receiver_public(state->write_impl, state->recv, {Value{chunk_buf}}, state->env, token);
+            } catch (const SwaziError& e) {
+                if (state->error_listeners.empty()) {
+                    std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
+                } else {
+                    Value error{std::string(e.what())};
+                    emit_duplex_event_sync(state, state->error_listeners, {error});
+                }
             } catch (...) {}
         }
 
@@ -341,8 +371,8 @@ static void process_write_queue(DuplexStreamStatePtr state, ObjectPtr recv) {
         // Do NOT call process_write_queue(state) directly here.
         // Schedule it so the current task finishes and clears its stack first.
         state->writing = false;  // Reset so the next call can proceed
-        schedule_listener_call(std::make_shared<FunctionValue>("next_write", [state, recv](const std::vector<Value>&, EnvPtr, const Token&) {
-            process_write_queue(state, recv);
+        schedule_listener_call(std::make_shared<FunctionValue>("next_write", [state](const std::vector<Value>&, EnvPtr, const Token&) {
+            process_write_queue(state);
             return std::monostate{}; }, nullptr, token), {});
 
         return std::monostate{};
@@ -352,6 +382,7 @@ static void process_write_queue(DuplexStreamStatePtr state, ObjectPtr recv) {
 
 static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     auto obj = std::make_shared<ObjectValue>();
+    state->recv = obj;
     Token tok{};
     tok.loc = TokenLocation("<duplex>", 0, 0, 0);
 
@@ -359,7 +390,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     // on(event, callback)
     // ========================================================================
 
-    auto on_impl = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+    auto on_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (args.size() < 2) {
             throw SwaziError("TypeError", "duplex.on requires (event, callback)", token.loc);
         }
@@ -380,7 +411,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
             if (is_first && !state->readable_ended && !state->destroyed) {
                 state->readable_flowing = true;
 
-                auto on_data_fn = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                auto on_data_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                     // Emit any buffered data
                     while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
                         auto chunk_data = state->read_buffer.front();
@@ -399,10 +430,15 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
                     if (state->read_impl && !state->reading) {
                         state->reading = true;
                         try {
-                            state->evaluator->call_function_with_receiver_public(state->read_impl, obj, {}, state->env, token);
-                        } catch (...) {
-                            // Ignore errors in user read implementation
-                        }
+                            state->evaluator->call_function_with_receiver_public(state->read_impl, state->recv, {}, state->env, token);
+                        } catch (const SwaziError& e) {
+                            if (state->error_listeners.empty()) {
+                                std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
+                            } else {
+                                Value error{std::string(e.what())};
+                                emit_duplex_event_sync(state, state->error_listeners, {error});
+                            }
+                        } catch (...) {}
                         state->reading = false;
                     }
                     return Value{};
@@ -447,13 +483,13 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     // resume() - Resume readable side
     // ========================================================================
 
-    auto resume_impl = [state, obj](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+    auto resume_impl = [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
         bool was_paused = state->readable_paused;
         state->readable_paused = false;
         state->readable_flowing = true;
 
         if (was_paused) {
-            auto resume_fn = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto resume_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 // Emit buffered data
                 while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
                     auto chunk_data = state->read_buffer.front();
@@ -472,7 +508,14 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
                 if (state->read_impl && !state->reading && state->read_buffer.empty()) {
                     state->reading = true;
                     try {
-                        state->evaluator->call_function_with_receiver_public(state->read_impl, obj, {}, state->env, token);
+                        state->evaluator->call_function_with_receiver_public(state->read_impl, state->recv, {}, state->env, token);
+                    } catch (const SwaziError& e) {
+                        if (state->error_listeners.empty()) {
+                            std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
+                        } else {
+                            Value error{std::string(e.what())};
+                            emit_duplex_event_sync(state, state->error_listeners, {error});
+                        }
                     } catch (...) {}
                     state->reading = false;
                 }
@@ -492,7 +535,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     // write(data, [encoding], [callback])
     // ========================================================================
 
-    auto write_impl = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+    auto write_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (state->destroyed) {
             throw SwaziError("Error", "Cannot write to destroyed stream", token.loc);
         }
@@ -544,7 +587,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
 
         if (!state->writing) {
             state->writing = true;
-            process_write_queue(state, obj);
+            process_write_queue(state);
         }
 
         bool is_under_limit = state->write_buffer_size < state->write_high_water_mark;
@@ -590,13 +633,20 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     // ========================================================================
     // read() - Pull data from the readable buffer
     // ========================================================================
-    auto read_impl = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+    auto read_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (state->readable_ended || state->destroyed) return Value{};
 
         if (state->read_impl && !state->reading && state->read_buffer.empty()) {
             state->reading = true;
             try {
-                state->evaluator->call_function_with_receiver_public(state->read_impl, obj, {}, state->env, token);
+                state->evaluator->call_function_with_receiver_public(state->read_impl, state->recv, {}, state->env, token);
+            } catch (const SwaziError& e) {
+                if (state->error_listeners.empty()) {
+                    std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
+                } else {
+                    Value error{std::string(e.what())};
+                    emit_duplex_event_sync(state, state->error_listeners, {error});
+                }
             } catch (...) {}
             state->reading = false;
         }
@@ -624,7 +674,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     // end([finalChunk], [callback])
     // ========================================================================
 
-    auto end_impl = [state, obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+    auto end_impl = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
         if (state->destroyed || state->writable_ended) return std::monostate{};
 
         state->writable_ended = true;
@@ -671,7 +721,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
         // 3. Start processing if not already
         if (!state->writing) {
             state->writing = true;
-            process_write_queue(state, obj);
+            process_write_queue(state);
         }
 
         // 4. Handle readable side if needed
