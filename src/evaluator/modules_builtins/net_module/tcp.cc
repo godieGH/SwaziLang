@@ -238,7 +238,7 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
         socket_obj->properties["close"] = {Value{close_fn}, false, false, true, tok};
 
         // socket.on(event, handler)
-        auto on_impl = [sock_inst](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
@@ -259,7 +259,7 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
                 sock_inst->on_error_handler = handler;
             }
 
-            return std::monostate{};
+            return socket_obj;
         };
         auto on_fn = std::make_shared<FunctionValue>("socket.on", on_impl, nullptr, tok);
         socket_obj->properties["on"] = {Value{on_fn}, false, false, true, tok};
@@ -510,7 +510,7 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
         socket_obj->properties["close"] = {Value{close_fn}, false, false, true, stok};
 
         // socket.on(event, handler)
-        auto on_impl = [sock_inst](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
@@ -535,7 +535,7 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
                 sock_inst->on_connect_handler = handler;
             }
 
-            return std::monostate{};
+            return socket_obj;
         };
         auto on_fn = std::make_shared<FunctionValue>("socket.on", on_impl, nullptr, stok);
         socket_obj->properties["on"] = {Value{on_fn}, false, false, true, stok};

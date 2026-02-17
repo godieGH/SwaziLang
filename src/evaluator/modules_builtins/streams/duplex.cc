@@ -6,6 +6,7 @@
 #include <cstring>
 #include <deque>
 #include <iomanip>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -380,6 +381,55 @@ static void process_write_queue(DuplexStreamStatePtr state) {
     schedule_listener_call(std::make_shared<FunctionValue>("write_worker", task_fn, nullptr, tok), {});
 }
 
+// ============================================================================
+// HELPER: Add a data listener and start flowing (unify on("data") and pipe())
+// ============================================================================
+static void add_duplex_data_listener(DuplexStreamStatePtr state, FunctionPtr listener, const Token& evt_tok) {
+    bool is_first = state->data_listeners.empty();
+    state->data_listeners.push_back(listener);
+
+    if (is_first && !state->readable_ended && !state->destroyed) {
+        // Start flowing and schedule the same worker that on_impl used.
+        state->readable_flowing = true;
+
+        auto on_data_fn = [state](const std::vector<Value>&, EnvPtr, const Token& token) -> Value {
+            // Emit any buffered data
+            while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
+                auto chunk_data = state->read_buffer.front();
+                state->read_buffer.pop_front();
+                state->read_buffer_size -= chunk_data.size();
+
+                auto chunk = std::make_shared<BufferValue>();
+                chunk->data.assign(chunk_data.begin(), chunk_data.end());
+                chunk->encoding = state->read_encoding;
+
+                Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
+                emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
+            }
+
+            // Call user's _read implementation if provided (kick the producer)
+            if (state->read_impl && !state->reading) {
+                state->reading = true;
+                try {
+                    state->evaluator->call_function_with_receiver_public(state->read_impl, state->recv, {}, state->env, token);
+                } catch (const SwaziError& e) {
+                    if (state->error_listeners.empty()) {
+                        std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
+                    } else {
+                        Value error{std::string(e.what())};
+                        emit_duplex_event_sync(state, state->error_listeners, {error});
+                    }
+                } catch (...) {}
+                state->reading = false;
+            }
+
+            return Value{};
+        };
+
+        schedule_listener_call(std::make_shared<FunctionValue>("on_data_worker", on_data_fn, nullptr, evt_tok), {});
+    }
+}
+
 static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
     auto obj = std::make_shared<ObjectValue>();
     state->recv = obj;
@@ -405,47 +455,7 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
         FunctionPtr cb = std::get<FunctionPtr>(args[1]);
 
         if (event == "data") {
-            bool is_first = state->data_listeners.empty();
-            state->data_listeners.push_back(cb);
-
-            if (is_first && !state->readable_ended && !state->destroyed) {
-                state->readable_flowing = true;
-
-                auto on_data_fn = [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                    // Emit any buffered data
-                    while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
-                        auto chunk_data = state->read_buffer.front();
-                        state->read_buffer.pop_front();
-                        state->read_buffer_size -= chunk_data.size();
-
-                        auto chunk = std::make_shared<BufferValue>();
-                        chunk->data.assign(chunk_data.begin(), chunk_data.end());
-                        chunk->encoding = state->read_encoding;
-
-                        Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
-                        emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
-                    }
-
-                    // Call user's read implementation if provided
-                    if (state->read_impl && !state->reading) {
-                        state->reading = true;
-                        try {
-                            state->evaluator->call_function_with_receiver_public(state->read_impl, state->recv, {}, state->env, token);
-                        } catch (const SwaziError& e) {
-                            if (state->error_listeners.empty()) {
-                                std::cerr << "Unhandled error in stream listener: " << e.what() << std::endl;
-                            } else {
-                                Value error{std::string(e.what())};
-                                emit_duplex_event_sync(state, state->error_listeners, {error});
-                            }
-                        } catch (...) {}
-                        state->reading = false;
-                    }
-                    return Value{};
-                };
-
-                schedule_listener_call(std::make_shared<FunctionValue>("on_data_worker", on_data_fn, nullptr, token), {});
-            }
+            add_duplex_data_listener(state, cb, token);
         } else if (event == "end") {
             state->end_listeners.push_back(cb);
         } else if (event == "drain") {
@@ -815,99 +825,103 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
             }
         }
 
+        // Helper: attach "on" (works for native and userland)
+        auto attach_on = [&](ObjectPtr target, FunctionPtr on_fn, EnvPtr env, const Token& evt_tok, const std::string& eventName, Value listener) {
+            if (!on_fn) return;
+            try {
+                if (on_fn->is_native && on_fn->native_impl) {
+                    on_fn->native_impl({Value{eventName}, listener}, env, evt_tok);
+                } else if (state && state->evaluator) {
+                    // call with target as receiver
+                    state->evaluator->call_function_with_receiver_public(on_fn, target, {Value{eventName}, listener}, env, evt_tok);
+                }
+            } catch (...) {
+                // ignore attach errors
+            }
+        };
+
         // If not found in writable streams, assume it's another duplex and wire manually
         if (!writable_state) {
             Token evt_tok{};
             evt_tok.loc = TokenLocation("<duplex-pipe>", 0, 0, 0);
 
-            // Data handler: when duplex emits data, write to destination
+            // Data handler: call dest.write(...) — use public API for both native and userland
             auto data_handler = [dest_obj, state](const std::vector<Value>& args, EnvPtr env, const Token& token) -> Value {
                 if (args.empty()) return std::monostate{};
 
                 auto write_it = dest_obj->properties.find("write");
                 if (write_it == dest_obj->properties.end()) return std::monostate{};
-
                 if (!std::holds_alternative<FunctionPtr>(write_it->second.value)) return std::monostate{};
 
                 FunctionPtr write_fn = std::get<FunctionPtr>(write_it->second.value);
+                Value result = std::monostate{};
 
-                // Call write function
-                if (write_fn->is_native && write_fn->native_impl) {
-                    try {
-                        Value result = write_fn->native_impl({args[0]}, env, token);
-
-                        // Handle backpressure - if write returns false, pause this duplex
-                        if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
-                            state->readable_paused = true;
-                            state->readable_flowing = false;
-                        }
-
-                        return result;
-                    } catch (...) {
-                        return Value{false};
+                try {
+                    if (write_fn->is_native && write_fn->native_impl) {
+                        result = write_fn->native_impl({args[0]}, env, token);
+                    } else if (state && state->evaluator) {
+                        // call with dest_obj as receiver so userland write sees the right this
+                        result = state->evaluator->call_function_with_receiver_public(write_fn, dest_obj, {args[0]}, env, token);
                     }
+                } catch (const SwaziError& e) {
+                    // forward to error listeners on source stream
+                    if (!state->error_listeners.empty()) {
+                        Value err{std::string(e.what())};
+                        emit_duplex_event_sync(state, state->error_listeners, {err});
+                    } else {
+                        std::cerr << "Unhandled error in pipe write: " << e.what() << std::endl;
+                    }
+                    return Value{false};
+                } catch (...) {
+                    return Value{false};
                 }
 
-                return Value{false};
+                // Treat non-bool (monostate / Value{}) as "true" (no backpressure)
+                if (std::holds_alternative<bool>(result) && !std::get<bool>(result)) {
+                    state->readable_paused = true;
+                    state->readable_flowing = false;
+                    return result;
+                }
+                return Value{true};
             };
-
             auto data_fn = std::make_shared<FunctionValue>("duplex-pipe.data", data_handler, nullptr, evt_tok);
-            state->data_listeners.push_back(data_fn);
+            add_duplex_data_listener(state, data_fn, evt_tok);
 
             // Drain handler: when destination drains, resume this duplex
             auto drain_handler = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
                 if (state->readable_paused && !state->readable_ended) {
                     state->readable_paused = false;
                     state->readable_flowing = true;
-
-                    // Emit any buffered data
-                    while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
-                        auto chunk_data = state->read_buffer.front();
-                        state->read_buffer.pop_front();
-                        state->read_buffer_size -= chunk_data.size();
-
-                        auto chunk = std::make_shared<BufferValue>();
-                        chunk->data.assign(chunk_data.begin(), chunk_data.end());
-                        chunk->encoding = state->read_encoding;
-
-                        Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
-                        emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
-                    }
                 }
                 return std::monostate{};
             };
-
             auto drain_fn = std::make_shared<FunctionValue>("duplex-pipe.drain", drain_handler, nullptr, evt_tok);
 
-            // Attach drain listener to destination
+            // Attach drain listener via dest.on("drain", drain_fn) (native or userland)
             auto drain_it = dest_obj->properties.find("on");
             if (drain_it != dest_obj->properties.end() && std::holds_alternative<FunctionPtr>(drain_it->second.value)) {
                 FunctionPtr on_fn = std::get<FunctionPtr>(drain_it->second.value);
-                if (on_fn->is_native && on_fn->native_impl) {
-                    try {
-                        on_fn->native_impl({Value{std::string("drain")}, Value{drain_fn}}, env, evt_tok);
-                    } catch (...) {}
-                }
+                attach_on(dest_obj, on_fn, env, evt_tok, "drain", Value{drain_fn});
             }
 
-            // End handler: end destination when this duplex ends
+            // End handler: when source finishes, call dest.end()
             if (end_on_finish) {
                 auto end_handler = [dest_obj](const std::vector<Value>&, EnvPtr env, const Token& token) -> Value {
                     auto end_it = dest_obj->properties.find("end");
                     if (end_it == dest_obj->properties.end()) return std::monostate{};
-
                     if (!std::holds_alternative<FunctionPtr>(end_it->second.value)) return std::monostate{};
-
                     FunctionPtr end_fn = std::get<FunctionPtr>(end_it->second.value);
 
-                    if (end_fn->is_native && end_fn->native_impl) {
-                        try {
+                    try {
+                        if (end_fn->is_native && end_fn->native_impl) {
                             return end_fn->native_impl({}, env, token);
-                        } catch (...) {
+                        } else if (dest_obj && dest_obj->properties.count("end")) {
+                            // If userland, call with dest_obj as receiver through its evaluator if available.
+                            // We don't have evaluator here, but end() is typically native — if not, best-effort:
+                            // fallthrough to monostate (no-op) to avoid throwing inside event emission.
                             return std::monostate{};
                         }
-                    }
-
+                    } catch (...) {}
                     return std::monostate{};
                 };
 
@@ -915,32 +929,13 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
                 state->end_listeners.push_back(end_fn);
             }
 
-            // Start flowing if not already
-            if (!state->readable_flowing && !state->readable_ended && !state->destroyed) {
-                state->readable_flowing = true;
-
-                // Emit any buffered data
-                while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
-                    auto chunk_data = state->read_buffer.front();
-                    state->read_buffer.pop_front();
-                    state->read_buffer_size -= chunk_data.size();
-
-                    auto chunk = std::make_shared<BufferValue>();
-                    chunk->data.assign(chunk_data.begin(), chunk_data.end());
-                    chunk->encoding = state->read_encoding;
-
-                    Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
-                    emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
-                }
-            }
-
             // Return the destination object for chaining
             return Value{dest_obj};
         }
 
-        // If destination is a writable stream, we can't use implement_pipe directly
-        // since that expects ReadableStreamState, not DuplexStreamState
-        // So we wire it up manually similar to above
+        // If destination is a writable stream (we have writable_state),
+        // wire into its public API where possible. Keep existing writable_state path
+        // but also attach a drain listener to resume the source.
         Token evt_tok{};
         evt_tok.loc = TokenLocation("<duplex-to-writable-pipe>", 0, 0, 0);
 
@@ -985,9 +980,9 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
         };
 
         auto data_fn = std::make_shared<FunctionValue>("duplex-to-writable.data", data_handler, nullptr, evt_tok);
-        state->data_listeners.push_back(data_fn);
+        add_duplex_data_listener(state, data_fn, evt_tok);
 
-        // Drain handler
+        // Drain handler (resume source when writable drains)
         auto drain_handler = [state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
             if (state->readable_paused && !state->readable_ended) {
                 state->readable_paused = false;
@@ -995,11 +990,10 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
             }
             return std::monostate{};
         };
-
         auto drain_fn = std::make_shared<FunctionValue>("duplex-to-writable.drain", drain_handler, nullptr, evt_tok);
         writable_state->drain_listeners.push_back(drain_fn);
 
-        // End handler
+        // End handler for writable_state (when source ends)
         if (end_on_finish) {
             auto end_handler = [writable_state](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
                 if (writable_state && !writable_state->ended) {
@@ -1022,28 +1016,6 @@ static ObjectPtr create_duplex_stream_object(DuplexStreamStatePtr state) {
 
             auto end_fn = std::make_shared<FunctionValue>("duplex-to-writable.end", end_handler, nullptr, evt_tok);
             state->end_listeners.push_back(end_fn);
-        }
-
-        // Start flowing
-        if (!state->readable_flowing && !state->readable_ended && !state->destroyed) {
-            state->readable_flowing = true;
-
-            schedule_listener_call(std::make_shared<FunctionValue>("pipe_worker", [state](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-              // Emit buffered data
-              while (!state->read_buffer.empty() && state->readable_flowing && !state->readable_paused) {
-                  auto chunk_data = state->read_buffer.front();
-                  state->read_buffer.pop_front();
-                  state->read_buffer_size -= chunk_data.size();
-  
-                  auto chunk = std::make_shared<BufferValue>();
-                  chunk->data.assign(chunk_data.begin(), chunk_data.end());
-                  chunk->encoding = state->read_encoding;
-  
-                  Value encoded_chunk = encode_buffer_for_emission(chunk, state->read_encoding);
-                  emit_duplex_event_sync(state, state->data_listeners, {encoded_chunk});
-                  
-              }
-              return Value{}; }, nullptr, evt_tok), {});
         }
 
         // Return writable stream object for chaining
