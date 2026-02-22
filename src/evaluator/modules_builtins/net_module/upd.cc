@@ -48,6 +48,30 @@ static void udp_recv_cb(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf,
     const struct sockaddr* addr, unsigned flags) {
     UdpSocketInstance* inst = static_cast<UdpSocketInstance*>(handle->data);
 
+    if (nread == UV_ECONNREFUSED || nread < 0) {
+        uv_os_fd_t fd;
+        if (uv_fileno((uv_handle_t*)handle, &fd) == 0) {
+            char errbuf[512];
+            struct msghdr msg = {};
+            recvmsg(fd, &msg, MSG_ERRQUEUE);  // drain ICMP error
+        }
+
+        if (inst && inst->on_error_handler) {
+            std::string err_msg;
+            if (nread == UV_ECONNREFUSED)
+                err_msg = "Connection refused: peer unreachable";
+            else
+                err_msg = std::string("UDP receive error: ") + uv_strerror((int)nread);
+
+            FunctionPtr handler = inst->on_error_handler;
+            CallbackPayload* payload = new CallbackPayload(handler, {Value{err_msg}});
+            enqueue_callback_global(static_cast<void*>(payload));
+        }
+
+        delete[] buf->base;
+        return;  // don't fall through to the generic nread < 0 handler below
+    }
+
     if (nread > 0 && inst && inst->on_message_handler && addr) {
         // Extract sender info
         std::string sender_addr;
@@ -87,13 +111,6 @@ static void udp_recv_cb(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf,
         // Call handler with (message, rinfo)
         FunctionPtr handler = inst->on_message_handler;
         CallbackPayload* payload = new CallbackPayload(handler, {Value{buffer}, Value{rinfo}});
-        enqueue_callback_global(static_cast<void*>(payload));
-    }
-
-    if (nread < 0 && inst && inst->on_error_handler) {
-        auto err_msg = std::string("UDP receive error: ") + uv_strerror((int)nread);
-        FunctionPtr handler = inst->on_error_handler;
-        CallbackPayload* payload = new CallbackPayload(handler, {Value{err_msg}});
         enqueue_callback_global(static_cast<void*>(payload));
     }
 
@@ -169,6 +186,18 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
 
             unsigned int flags = (type == "udp6") ? AF_INET6 : AF_INET;
             int r = uv_udp_init_ex(loop, inst->udp_handle, flags);
+
+            if (r == 0) {
+                // Enable ICMP error reporting
+                uv_os_fd_t fd;
+                if (uv_fileno((uv_handle_t*)inst->udp_handle, &fd) == 0) {
+                    int one = 1;
+                    if (type == "udp6")
+                        setsockopt(fd, IPPROTO_IPV6, IPV6_RECVERR, &one, sizeof(one));
+                    else
+                        setsockopt(fd, IPPROTO_IP, IP_RECVERR, &one, sizeof(one));
+                }
+            }
 
             if (r != 0) {
                 // Init failed - clean up
