@@ -165,43 +165,45 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
 
     auto obj = std::make_shared<ObjectValue>();
 
+    auto constants_obj = std::make_shared<ObjectValue>();
+
     // ============= CONSTANTS =============
 
     // Export key sizes as constants
-    obj->properties["HASH_SHA256_BYTES"] = PropertyDescriptor{
+    constants_obj->properties["HASH_SHA256_BYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_hash_sha256_BYTES)},
         false, false, true, Token()};
-    obj->properties["HASH_SHA512_BYTES"] = PropertyDescriptor{
+    constants_obj->properties["HASH_SHA512_BYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_hash_sha512_BYTES)},
         false, false, true, Token()};
-    obj->properties["HASH_BLAKE2B_BYTES"] = PropertyDescriptor{
+    constants_obj->properties["HASH_BLAKE2B_BYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_generichash_BYTES)},
         false, false, true, Token()};
-    obj->properties["SECRETBOX_KEYBYTES"] = PropertyDescriptor{
+    constants_obj->properties["SECRETBOX_KEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_secretbox_KEYBYTES)},
         false, false, true, Token()};
-    obj->properties["SECRETBOX_NONCEBYTES"] = PropertyDescriptor{
+    constants_obj->properties["SECRETBOX_NONCEBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_secretbox_NONCEBYTES)},
         false, false, true, Token()};
-    obj->properties["SECRETBOX_MACBYTES"] = PropertyDescriptor{
+    constants_obj->properties["SECRETBOX_MACBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_secretbox_MACBYTES)},
         false, false, true, Token()};
-    obj->properties["BOX_PUBLICKEYBYTES"] = PropertyDescriptor{
+    constants_obj->properties["BOX_PUBLICKEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_box_PUBLICKEYBYTES)},
         false, false, true, Token()};
-    obj->properties["BOX_SECRETKEYBYTES"] = PropertyDescriptor{
+    constants_obj->properties["BOX_SECRETKEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_box_SECRETKEYBYTES)},
         false, false, true, Token()};
-    obj->properties["BOX_NONCEBYTES"] = PropertyDescriptor{
+    constants_obj->properties["BOX_NONCEBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_box_NONCEBYTES)},
         false, false, true, Token()};
-    obj->properties["SIGN_PUBLICKEYBYTES"] = PropertyDescriptor{
+    constants_obj->properties["SIGN_PUBLICKEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_sign_PUBLICKEYBYTES)},
         false, false, true, Token()};
-    obj->properties["SIGN_SECRETKEYBYTES"] = PropertyDescriptor{
+    constants_obj->properties["SIGN_SECRETKEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_sign_SECRETKEYBYTES)},
         false, false, true, Token()};
-    obj->properties["SIGN_BYTES"] = PropertyDescriptor{
+    constants_obj->properties["SIGN_BYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_sign_BYTES)},
         false, false, true, Token()};
 
@@ -1624,24 +1626,25 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
     }
 
     // Export PWHASH constants for recommended parameters
-    obj->properties["PWHASH_OPSLIMIT_INTERACTIVE"] = PropertyDescriptor{
+    constants_obj->properties["PWHASH_OPSLIMIT_INTERACTIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_OPSLIMIT_INTERACTIVE)},
         false, false, true, Token()};
-    obj->properties["PWHASH_MEMLIMIT_INTERACTIVE"] = PropertyDescriptor{
+    constants_obj->properties["PWHASH_MEMLIMIT_INTERACTIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_MEMLIMIT_INTERACTIVE)},
         false, false, true, Token()};
-    obj->properties["PWHASH_OPSLIMIT_MODERATE"] = PropertyDescriptor{
+    constants_obj->properties["PWHASH_OPSLIMIT_MODERATE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_OPSLIMIT_MODERATE)},
         false, false, true, Token()};
-    obj->properties["PWHASH_MEMLIMIT_MODERATE"] = PropertyDescriptor{
+    constants_obj->properties["PWHASH_MEMLIMIT_MODERATE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_MEMLIMIT_MODERATE)},
         false, false, true, Token()};
-    obj->properties["PWHASH_OPSLIMIT_SENSITIVE"] = PropertyDescriptor{
+    constants_obj->properties["PWHASH_OPSLIMIT_SENSITIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_OPSLIMIT_SENSITIVE)},
         false, false, true, Token()};
-    obj->properties["PWHASH_MEMLIMIT_SENSITIVE"] = PropertyDescriptor{
+    constants_obj->properties["PWHASH_MEMLIMIT_SENSITIVE"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_pwhash_MEMLIMIT_SENSITIVE)},
         false, false, true, Token()};
+    constants_obj->properties["PWHASH_SALTBYTES"] = PropertyDescriptor{Value{static_cast<double>(crypto_pwhash_SALTBYTES)}, false, false, true, Token()};
 
     // ============= CONSTANT-TIME COMPARISON =============
 
@@ -1815,16 +1818,16 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
     // ============= KEY DERIVATION (HKDF) =============
 
     // Export KDF constants
-    obj->properties["KDF_KEYBYTES"] = PropertyDescriptor{
+    constants_obj->properties["KDF_KEYBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_kdf_KEYBYTES)},
         false, false, true, Token()};
-    obj->properties["KDF_CONTEXTBYTES"] = PropertyDescriptor{
+    constants_obj->properties["KDF_CONTEXTBYTES"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_kdf_CONTEXTBYTES)},
         false, false, true, Token()};
-    obj->properties["KDF_BYTES_MIN"] = PropertyDescriptor{
+    constants_obj->properties["KDF_BYTES_MIN"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_kdf_BYTES_MIN)},
         false, false, true, Token()};
-    obj->properties["KDF_BYTES_MAX"] = PropertyDescriptor{
+    constants_obj->properties["KDF_BYTES_MAX"] = PropertyDescriptor{
         Value{static_cast<double>(crypto_kdf_BYTES_MAX)},
         false, false, true, Token()};
 
@@ -2148,6 +2151,105 @@ std::shared_ptr<ObjectValue> make_crypto_exports(EnvPtr env) {
         auto fn_value = std::make_shared<FunctionValue>("crypto.hkdfExpand", fn, env, tok);
         obj->properties["hkdfExpand"] = PropertyDescriptor{fn_value, false, false, false, tok};
     }
+
+    // ============= ECDH / ECDHE (X25519 via crypto_scalarmult) =============
+    {
+        auto ecdh_obj = std::make_shared<ObjectValue>();
+        Token tok;
+        tok.type = TokenType::IDENTIFIER;
+        tok.loc = TokenLocation("<crypto>", 0, 0, 0);
+
+        // crypto.ecdh.PRIMITIVE -> "x25519"
+        ecdh_obj->properties["PRIMITIVE"] = PropertyDescriptor{
+            Value{std::string("x25519")}, false, false, true, tok};
+        ecdh_obj->properties["PUBLIC_KEY_BYTES"] = PropertyDescriptor{
+            Value{static_cast<double>(crypto_scalarmult_BYTES)}, false, false, true, tok};
+        ecdh_obj->properties["SECRET_KEY_BYTES"] = PropertyDescriptor{
+            Value{static_cast<double>(crypto_scalarmult_SCALARBYTES)}, false, false, true, tok};
+
+        // crypto.ecdh.generateKeyPair() -> { publicKey: Buffer, secretKey: Buffer }
+        auto fn_keypair = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto sk = std::make_shared<BufferValue>();
+            sk->data.resize(crypto_scalarmult_SCALARBYTES);
+            randombytes_buf(sk->data.data(), sk->data.size());
+
+            auto pk = std::make_shared<BufferValue>();
+            pk->data.resize(crypto_scalarmult_BYTES);
+
+            // derive public key from secret key
+            if (crypto_scalarmult_base(pk->data.data(), sk->data.data()) != 0)
+                throw SwaziError("CryptoError", "keypair generation failed", token.loc);
+
+            sk->encoding = pk->encoding = "binary";
+
+            auto result = std::make_shared<ObjectValue>();
+            result->properties["publicKey"] = PropertyDescriptor{Value{pk}, false, false, true, Token()};
+            result->properties["secretKey"] = PropertyDescriptor{Value{sk}, false, false, true, Token()};
+            return Value{result};
+        };
+        ecdh_obj->properties["generateKeyPair"] = PropertyDescriptor{
+            std::make_shared<FunctionValue>("ecdh.generateKeyPair", fn_keypair, env, tok),
+            false, false, false, tok};
+
+        // crypto.ecdh.getPublicKey(secretKey) -> Buffer
+        auto fn_pubkey = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.empty() || !std::holds_alternative<BufferPtr>(args[0]))
+                throw SwaziError("TypeError", "getPublicKey requires a Buffer secretKey", token.loc);
+
+            BufferPtr sk = std::get<BufferPtr>(args[0]);
+            if (sk->data.size() != crypto_scalarmult_SCALARBYTES)
+                throw SwaziError("CryptoError", "secretKey must be 32 bytes", token.loc);
+
+            auto pk = std::make_shared<BufferValue>();
+            pk->data.resize(crypto_scalarmult_BYTES);
+
+            if (crypto_scalarmult_base(pk->data.data(), sk->data.data()) != 0)
+                throw SwaziError("CryptoError", "public key derivation failed", token.loc);
+
+            pk->encoding = "binary";
+            return Value{pk};
+        };
+        ecdh_obj->properties["getPublicKey"] = PropertyDescriptor{
+            std::make_shared<FunctionValue>("ecdh.getPublicKey", fn_pubkey, env, tok),
+            false, false, false, tok};
+
+        // crypto.ecdh.computeSecret(mySecretKey, theirPublicKey) -> Buffer (raw shared secret)
+        auto fn_secret = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            if (args.size() < 2)
+                throw SwaziError("TypeError",
+                    "computeSecret requires (mySecretKey, theirPublicKey)", token.loc);
+
+            if (!std::holds_alternative<BufferPtr>(args[0]))
+                throw SwaziError("TypeError", "mySecretKey must be Buffer", token.loc);
+            if (!std::holds_alternative<BufferPtr>(args[1]))
+                throw SwaziError("TypeError", "theirPublicKey must be Buffer", token.loc);
+
+            BufferPtr sk = std::get<BufferPtr>(args[0]);
+            BufferPtr pk = std::get<BufferPtr>(args[1]);
+
+            if (sk->data.size() != crypto_scalarmult_SCALARBYTES)
+                throw SwaziError("CryptoError", "mySecretKey must be 32 bytes", token.loc);
+            if (pk->data.size() != crypto_scalarmult_BYTES)
+                throw SwaziError("CryptoError", "theirPublicKey must be 32 bytes", token.loc);
+
+            auto shared = std::make_shared<BufferValue>();
+            shared->data.resize(crypto_scalarmult_BYTES);
+
+            if (crypto_scalarmult(shared->data.data(), sk->data.data(), pk->data.data()) != 0)
+                throw SwaziError("CryptoError",
+                    "ECDH failed (possible low-order point attack)", token.loc);
+
+            shared->encoding = "binary";
+            return Value{shared};
+        };
+        ecdh_obj->properties["computeSecret"] = PropertyDescriptor{
+            std::make_shared<FunctionValue>("ecdh.computeSecret", fn_secret, env, tok),
+            false, false, false, tok};
+
+        obj->properties["ecdh"] = PropertyDescriptor{Value{ecdh_obj}, false, false, true, tok};
+    }
+
+    obj->properties["constants"] = PropertyDescriptor{Value{constants_obj}, false, false, true, Token()};
 
     return obj;
 }
