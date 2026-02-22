@@ -3703,6 +3703,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 };
                 return Value{std::make_shared<FunctionValue>("native:fn.apply", native_impl, env, mem->token)};
             }
+
+            {
+                auto it = fn->properties.find(prop);
+                if (it != fn->properties.end()) {
+                    return it->second.value;
+                }
+            }
         }
 
         // String property 'herufi' (length)
@@ -5094,6 +5101,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (!op) return std::monostate{};
             std::string key = to_property_key(indexVal, idx->token);
             return get_object_property(op, key, env, idx->token);
+        }
+
+        if (std::holds_alternative<FunctionPtr>(objVal)) {
+            FunctionPtr fp = std::get<FunctionPtr>(objVal);
+            std::string key = to_property_key(indexVal, idx->token);
+            auto it = fp->properties.find(key);
+            if (it != fp->properties.end()) return it->second.value;
+            return std::monostate{};
         }
 
         throw std::runtime_error(

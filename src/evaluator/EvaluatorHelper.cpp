@@ -1719,11 +1719,12 @@ std::string Evaluator::print_object(
             props.push_back({kv.first, &kv.second});
         }
 
-        if (props.empty()) return "{}";
+        if (props.empty()) return class_name.empty() ? "{}" : class_name + " {}";
 
         bool inline_ok = should_inline(o);
         if (inline_ok) {
             std::ostringstream oss;
+            if (!class_name.empty()) oss << class_name << " ";
             oss << "{";
             for (size_t i = 0; i < props.size(); ++i) {
                 if (i) oss << ", ";
@@ -1740,6 +1741,7 @@ std::string Evaluator::print_object(
 
         std::ostringstream oss;
         std::string ind(depth, ' ');
+        if (!class_name.empty()) oss << class_name << " ";
         oss << "{\n";
         for (size_t i = 0; i < props.size(); ++i) {
             const auto& key = props[i].first;

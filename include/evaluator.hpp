@@ -1139,6 +1139,8 @@ struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
 
     bool is_wrapped() const { return wrapped_original != nullptr; }
 
+    std::unordered_map<std::string, PropertyDescriptor> properties;
+
     FunctionPtr get_original() const {
         auto fn = const_cast<FunctionValue*>(this)->shared_from_this();
         while (fn->wrapped_original) {

@@ -286,6 +286,14 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 set_object_property(op, prop, rhs, env, idx->token);
                 return;
             }
+
+            if (std::holds_alternative<FunctionPtr>(objVal)) {
+                FunctionPtr fp = std::get<FunctionPtr>(objVal);
+                std::string prop = to_property_key(indexVal, idx->token);
+                fp->properties[prop] = PropertyDescriptor{rhs, false, false, false, idx->token};
+                return;
+            }
+
             throw std::runtime_error(
                 "TypeError at " + idx->token.loc.to_string() +
                 "\nAttempted index assignment on non-array/non-object value." +
@@ -312,6 +320,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             if (std::holds_alternative<ObjectPtr>(objVal)) {
                 ObjectPtr op = std::get<ObjectPtr>(objVal);
                 set_object_property(op, mem->property, rhs, env, mem->token);
+                return;
+            }
+
+            if (std::holds_alternative<FunctionPtr>(objVal)) {
+                FunctionPtr fp = std::get<FunctionPtr>(objVal);
+                fp->properties[mem->property] = PropertyDescriptor{rhs, false, false, false, mem->token};
                 return;
             }
 
