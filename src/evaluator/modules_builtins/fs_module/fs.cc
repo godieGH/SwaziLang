@@ -928,7 +928,7 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         auto file_obj = make_file_exports(env);
         auto it = file_obj->properties.find("open");
         if (it != file_obj->properties.end()) {
-            obj->properties["fs.open"] = PropertyDescriptor{it->second.value, false, false, true, Token()};
+            obj->properties["open"] = PropertyDescriptor{it->second.value, false, false, true, Token()};
         }
     }
 
