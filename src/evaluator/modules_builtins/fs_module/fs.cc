@@ -524,6 +524,8 @@ static Value build_stat_object(const std::string& path, bool use_lstat, const To
 }
 
 // ============= MAIN EXPORTS FUNCTION =============
+// declare for fs.open(...) so it can use what file.cc expose
+std::shared_ptr<ObjectValue> make_file_exports(EnvPtr env);
 
 std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
     auto obj = std::make_shared<ObjectValue>();
@@ -918,6 +920,16 @@ std::shared_ptr<ObjectValue> make_fs_exports(EnvPtr env) {
         },
             env);
         obj->properties["mkfifo"] = PropertyDescriptor{fn, false, false, true, Token()};
+    }
+
+    // fs.open(uri, mode) -> FileValue
+    // check file.cc for more info
+    {
+        auto file_obj = make_file_exports(env);
+        auto it = file_obj->properties.find("open");
+        if (it != file_obj->properties.end()) {
+            obj->properties["fs.open"] = PropertyDescriptor{it->second.value, false, false, true, Token()};
+        }
     }
 
     // fs.setTimes(path, atime, mtime) -> bool
