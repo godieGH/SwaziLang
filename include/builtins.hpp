@@ -35,7 +35,7 @@ std::shared_ptr<ObjectValue> make_events_exports(EnvPtr env);
 Value native_createStdout(EnvPtr env, Evaluator* evaluator);
 Value native_createStderr(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_stdin_exports(EnvPtr env);
-std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env);
+std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_uv_exports(EnvPtr env);
 
 // Forward declaration: native createServer implementation (defined in HttpAPI.cpp)

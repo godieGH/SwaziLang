@@ -42,6 +42,11 @@ struct PipeHandle {
     std::vector<FunctionPtr> error_listeners;
     std::vector<FunctionPtr> ready_listeners;  // Called when pipe is ready
 
+    std::vector<FunctionPtr> drain_callbacks;
+    std::mutex drain_mutex;
+    static constexpr size_t WRITE_HIGH_WATERMARK = 16 * 1024;
+    Evaluator* evaluator = nullptr;
+
     // Queue for writes that happen before pipe is ready
     std::mutex pending_mutex;
     struct PendingWrite {
@@ -119,20 +124,18 @@ static void execute_write(PipeHandle* handle, const std::vector<uint8_t>& data_b
         static_cast<unsigned int>(data_bytes.size()));
     memcpy(buf.base, data_bytes.data(), data_bytes.size());
 
-    uv_write_t* req = new uv_write_t;
-
     struct WriteCtx {
         FunctionPtr cb;
         void* buffer;
+        PipeHandle* handle;
     };
 
-    WriteCtx* ctx = new WriteCtx{callback, buf.base};
-    req->data = ctx;
+    uv_write_t* req = new uv_write_t;
+    req->data = new WriteCtx{callback, buf.base, handle};
 
     uv_write(req, (uv_stream_t*)handle->pipe, &buf, 1,
         [](uv_write_t* req, int status) {
             WriteCtx* ctx = static_cast<WriteCtx*>(req->data);
-
             if (ctx->buffer) free(ctx->buffer);
 
             if (ctx->cb) {
@@ -141,6 +144,27 @@ static void execute_write(PipeHandle* handle, const std::vector<uint8_t>& data_b
                         {Value{std::string("Write error: ") + uv_strerror(status)}});
                 } else {
                     schedule_pipe_callback(ctx->cb, {});
+                }
+            }
+
+            // fire drain callbacks synchronously when queue empty
+            PipeHandle* handle = ctx->handle;
+            if (handle->pipe && handle->pipe->write_queue_size == 0 && handle->evaluator) {
+                std::vector<FunctionPtr> cbs;
+                {
+                    std::lock_guard<std::mutex> lk(handle->drain_mutex);
+                    std::swap(cbs, handle->drain_callbacks);
+                }
+                if (!cbs.empty()) {
+                    Token dtok;
+                    dtok.loc = TokenLocation("<ipc>", 0, 0, 0);
+                    for (auto& cb : cbs) {
+                        try {
+                            handle->evaluator->invoke_function(cb, {}, nullptr, dtok);
+                        } catch (const SwaziError& e) {
+                            std::cerr << "Unhandled Exception: " << e.what() << std::endl;
+                        } catch (...) {}
+                    }
                 }
             }
 
@@ -170,13 +194,13 @@ static std::string value_to_string_ipc(const Value& v) {
     return std::string();
 }
 
-std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env) {
+std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
 
     // ipc.openPipe(path, mode) -> pipe object
     // mode: "r" (read), "w" (write)
     {
-        auto fn = make_ipc_fn("ipc.openPipe", [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+        auto fn = make_ipc_fn("ipc.openPipe", [evaluator](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("RuntimeError",
                     "ipc.openPipe requires path and mode ('r' or 'w')", token.loc);
@@ -218,6 +242,7 @@ std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env) {
             handle->fd = fd;
             handle->path = path;
             handle->is_reader = is_reader;
+            handle->evaluator = evaluator;
 
             // Store handle
             {
@@ -294,18 +319,26 @@ std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env) {
             tok.loc = TokenLocation("<ipc>", 0, 0, 0);
 
             // on(event, callback)
-            auto on_fn = make_ipc_fn("pipe.on", [handle](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto on_fn = make_ipc_fn("pipe.on", [handle, pipe_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                 if (args.size() < 2) {
                     throw SwaziError("TypeError", "on() requires event and callback", token.loc);
                 }
-                
+
                 std::string event = value_to_string_ipc(args[0]);
                 if (!std::holds_alternative<FunctionPtr>(args[1])) {
                     throw SwaziError("TypeError", "callback must be a function", token.loc);
                 }
-                
+
                 FunctionPtr cb = std::get<FunctionPtr>(args[1]);
                 
+                if (event == "drain") {
+                    if (!handle->is_reader) {
+                        std::lock_guard<std::mutex> lk(handle->drain_mutex);
+                        handle->drain_callbacks.push_back(cb);
+                    }
+                    return Value{pipe_obj};
+                }
+
                 std::lock_guard<std::mutex> lk(handle->listeners_mutex);
                 if (event == "data") {
                     handle->data_listeners.push_back(cb);
@@ -319,9 +352,13 @@ std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env) {
                     if (handle->ready.load()) {
                         schedule_pipe_callback(cb, {});
                     }
+                } else {
+                    std::ostringstream ss;
+                    ss << "Unknown event name: " << event;
+                    throw SwaziError("TypeError", ss.str(), token.loc);
                 }
-                
-                return std::monostate{}; }, nullptr);
+
+                return Value{pipe_obj}; }, nullptr);
             pipe_obj->properties["on"] = PropertyDescriptor{on_fn, false, false, false, tok};
 
             // write(data, callback?)
@@ -379,6 +416,32 @@ std::shared_ptr<ObjectValue> make_ipc_exports(EnvPtr env) {
                 
                 return Value{true}; }, nullptr);
             pipe_obj->properties["write"] = PropertyDescriptor{write_fn, false, false, false, tok};
+
+            // isOpen()
+            auto is_open_fn = make_ipc_fn("pipe.isOpen", [handle](const std::vector<Value>&, EnvPtr, const Token&) -> Value { return Value{!handle->closed.load() && handle->pipe != nullptr}; }, nullptr);
+            pipe_obj->properties["isOpen"] = PropertyDescriptor{is_open_fn, false, false, false, tok};
+
+            // writableNeedsDrain() — writers only
+            auto needs_drain_fn = make_ipc_fn("pipe.writableNeedsDrain", [handle](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                if (handle->is_reader || handle->closed.load() || !handle->pipe) return Value{false};
+                return Value{handle->pipe->write_queue_size >= PipeHandle::WRITE_HIGH_WATERMARK}; }, nullptr);
+            pipe_obj->properties["writableNeedsDrain"] = PropertyDescriptor{needs_drain_fn, false, false, false, tok};
+
+            // pause() — readers only
+            auto pause_fn = make_ipc_fn("pipe.pause", [handle](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                if (handle->is_reader && !handle->closed.load() && handle->pipe) {
+                    uv_read_stop((uv_stream_t*)handle->pipe);
+                }
+                return std::monostate{}; }, nullptr);
+            pipe_obj->properties["pause"] = PropertyDescriptor{pause_fn, false, false, false, tok};
+
+            // resume() — readers only
+            auto resume_fn = make_ipc_fn("pipe.resume", [handle](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+                if (handle->is_reader && !handle->closed.load() && handle->pipe) {
+                    uv_read_start((uv_stream_t*)handle->pipe, alloc_ipc_cb, pipe_read_cb);
+                }
+                return std::monostate{}; }, nullptr);
+            pipe_obj->properties["resume"] = PropertyDescriptor{resume_fn, false, false, false, tok};
 
             // close()
             auto close_fn = make_ipc_fn("pipe.close", [handle](const std::vector<Value>&, EnvPtr, const Token&) -> Value {

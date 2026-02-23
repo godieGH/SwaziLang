@@ -483,12 +483,22 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 inst->on_error_handler = handler;
             } else if (event == "close") {
                 inst->on_close_handler = handler;
+            } else {
+                std::ostringstream ss;
+                ss << "Unknown event name: " << event;
+                throw SwaziError("TypeError", ss.str(), token.loc);
             }
 
             return Value{socket_obj};
         };
         auto on_fn = std::make_shared<FunctionValue>("socket.on", on_impl, nullptr, stok);
         socket_obj->properties["on"] = {Value{on_fn}, false, false, true, stok};
+
+        auto is_open_impl = [inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            return Value{!inst->closed.load() && inst->udp_handle != nullptr};
+        };
+        auto is_open_fn = std::make_shared<FunctionValue>("socket.isOpen", is_open_impl, nullptr, stok);
+        socket_obj->properties["isOpen"] = {Value{is_open_fn}, false, false, true, stok};
 
         // socket.close(callback?)
         auto close_impl = [inst, sock_id](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {

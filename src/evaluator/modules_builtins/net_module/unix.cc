@@ -17,6 +17,8 @@ bool unix_has_active_work() {
     return g_active_unix_work.load() > 0;
 }
 
+static Evaluator* g_unix_evaluator = nullptr;
+
 // Unix Socket instance (client or server connection)
 struct UnixSocketInstance {
     uv_pipe_t* pipe_handle = nullptr;
@@ -28,6 +30,12 @@ struct UnixSocketInstance {
     FunctionPtr on_connect_handler;
     std::string socket_path;
     long long socket_id = 0;
+
+    std::vector<FunctionPtr> drain_callbacks;
+    std::mutex drain_mutex;
+    static constexpr size_t WRITE_HIGH_WATERMARK = 16 * 1024;
+    Evaluator* evaluator = nullptr;
+    std::atomic<bool> paused{false};
 };
 
 // Unix Server instance
@@ -48,7 +56,7 @@ static std::atomic<long long> g_next_unix_socket_id{1};
 
 // Helper to start reading on a socket (idempotent)
 static void start_reading_if_needed(UnixSocketInstance* inst) {
-    if (!inst || !inst->pipe_handle || inst->closed.load()) {
+    if (!inst || !inst->pipe_handle || inst->closed.load() || inst->paused.load()) {
         return;
     }
 
@@ -117,6 +125,7 @@ static void on_unix_connection(uv_stream_t* server, int status) {
         auto sock_inst = std::make_shared<UnixSocketInstance>();
         sock_inst->pipe_handle = client;
         sock_inst->closed = false;
+        sock_inst->evaluator = g_unix_evaluator;
 
         long long sock_id = g_next_unix_socket_id.fetch_add(1);
         sock_inst->socket_id = sock_id;
@@ -143,18 +152,52 @@ static void on_unix_connection(uv_stream_t* server, int status) {
             std::vector<uint8_t> data = NetHelpers::get_buffer_data(args[0]);
             if (data.empty()) return Value{false};
 
+            struct WriteCtx {
+                char* buf;
+                std::shared_ptr<UnixSocketInstance> inst;
+            };
+
             char* buf = static_cast<char*>(malloc(data.size()));
             memcpy(buf, data.data(), data.size());
 
             uv_buf_t uvbuf = uv_buf_init(buf, (unsigned int)data.size());
             uv_write_t* req = new uv_write_t;
-            req->data = buf;
+            req->data = new WriteCtx{buf, sock_inst};
 
             int r = uv_write(req, (uv_stream_t*)sock_inst->pipe_handle, &uvbuf, 1,
                 [](uv_write_t* req, int status) {
-                    if (req->data) free(req->data);
+                    auto* ctx = static_cast<WriteCtx*>(req->data);
+                    free(ctx->buf);
+                    auto inst = ctx->inst;
+                    delete ctx;
                     delete req;
+
+                    if (inst->pipe_handle && inst->pipe_handle->write_queue_size == 0) {
+                        std::vector<FunctionPtr> cbs;
+                        {
+                            std::lock_guard<std::mutex> lk(inst->drain_mutex);
+                            std::swap(cbs, inst->drain_callbacks);
+                        }
+                        if (!cbs.empty() && inst->evaluator) {
+                            Token dtok;
+                            dtok.loc = TokenLocation("<unix>", 0, 0, 0);
+                            for (auto& cb : cbs) {
+                                try {
+                                    inst->evaluator->invoke_function(cb, {}, nullptr, dtok);
+                                } catch (const SwaziError& e) {
+                                    std::cerr << "Unhandled Exception: " << e.what() << std::endl;
+                                } catch (...) {}
+                            }
+                        }
+                    }
                 });
+
+            if (r != 0) {
+                auto* ctx = static_cast<WriteCtx*>(req->data);
+                free(ctx->buf);
+                delete ctx;
+                delete req;
+            }
 
             return Value{r == 0};
         };
@@ -181,8 +224,44 @@ static void on_unix_connection(uv_stream_t* server, int status) {
         auto close_fn = std::make_shared<FunctionValue>("socket.close", close_impl, nullptr, tok);
         socket_obj->properties["close"] = {Value{close_fn}, false, false, true, tok};
 
+        // socket.isOpen()
+        auto is_open_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            return Value{!sock_inst->closed.load() && sock_inst->pipe_handle != nullptr};
+        };
+        auto is_open_fn = std::make_shared<FunctionValue>("socket.isOpen", is_open_impl, nullptr, tok);
+        socket_obj->properties["isOpen"] = {Value{is_open_fn}, false, false, true, tok};
+
+        // socket.writableNeedsDrain()
+        auto needs_drain_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            if (sock_inst->closed.load() || !sock_inst->pipe_handle) return Value{false};
+            return Value{sock_inst->pipe_handle->write_queue_size >= UnixSocketInstance::WRITE_HIGH_WATERMARK};
+        };
+        auto needs_drain_fn = std::make_shared<FunctionValue>("socket.writableNeedsDrain", needs_drain_impl, nullptr, tok);
+        socket_obj->properties["writableNeedsDrain"] = {Value{needs_drain_fn}, false, false, true, tok};
+
+        // socket.pause()
+        auto pause_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            if (!sock_inst->closed.load() && sock_inst->pipe_handle && !sock_inst->paused.exchange(true)) {
+                uv_read_stop((uv_stream_t*)sock_inst->pipe_handle);
+            }
+            return std::monostate{};
+        };
+        auto pause_fn = std::make_shared<FunctionValue>("socket.pause", pause_impl, nullptr, tok);
+        socket_obj->properties["pause"] = {Value{pause_fn}, false, false, true, tok};
+
+        // socket.resume()
+        auto resume_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            if (!sock_inst->closed.load() && sock_inst->pipe_handle && sock_inst->paused.exchange(false)) {
+                sock_inst->reading.store(false);
+                start_reading_if_needed(sock_inst.get());
+            }
+            return std::monostate{};
+        };
+        auto resume_fn = std::make_shared<FunctionValue>("socket.resume", resume_impl, nullptr, tok);
+        socket_obj->properties["resume"] = {Value{resume_fn}, false, false, true, tok};
+
         // socket.on(event, handler)
-        auto on_impl = [sock_inst](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
@@ -197,13 +276,20 @@ static void on_unix_connection(uv_stream_t* server, int status) {
             if (event == "data") {
                 sock_inst->on_data_handler = handler;
                 start_reading_if_needed(sock_inst.get());
+            } else if (event == "drain") {
+                std::lock_guard<std::mutex> lk(sock_inst->drain_mutex);
+                sock_inst->drain_callbacks.push_back(handler);
             } else if (event == "close") {
                 sock_inst->on_close_handler = handler;
             } else if (event == "error") {
                 sock_inst->on_error_handler = handler;
+            } else {
+                std::ostringstream ss;
+                ss << "Unknown event name: " << event;
+                throw SwaziError("TypeError", ss.str(), token.loc);
             }
 
-            return std::monostate{};
+            return Value{socket_obj};
         };
         auto on_fn = std::make_shared<FunctionValue>("socket.on", on_impl, nullptr, tok);
         socket_obj->properties["on"] = {Value{on_fn}, false, false, true, tok};
@@ -226,6 +312,8 @@ std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* eva
     auto obj = std::make_shared<ObjectValue>();
     Token tok;
     tok.loc = TokenLocation("<unix>", 0, 0, 0);
+
+    g_unix_evaluator = evaluator;
 
     // unix.createServer(connectionHandler)
     auto createServer_impl = [](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
@@ -371,6 +459,7 @@ std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* eva
         auto sock_inst = std::make_shared<UnixSocketInstance>();
         sock_inst->on_connect_handler = cb;
         sock_inst->socket_path = path;
+        sock_inst->evaluator = g_unix_evaluator;
 
         long long sock_id = g_next_unix_socket_id.fetch_add(1);
         sock_inst->socket_id = sock_id;
@@ -405,18 +494,52 @@ std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* eva
             std::vector<uint8_t> data = NetHelpers::get_buffer_data(args[0]);
             if (data.empty()) return Value{false};
 
+            struct WriteCtx {
+                char* buf;
+                std::shared_ptr<UnixSocketInstance> inst;
+            };
+
             char* buf = static_cast<char*>(malloc(data.size()));
             memcpy(buf, data.data(), data.size());
 
             uv_buf_t uvbuf = uv_buf_init(buf, (unsigned int)data.size());
             uv_write_t* req = new uv_write_t;
-            req->data = buf;
+            req->data = new WriteCtx{buf, sock_inst};
 
             int r = uv_write(req, (uv_stream_t*)sock_inst->pipe_handle, &uvbuf, 1,
                 [](uv_write_t* req, int status) {
-                    if (req->data) free(req->data);
+                    auto* ctx = static_cast<WriteCtx*>(req->data);
+                    free(ctx->buf);
+                    auto inst = ctx->inst;
+                    delete ctx;
                     delete req;
+
+                    if (inst->pipe_handle && inst->pipe_handle->write_queue_size == 0) {
+                        std::vector<FunctionPtr> cbs;
+                        {
+                            std::lock_guard<std::mutex> lk(inst->drain_mutex);
+                            std::swap(cbs, inst->drain_callbacks);
+                        }
+                        if (!cbs.empty() && inst->evaluator) {
+                            Token dtok;
+                            dtok.loc = TokenLocation("<unix>", 0, 0, 0);
+                            for (auto& cb : cbs) {
+                                try {
+                                    inst->evaluator->invoke_function(cb, {}, nullptr, dtok);
+                                } catch (const SwaziError& e) {
+                                    std::cerr << "Unhandled Exception: " << e.what() << std::endl;
+                                } catch (...) {}
+                            }
+                        }
+                    }
                 });
+
+            if (r != 0) {
+                auto* ctx = static_cast<WriteCtx*>(req->data);
+                free(ctx->buf);
+                delete ctx;
+                delete req;
+            }
 
             return Value{r == 0};
         };
@@ -443,8 +566,44 @@ std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* eva
         auto close_fn = std::make_shared<FunctionValue>("socket.close", close_impl, nullptr, stok);
         socket_obj->properties["close"] = {Value{close_fn}, false, false, true, stok};
 
+        // socket.isOpen()
+        auto is_open_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            return Value{!sock_inst->closed.load() && sock_inst->pipe_handle != nullptr};
+        };
+        auto is_open_fn = std::make_shared<FunctionValue>("socket.isOpen", is_open_impl, nullptr, stok);
+        socket_obj->properties["isOpen"] = {Value{is_open_fn}, false, false, true, stok};
+
+        // socket.writableNeedsDrain()
+        auto needs_drain_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            if (sock_inst->closed.load() || !sock_inst->pipe_handle) return Value{false};
+            return Value{sock_inst->pipe_handle->write_queue_size >= UnixSocketInstance::WRITE_HIGH_WATERMARK};
+        };
+        auto needs_drain_fn = std::make_shared<FunctionValue>("socket.writableNeedsDrain", needs_drain_impl, nullptr, stok);
+        socket_obj->properties["writableNeedsDrain"] = {Value{needs_drain_fn}, false, false, true, stok};
+
+        // socket.pause()
+        auto pause_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            if (!sock_inst->closed.load() && sock_inst->pipe_handle && !sock_inst->paused.exchange(true)) {
+                uv_read_stop((uv_stream_t*)sock_inst->pipe_handle);
+            }
+            return std::monostate{};
+        };
+        auto pause_fn = std::make_shared<FunctionValue>("socket.pause", pause_impl, nullptr, stok);
+        socket_obj->properties["pause"] = {Value{pause_fn}, false, false, true, stok};
+
+        // socket.resume()
+        auto resume_impl = [sock_inst](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+            if (!sock_inst->closed.load() && sock_inst->pipe_handle && sock_inst->paused.exchange(false)) {
+                sock_inst->reading.store(false);
+                start_reading_if_needed(sock_inst.get());
+            }
+            return std::monostate{};
+        };
+        auto resume_fn = std::make_shared<FunctionValue>("socket.resume", resume_impl, nullptr, stok);
+        socket_obj->properties["resume"] = {Value{resume_fn}, false, false, true, stok};
+
         // socket.on(event, handler)
-        auto on_impl = [sock_inst](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
@@ -458,15 +617,22 @@ std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* eva
 
             if (event == "data") {
                 sock_inst->on_data_handler = handler;
+            } else if (event == "drain") {
+                std::lock_guard<std::mutex> lk(sock_inst->drain_mutex);
+                sock_inst->drain_callbacks.push_back(handler);
             } else if (event == "close") {
                 sock_inst->on_close_handler = handler;
             } else if (event == "error") {
                 sock_inst->on_error_handler = handler;
             } else if (event == "connect") {
                 sock_inst->on_connect_handler = handler;
+            } else {
+                std::ostringstream ss;
+                ss << "Unknown event name: " << event;
+                throw SwaziError("TypeError", ss.str(), token.loc);
             }
 
-            return std::monostate{};
+            return Value{socket_obj};
         };
         auto on_fn = std::make_shared<FunctionValue>("socket.on", on_impl, nullptr, stok);
         socket_obj->properties["on"] = {Value{on_fn}, false, false, true, stok};
