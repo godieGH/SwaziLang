@@ -458,7 +458,11 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
         socket_obj->properties["send"] = {Value{send_fn}, false, false, true, stok};
 
         // socket.on(event, handler)
-        auto on_impl = [inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto socket_weak = std::weak_ptr<ObjectValue>(socket_obj);
+        auto on_impl = [inst, socket_weak](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto socket_obj = socket_weak.lock();
+            if (!socket_obj) return std::monostate{};
+
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }

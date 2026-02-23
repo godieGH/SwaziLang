@@ -129,6 +129,12 @@ static void start_reading_if_needed(TcpSocketInstance* inst) {
             if (nread < 0) {
                 inst->reading.store(false);
 
+                // Clear drain callbacks to release captured buffers
+                {
+                    std::lock_guard<std::mutex> lk(inst->drain_mutex);
+                    inst->drain_callbacks.clear();
+                }
+
                 if (inst && inst->on_close_handler) {
                     FunctionPtr handler = inst->on_close_handler;
                     CallbackPayload* payload = new CallbackPayload(handler, {});
@@ -159,6 +165,13 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
 
     uv_tcp_t* client = new uv_tcp_t;
     uv_tcp_init(server->loop, client);
+    uv_os_fd_t fd;
+    if (uv_fileno((uv_handle_t*)client, &fd) == 0) {
+        int on = 1;
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+        // suppress SIGPIPE at fd level as backup
+        signal(SIGPIPE, SIG_IGN);  // re-arm after any addon may have reset it
+    }
 
     if (uv_accept(server, (uv_stream_t*)client) == 0) {
         // Create socket instance
@@ -230,6 +243,8 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
                     auto inst = ctx->inst;
                     delete ctx;
                     delete req;
+
+                    if (status != 0) return;
 
                     // fire drain callbacks synchronously when kernel queue fully empty
                     if (inst->socket_handle && inst->socket_handle->write_queue_size == 0) {
@@ -327,7 +342,11 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
         socket_obj->properties["resume"] = {Value{resume_fn}, false, false, true, tok};
 
         // socket.on(event, handler)
-        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto socket_weak = std::weak_ptr<ObjectValue>(socket_obj);
+        auto on_impl = [sock_inst, socket_weak](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto socket_obj = socket_weak.lock();
+            if (!socket_obj) return std::monostate{};
+
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
@@ -376,6 +395,12 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
 }
 
 std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) {
+    struct sigaction sa{};
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGPIPE, &sa, nullptr);  // do not crash when SIGPIPE
+
     auto obj = std::make_shared<ObjectValue>();
     Token tok;
     tok.loc = TokenLocation("<tcp>", 0, 0, 0);
@@ -576,6 +601,8 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
                     delete ctx;
                     delete req;
 
+                    if (status != 0) return;
+
                     // fire drain callbacks synchronously when kernel queue fully empty
                     if (inst->socket_handle && inst->socket_handle->write_queue_size == 0) {
                         std::vector<FunctionPtr> cbs;
@@ -672,7 +699,11 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
         socket_obj->properties["resume"] = {Value{resume_fn}, false, false, true, stok};
 
         // socket.on(event, handler)
-        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto socket_weak = std::weak_ptr<ObjectValue>(socket_obj);
+        auto on_impl = [sock_inst, socket_weak](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto socket_obj = socket_weak.lock();
+            if (!socket_obj) return std::monostate{};
+
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }

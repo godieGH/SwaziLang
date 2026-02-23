@@ -89,6 +89,11 @@ static void start_reading_if_needed(UnixSocketInstance* inst) {
             if (nread < 0) {
                 inst->reading.store(false);
 
+                {
+                    std::lock_guard<std::mutex> lk(inst->drain_mutex);
+                    inst->drain_callbacks.clear();
+                }
+
                 if (inst && inst->on_close_handler) {
                     FunctionPtr handler = inst->on_close_handler;
                     CallbackPayload* payload = new CallbackPayload(handler, {});
@@ -261,7 +266,10 @@ static void on_unix_connection(uv_stream_t* server, int status) {
         socket_obj->properties["resume"] = {Value{resume_fn}, false, false, true, tok};
 
         // socket.on(event, handler)
-        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto socket_weak = std::weak_ptr<ObjectValue>(socket_obj);
+        auto on_impl = [sock_inst, socket_weak](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto socket_obj = socket_weak.lock();
+            if (!socket_obj) return std::monostate{};
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
@@ -603,7 +611,10 @@ std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* eva
         socket_obj->properties["resume"] = {Value{resume_fn}, false, false, true, stok};
 
         // socket.on(event, handler)
-        auto on_impl = [sock_inst, socket_obj](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto socket_weak = std::weak_ptr<ObjectValue>(socket_obj);
+        auto on_impl = [sock_inst, socket_weak](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+            auto socket_obj = socket_weak.lock();
+            if (!socket_obj) return std::monostate{};
             if (args.size() < 2) {
                 throw SwaziError("TypeError", "on() requires event name and handler", token.loc);
             }
