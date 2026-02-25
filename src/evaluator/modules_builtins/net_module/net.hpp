@@ -18,7 +18,6 @@
 // Forward declarations for TCP, UDP, and WebSocket exports
 std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator);
-std::shared_ptr<ObjectValue> make_ws_exports(EnvPtr env, Evaluator* evaluator);
 std::shared_ptr<ObjectValue> make_unix_socket_exports(EnvPtr env, Evaluator* evaluator);
 
 // Helper functions for network operations

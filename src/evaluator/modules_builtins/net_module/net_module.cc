@@ -109,12 +109,6 @@ std::shared_ptr<ObjectValue> make_net_exports(EnvPtr env, Evaluator* evaluator) 
             false, false, true, tok};
     }
 
-    // net.ws -> WebSocket client + server
-    {
-        obj->properties["ws"] = PropertyDescriptor{Value{make_ws_exports(env, evaluator)},
-            false, false, true, tok};
-    }
-
     // net.unix -> Unix domain socket APIs
     {
         obj->properties["unix"] = PropertyDescriptor{Value{make_unix_socket_exports(env, evaluator)},
