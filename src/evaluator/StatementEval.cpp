@@ -757,6 +757,9 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             state->loop_env = std::make_shared<Environment>(env);
         }
 
+        // loopEnv holds iteration variables (valueVar/indexVar) and persists
+        // across async suspensions. bodyEnv is created fresh each iteration
+        // as a child of loopEnv, so closures capture their own snapshot.
         EnvPtr loopEnv = (state && state->loop_env) ? state->loop_env : std::make_shared<Environment>(env);
 
         // Array case
@@ -782,6 +785,9 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     }
                 }
 
+                // Fresh body env per iteration — closures capture their own scope
+                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
 
@@ -789,7 +795,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         continue;  // Skip already-executed statements
                     }
 
-                    evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
 
                     if (state) {
                         state->body_statement_index = j + 1;
@@ -835,7 +841,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 state->set_range_copy(*range);
                 state->range_position = 0;
                 state->iteration_count = 0;
-                // On first entry, fetch the first value
                 if (state->get_range_copy().hasNext()) {
                     state->current_value = static_cast<double>(state->get_range_copy().next());
                 } else {
@@ -861,8 +866,11 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
                     }
 
+                    // Fresh body env per iteration
+                    auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
                     for (auto& s : fin->body) {
-                        evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                        evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
                         if (did_return && *did_return) return;
                         if (loopCtrl->did_break || loopCtrl->did_continue) break;
                     }
@@ -897,7 +905,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             while (!std::holds_alternative<std::monostate>(state->current_value) &&
                 iteration_count < MAX_RANGE_ITERATIONS) {
-                // Use the current value (already fetched)
+
                 double currentValue = std::get<double>(state->current_value);
                 iteration_count++;
 
@@ -911,7 +919,9 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     }
                 }
 
-                // Execute body (may suspend here)
+                // Fresh body env per iteration
+                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
 
@@ -919,7 +929,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         continue;  // Skip already-executed statements
                     }
 
-                    evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
 
                     if (state) {
                         state->body_statement_index = j + 1;
@@ -934,7 +944,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
-                    resuming = false;  // Clear resuming flag after first iteration completes
+                    resuming = false;
                 }
 
                 if (loopCtrl->did_break) {
@@ -945,7 +955,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (loopCtrl->did_continue) {
                     loopCtrl->did_continue = false;
-                    // Fetch next value before continuing
                     position++;
                     if (r.hasNext()) {
                         state->current_value = static_cast<double>(r.next());
@@ -991,14 +1000,11 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 size_t position = 0;
 
                 while (true) {
-                    // Call next() on the generator
                     bool done = false;
                     Value yielded = resume_generator(gen, std::monostate{}, false, false, done);
 
-                    // If generator is exhausted, exit loop
                     if (done) break;
 
-                    // Bind yielded value to loop variable
                     if (fin->valueVar) {
                         loopEnv->values[fin->valueVar->name] = {yielded, false};
                     }
@@ -1006,9 +1012,11 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         loopEnv->values[fin->indexVar->name] = {static_cast<double>(position), false};
                     }
 
-                    // Execute loop body
+                    // Fresh body env per iteration
+                    auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
                     for (auto& s : fin->body) {
-                        evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                        evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
                         if (did_return && *did_return) {
                             if (frame) frame->loop_states.erase(loop_id);
                             return;
@@ -1064,6 +1072,9 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     loopEnv->values[fin->indexVar->name] = {it->second.value, false};
                 }
 
+                // Fresh body env per iteration
+                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
 
@@ -1071,7 +1082,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         continue;  // Skip already-executed statements
                     }
 
-                    evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
 
                     if (state) {
                         state->body_statement_index = j + 1;
@@ -1086,7 +1097,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
-                    resuming = false;  // Clear resuming flag
+                    resuming = false;
                 }
 
                 if (loopCtrl->did_break) {
@@ -1115,10 +1126,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 if (fin->valueVar) {
                     loopEnv->values[fin->valueVar->name] = {std::string(1, str[i]), false};
                 }
-
                 if (fin->indexVar) {
                     loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
                 }
+
+                // Fresh body env per iteration
+                auto bodyEnv = std::make_shared<Environment>(loopEnv);
 
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
@@ -1127,7 +1140,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                         continue;  // Skip already-executed statements
                     }
 
-                    evaluate_statement(s.get(), loopEnv, return_value, did_return, loopCtrl);
+                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
 
                     if (state) {
                         state->body_statement_index = j + 1;
@@ -1142,7 +1155,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
-                    resuming = false;  // Clear resuming flag
+                    resuming = false;
                 }
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
