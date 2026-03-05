@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -11,6 +12,7 @@
 #include "ClassRuntime.hpp"
 #include "Frame.hpp"
 #include "Scheduler.hpp"
+#include "SwaziError.hpp"
 #include "colors.hpp"
 #include "globals.hpp"
 namespace fs = std::filesystem;
@@ -315,4 +317,32 @@ void Evaluator::mark_promise_and_ancestors_handled(PromisePtr p) {
         auto wp = p->parent;
         p = wp.lock();
     }
+}
+
+void Evaluator::check_deprecated(FunctionPtr fn, const Token& calltok) {
+    if (!fn || !fn->is_deprecated) return;
+
+    if (deprecations.find(fn) != deprecations.end()) return;  // already warned
+
+    if (fn->severity == DeprecatedSeverity::IGNORE) return;
+
+    // ignore user intent from env var SWAZI_DEPRECATION=ignore
+    const char* env_val = std::getenv("SWAZI_DEPRECATION");
+    if (env_val) {
+        std::string swazi_deprecation = env_val;  // safe, only if env_val not null
+        std::transform(swazi_deprecation.begin(), swazi_deprecation.end(), swazi_deprecation.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+        if (swazi_deprecation == "ignore") return;
+    }
+
+    if (fn->severity == DeprecatedSeverity::ERROR) {
+        throw SwaziError("DeprecationError", fn->deprecated_message, calltok.loc);
+    }
+
+    std::cerr << calltok.loc.to_string() << "\n"
+              << "DeprecationWarning: " << fn->deprecated_message << "\n"
+              << " --> Traced at:\n"
+              << calltok.loc.get_line_trace() << std::endl;
+
+    deprecations.insert(fn);
 }

@@ -905,7 +905,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             while (!std::holds_alternative<std::monostate>(state->current_value) &&
                 iteration_count < MAX_RANGE_ITERATIONS) {
-
                 double currentValue = std::get<double>(state->current_value);
                 iteration_count++;
 

@@ -3704,6 +3704,36 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 return Value{std::make_shared<FunctionValue>("native:fn.apply", native_impl, env, mem->token)};
             }
 
+            if (prop == "deprecate") {
+                auto native_impl = [this, fn](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                    if (fn->is_deprecated) return Value{};
+
+                    fn->is_deprecated = true;
+                    fn->deprecated_message = ("Function `" + fn->name + "` is deprecated.");
+
+                    if (args.size() >= 1 && std::holds_alternative<ObjectPtr>(args[0])) {
+                        auto opts = std::get<ObjectPtr>(args[0]);
+                        auto msg_it = opts->properties.find("message");
+                        if (msg_it != opts->properties.end() && std::holds_alternative<std::string>(msg_it->second.value)) {
+                            std::string msg = std::get<std::string>(msg_it->second.value);
+                            fn->deprecated_message = msg;
+                        }
+                        auto sv_it = opts->properties.find("severity");
+                        if (sv_it != opts->properties.end() && std::holds_alternative<double>(sv_it->second.value)) {
+                            int sv = static_cast<int>(std::get<double>(sv_it->second.value));
+                            if (sv == 0)
+                                fn->severity = DeprecatedSeverity::IGNORE;
+                            else if (sv == 2)
+                                fn->severity = DeprecatedSeverity::ERROR;
+                            else
+                                fn->severity = DeprecatedSeverity::WARN;  // 1 default and other numeric values that is warn
+                        }
+                    }
+                    return Value{};
+                };
+                return Value{std::make_shared<FunctionValue>("native:fn.deprecate", native_impl, env, mem->token)};
+            }
+
             {
                 auto it = fn->properties.find(prop);
                 if (it != fn->properties.end()) {

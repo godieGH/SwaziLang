@@ -281,6 +281,8 @@ Value Evaluator::call_function(FunctionPtr fn, const std::vector<Value>& args, E
             callToken.loc);
     }
 
+    check_deprecated(fn, callToken);
+
     if (fn->is_wrapped() && fn->wrapper_impl) {
         return fn->wrapper_impl(fn->wrapped_original, args, caller_env, callToken);
     }
@@ -571,6 +573,8 @@ Value Evaluator::call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver,
             "Attempt to call a null function.",
             callToken.loc);
     }
+
+    check_deprecated(fn, callToken);
 
     if (fn->is_wrapped() && fn->wrapper_impl) {
         return fn->wrapper_impl(fn->wrapped_original, args, caller_env, callToken);

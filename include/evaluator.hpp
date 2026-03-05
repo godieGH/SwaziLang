@@ -1065,6 +1065,13 @@ struct ArrayValue {
     }
 };
 
+// DeprecatedSeverity enum
+enum class DeprecatedSeverity {
+    IGNORE,
+    WARN,
+    ERROR
+};
+
 // Function value: closure with parameters, body, and defining environment
 struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
     std::string name;
@@ -1075,6 +1082,11 @@ struct FunctionValue : public std::enable_shared_from_this<FunctionValue> {
     bool is_async = false;
     bool is_generator = false;
     bool is_native = false;
+
+    bool is_deprecated = false;
+    std::string deprecated_message;
+    DeprecatedSeverity severity = DeprecatedSeverity::WARN;
+
     std::function<Value(const std::vector<Value>&, EnvPtr, const Token&)> native_impl;
 
     std::shared_ptr<FunctionValue> wrapped_original;
@@ -1329,6 +1341,9 @@ class Evaluator {
     Value call_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
     Value call_function_with_receiver(FunctionPtr fn, ObjectPtr receiver, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
     void evaluate_statement(StatementNode* stmt, EnvPtr env, Value* return_value = nullptr, bool* did_return = nullptr, LoopControl* lc = nullptr);
+
+    std::unordered_set<FunctionPtr> deprecations;  // stores functions that already warned
+    void check_deprecated(FunctionPtr fn, const Token& calltok);
 
     struct DebugEncounter {
         void* debug_node_id;  // pointer to DebugStatementNode
