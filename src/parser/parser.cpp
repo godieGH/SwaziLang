@@ -495,6 +495,9 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
             auto exprStmt = std::make_unique<ExpressionStatementNode>();
             exprStmt->token = futaTok;
             exprStmt->expression = std::move(delExpr);
+
+            if (peek().type == TokenType::SEMICOLON) consume();
+
             return exprStmt;
 
         } else {
@@ -508,6 +511,9 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
             auto exprStmt = std::make_unique<ExpressionStatementNode>();
             exprStmt->token = futaTok;
             exprStmt->expression = std::move(delExpr);
+
+            if (peek().type == TokenType::SEMICOLON) consume();
+
             return exprStmt;
         }
     }

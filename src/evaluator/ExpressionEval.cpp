@@ -1298,35 +1298,35 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         "native:datetime." + mem->property, native_impl, env, mem->token)};
                 };
                 if (prop == "isUTC") {
-                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                    return Value{dt->isUTC};
-                  });
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        return Value{dt->isUTC};
+                    });
                 }
                 if (prop == "zone") {
-                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                    if (dt->isUTC) {
-                        return Value{std::string("UTC")};
-                    }
-                    int offsetSec = dt->tzOffsetSeconds;
-                    char sign = (offsetSec >= 0) ? '+' : '-';
-                    offsetSec = std::abs(offsetSec);
-                    int hrs = offsetSec / 3600;
-                    int mins = (offsetSec % 3600) / 60;
-                    std::ostringstream oss;
-                    oss << sign << std::setfill('0') << std::setw(2) << hrs
-                        << ":" << std::setw(2) << mins;
-                    return Value{oss.str()};
-                  });
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        if (dt->isUTC) {
+                            return Value{std::string("UTC")};
+                        }
+                        int offsetSec = dt->tzOffsetSeconds;
+                        char sign = (offsetSec >= 0) ? '+' : '-';
+                        offsetSec = std::abs(offsetSec);
+                        int hrs = offsetSec / 3600;
+                        int mins = (offsetSec % 3600) / 60;
+                        std::ostringstream oss;
+                        oss << sign << std::setfill('0') << std::setw(2) << hrs
+                            << ":" << std::setw(2) << mins;
+                        return Value{oss.str()};
+                    });
                 }
                 if (prop == "unix_ms") {
-                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                    return Value{static_cast<double>(dt->epochNanoseconds) / 1000000.0};
-                  });
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        return Value{static_cast<double>(dt->epochNanoseconds) / 1000000.0};
+                    });
                 }
                 if (prop == "unix") {
-                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
-                    return Value{static_cast<double>(dt->epochNanoseconds) / 1000000000.0};
-                  });
+                    return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                        return Value{static_cast<double>(dt->epochNanoseconds) / 1000000000.0};
+                    });
                 }
 
                 if (prop == "toStr" || prop == "str") {
