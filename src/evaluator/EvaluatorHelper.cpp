@@ -126,6 +126,7 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
     if (std::holds_alternative<std::monostate>(v)) return use_color ? Color::bright_black + "null" + Color::reset : "null";
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
+        ss << std::setprecision(std::numeric_limits<double>::digits10 + 1);
         double d = std::get<double>(v);
 
         // Only pretty-print as integer if:
@@ -978,6 +979,7 @@ std::string Evaluator::print_value(
 
     if (std::holds_alternative<double>(v)) {
         std::ostringstream ss;
+        ss << std::setprecision(std::numeric_limits<double>::digits10 + 1);
         double d = std::get<double>(v);
 
         // Only pretty-print as integer if:

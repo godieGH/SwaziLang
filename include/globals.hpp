@@ -59,9 +59,9 @@ inline std::string value_to_string(const Value& v) {
             // it’s an integer in disguise
             return std::to_string(static_cast<long long>(num));
         } else {
-            // a real decimal
+            // a real decimal — print with sufficient precision
             std::ostringstream oss;
-            oss << num;  // default precision, won’t add useless .000000
+            oss << std::setprecision(std::numeric_limits<double>::digits10 + 1) << num;
             return oss.str();
         }
     }
