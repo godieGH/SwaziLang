@@ -1288,8 +1288,22 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 if (prop == "ms") {
                     return Value{static_cast<double>(dt->fractionalNanoseconds / 1000000)};
                 }
-                if (prop == "isUTC") return Value{dt->isUTC};
+
+                // Methods (return FunctionPtr)
+                auto make_dt_fn = [this, dt, env, mem](auto impl) -> Value {
+                    auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
+                        return impl(args, callEnv, token);
+                    };
+                    return Value{std::make_shared<FunctionValue>(
+                        "native:datetime." + mem->property, native_impl, env, mem->token)};
+                };
+                if (prop == "isUTC") {
+                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+                    return Value{dt->isUTC};
+                  });
+                }
                 if (prop == "zone") {
+                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                     if (dt->isUTC) {
                         return Value{std::string("UTC")};
                     }
@@ -1302,22 +1316,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     oss << sign << std::setfill('0') << std::setw(2) << hrs
                         << ":" << std::setw(2) << mins;
                     return Value{oss.str()};
+                  });
                 }
-                if (prop == "epochMillis") {
+                if (prop == "unix_ms") {
+                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                     return Value{static_cast<double>(dt->epochNanoseconds) / 1000000.0};
+                  });
                 }
-                if (prop == "epochSeconds") {
+                if (prop == "unix") {
+                  return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
                     return Value{static_cast<double>(dt->epochNanoseconds) / 1000000000.0};
+                  });
                 }
-
-                // Methods (return FunctionPtr)
-                auto make_dt_fn = [this, dt, env, mem](auto impl) -> Value {
-                    auto native_impl = [impl](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
-                        return impl(args, callEnv, token);
-                    };
-                    return Value{std::make_shared<FunctionValue>(
-                        "native:datetime." + mem->property, native_impl, env, mem->token)};
-                };
 
                 if (prop == "toStr" || prop == "str") {
                     return make_dt_fn([dt](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
