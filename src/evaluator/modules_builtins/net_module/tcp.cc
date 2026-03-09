@@ -208,7 +208,7 @@ static void try_next_address(ResolveConnectData* rdata) {
         if (inst->on_error_handler) {
             CallbackPayload* payload = new CallbackPayload(
                 inst->on_error_handler,
-                {Value{std::string("All addresses failed to connect")}});
+                {Value{std::string("Connection failed.")}});
             enqueue_callback_global(static_cast<void*>(payload));
         }
         return;
