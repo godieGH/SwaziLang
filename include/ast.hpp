@@ -1608,6 +1608,28 @@ struct ExportDeclarationNode : public StatementNode {
     }
 };
 
+// Multi-import: tumia path, fs  OR  tumia pic kutoka "m", { a } kutoka "x"
+// Wraps N ImportDeclarationNode entries from one comma-separated tumia statement.
+struct SequentialImportDeclarationNode : public StatementNode {
+    std::vector<std::unique_ptr<ImportDeclarationNode>> imports;
+
+    std::unique_ptr<StatementNode> clone() const override {
+        auto n = std::make_unique<SequentialImportDeclarationNode>();
+        n->token = token;
+        n->imports.reserve(imports.size());
+        for (const auto& imp : imports) {
+            if (!imp) {
+                n->imports.push_back(nullptr);
+                continue;
+            }
+            auto cloned = imp->clone();
+            auto ptr = static_cast<ImportDeclarationNode*>(cloned.release());
+            n->imports.push_back(std::unique_ptr<ImportDeclarationNode>(ptr));
+        }
+        return n;
+    }
+};
+
 // Program root
 struct ProgramNode : public Node {
     std::vector<std::unique_ptr<StatementNode>> body;

@@ -196,24 +196,22 @@ std::unique_ptr<StatementNode> Parser::parse_variable_declaration() {
 }
 
 std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
-    // 'tumia' token already consumed by caller; tokens[position-1] is the 'tumia' token.
+    // 'tumia' token already consumed by caller
     Token tumiaTok = tokens[position - 1];
 
-    auto node = std::make_unique<ImportDeclarationNode>();
-    node->token = tumiaTok;
-
-    // Helper to consume optional trailing semicolon
     auto maybe_consume_semicolon = [&]() {
         if (peek().type == TokenType::SEMICOLON) consume();
     };
-
-    // Helper: skip formatting tokens
     auto skip_formatting = [&]() {
-        while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
+        while (peek().type == TokenType::NEWLINE ||
+            peek().type == TokenType::INDENT ||
+            peek().type == TokenType::DEDENT) consume();
     };
 
-    // Case A: side-effect only import: tumia "path"
+    // Case A: side-effect only — not comma-chainable, return immediately
     if (peek().type == TokenType::STRING || peek().type == TokenType::SINGLE_QUOTED_STRING) {
+        auto node = std::make_unique<ImportDeclarationNode>();
+        node->token = tumiaTok;
         Token pathTok = consume();
         node->side_effect_only = true;
         node->module_path = pathTok.value;
@@ -222,9 +220,11 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
         return node;
     }
 
-    // Case B: tumia * kutoka "path"
+    // Case B: tumia * kutoka "path" — not comma-chainable, return immediately
     if (peek().type == TokenType::STAR) {
-        Token star = consume();
+        auto node = std::make_unique<ImportDeclarationNode>();
+        node->token = tumiaTok;
+        consume();  // '*'
         node->import_all = true;
         expect(TokenType::KUTOKA, "Expected 'kutoka' after '*' in `tumia` statements");
         expect(TokenType::STRING, "Expected module string after 'kutoka' in `tumia` statements");
@@ -235,164 +235,160 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
         return node;
     }
 
-    // Case C: tumia { a, b as c } kutoka "path"
-    if (peek().type == TokenType::OPENBRACE) {
-        consume();  // '{'
+    // Helper: parse one entry in a (possibly comma-separated) import list.
+    // Handles Case C  { a [kama x], ... } kutoka "path"
+    //         Case D  IDENT[.IDENT]* [kama ALIAS] [kutoka "path"]
+    // Does NOT consume trailing comma or semicolon.
+    auto parse_entry = [&]() -> std::unique_ptr<ImportDeclarationNode> {
+        auto node = std::make_unique<ImportDeclarationNode>();
+        node->token = tumiaTok;
         skip_formatting();
 
-        // empty import list {}
-        if (peek().type == TokenType::CLOSEBRACE) {
-            consume();
+        // Case C: { a, b kama c } kutoka "path"
+        if (peek().type == TokenType::OPENBRACE) {
+            consume();  // '{'
+            skip_formatting();
+            if (peek().type != TokenType::CLOSEBRACE) {
+                while (true) {
+                    skip_formatting();
+                    if (peek().type == TokenType::CLOSEBRACE) break;
+                    expect(TokenType::IDENTIFIER, "Expected identifier in import specifier");
+                    Token impTok = tokens[position - 1];
+                    std::string imported = impTok.value;
+                    std::string local = imported;
+                    skip_formatting();
+                    if (peek().type == TokenType::KAMA) {
+                        consume();  // 'kama'
+                        skip_formatting();
+                        expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' in import alias");
+                        local = tokens[position - 1].value;
+                    }
+                    auto spec = std::make_unique<ImportSpecifier>();
+                    spec->imported = imported;
+                    spec->local = local;
+                    spec->token = impTok;
+                    node->specifiers.push_back(std::move(spec));
+                    skip_formatting();
+                    if (peek().type == TokenType::COMMA) {
+                        consume();
+                        skip_formatting();
+                        if (peek().type == TokenType::CLOSEBRACE) break;
+                        continue;
+                    }
+                    if (peek().type == TokenType::CLOSEBRACE) break;
+                    break;
+                }
+            }
+            skip_formatting();
+            expect(TokenType::CLOSEBRACE, "Expected '}' after import specifiers");
+            skip_formatting();
             expect(TokenType::KUTOKA, "Expected 'kutoka' after import specifiers");
+            skip_formatting();
             expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
             Token pathTok = tokens[position - 1];
             node->module_path = pathTok.value;
             node->module_token = pathTok;
-            maybe_consume_semicolon();
             return node;
         }
 
-        while (true) {
-            skip_formatting();
+        // Case D: IDENT[.IDENT]* [kama ALIAS] [kutoka "path"]
+        if (peek().type == TokenType::IDENTIFIER) {
+            std::vector<Token> idParts;
+            idParts.push_back(consume());
 
-            // allow early close when layout inserted a DEDENT/newline before '}'
-            if (peek().type == TokenType::CLOSEBRACE) break;
+            while (peek().type == TokenType::DOT) {
+                consume();  // '.'
+                while (peek().type == TokenType::NEWLINE ||
+                    peek().type == TokenType::INDENT ||
+                    peek().type == TokenType::DEDENT) consume();
+                expect(TokenType::IDENTIFIER, "Expected identifier after '.' in import shorthand");
+                idParts.push_back(tokens[position - 1]);
+            }
 
-            expect(TokenType::IDENTIFIER, "Expected identifier in import specifier");
-            Token impTok = tokens[position - 1];
-            std::string imported = impTok.value;
-            std::string local = imported;
+            std::string imported, local, implicit_module_spec;
+            Token module_tok_for_diag = idParts.front();
 
-            // optional alias: 'kama' IDENT
+            if (idParts.size() == 1) {
+                imported = "default";
+                local = idParts[0].value;
+                implicit_module_spec = idParts[0].value;
+            } else {
+                imported = idParts.back().value;
+                local = imported;
+                std::ostringstream ss;
+                for (size_t i = 0; i + 1 < idParts.size(); ++i) {
+                    if (i) ss << ".";
+                    ss << idParts[i].value;
+                }
+                implicit_module_spec = ss.str();
+                module_tok_for_diag = idParts.front();
+            }
+
             skip_formatting();
             if (peek().type == TokenType::KAMA) {
                 consume();  // 'kama'
                 skip_formatting();
-                expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' in import alias");
-                Token localTok = tokens[position - 1];
-                local = localTok.value;
+                expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
+                local = tokens[position - 1].value;
+            }
+
+            skip_formatting();
+            if (peek().type == TokenType::KUTOKA) {
+                consume();  // 'kutoka'
+                skip_formatting();
+                expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
+                Token pathTok = tokens[position - 1];
+                node->module_path = pathTok.value;
+                node->module_token = pathTok;
+            } else {
+                node->module_path = implicit_module_spec;
+                node->module_token = module_tok_for_diag;
             }
 
             auto spec = std::make_unique<ImportSpecifier>();
             spec->imported = imported;
             spec->local = local;
-            spec->token = impTok;
+            spec->token = idParts.back();
             node->specifiers.push_back(std::move(spec));
-
-            skip_formatting();
-
-            if (peek().type == TokenType::COMMA) {
-                consume();
-                // allow trailing comma before close (skip formatting then allow close)
-                skip_formatting();
-                if (peek().type == TokenType::CLOSEBRACE) break;
-                continue;
-            }
-
-            // If next is closebrace or layout that eventually leads to closebrace, continue loop to detect it
-            if (peek().type == TokenType::CLOSEBRACE) break;
-
-            // otherwise break and let expect(CLOSEBRACE) validate
-            break;
+            return node;
         }
 
-        // Accept closing brace possibly after layout tokens
-        skip_formatting();
-        expect(TokenType::CLOSEBRACE, "Expected '}' after import specifiers");
-        // require 'kutoka' and string path
-        skip_formatting();
-        expect(TokenType::KUTOKA, "Expected 'kutoka' after import specifiers");
-        skip_formatting();
-        expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
-        Token pathTok = tokens[position - 1];
-        node->module_path = pathTok.value;
-        node->module_token = pathTok;
+        Token bad = peek();
+        throw std::runtime_error(
+            "Parse error at " + bad.loc.to_string() +
+            ": invalid import entry after 'tumia'\n --> Traced at: \n" +
+            bad.loc.get_line_trace());
+    };
+
+    // Parse first entry
+    auto first = parse_entry();
+
+    skip_formatting();
+    if (peek().type != TokenType::COMMA) {
+        // Single import — identical behaviour to before, no new node type
         maybe_consume_semicolon();
-        return node;
+        return first;
     }
 
-    // Case D: default/module binding: tumia localName [kama alias] kutoka "path"
-    if (peek().type == TokenType::IDENTIFIER) {
-        // Collect a dotted identifier sequence: IDENT ('.' IDENT)*
-        std::vector<Token> idParts;
-        Token firstId = consume();
-        idParts.push_back(firstId);
+    // Multi-import: collect remaining comma-separated entries
+    auto seqNode = std::make_unique<SequentialImportDeclarationNode>();
+    seqNode->token = tumiaTok;
+    seqNode->imports.push_back(std::move(first));
 
-        while (peek().type == TokenType::DOT) {
-            consume();  // consume '.'
-            // allow layout between '.' and identifier (tolerant)
-            while (peek().type == TokenType::NEWLINE || peek().type == TokenType::INDENT || peek().type == TokenType::DEDENT) consume();
-            expect(TokenType::IDENTIFIER, "Expected identifier after '.' in import shorthand");
-            idParts.push_back(tokens[position - 1]);
-        }
-
-        // By default treat as:
-        // - single ident: tumia math        -> default import from module "math" into local name "math"
-        // - dotted: tumia console.print    -> import 'print' from module 'console' as local 'print'
-        std::string imported;
-        std::string local;
-        std::string implicit_module_spec;
-        Token module_tok_for_diag = idParts.front();  // fallback token for module diagnostics
-
-        if (idParts.size() == 1) {
-            // tumia X  -> default import of module X into local name X, implicit module_path = X
-            imported = "default";
-            local = idParts[0].value;
-            implicit_module_spec = idParts[0].value;
-        } else {
-            // tumia A.B.C  -> imported = "C", module_spec = "A.B"
-            imported = idParts.back().value;
-            local = imported;
-            std::ostringstream ss;
-            for (size_t i = 0; i + 1 < idParts.size(); ++i) {
-                if (i) ss << ".";
-                ss << idParts[i].value;
-            }
-            implicit_module_spec = ss.str();
-            module_tok_for_diag = idParts.front();
-        }
-
-        // optional alias 'kama'
+    while (peek().type == TokenType::COMMA) {
+        consume();  // ','
         skip_formatting();
-        if (peek().type == TokenType::KAMA) {
-            consume();  // 'kama'
-            skip_formatting();
-            expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
-            Token aliasTok = tokens[position - 1];
-            local = aliasTok.value;
-        }
-
-        // Now check for explicit 'kutoka' string which overrides implicit module spec
+        // Allow trailing comma before end of statement
+        if (peek().type == TokenType::SEMICOLON ||
+            peek().type == TokenType::NEWLINE ||
+            peek().type == TokenType::EOF_TOKEN) break;
+        seqNode->imports.push_back(parse_entry());
         skip_formatting();
-        if (peek().type == TokenType::KUTOKA) {
-            consume();  // 'kutoka'
-            skip_formatting();
-            expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
-            Token pathTok = tokens[position - 1];
-            node->module_path = pathTok.value;
-            node->module_token = pathTok;
-        } else {
-            // No explicit 'kutoka' -> use implicit module spec from the dotted identifiers
-            node->module_path = implicit_module_spec;
-            node->module_token = module_tok_for_diag;
-        }
-
-        // Create the specifier: if dotted then named import, otherwise default import already mapped to "default"
-        auto spec = std::make_unique<ImportSpecifier>();
-        spec->imported = imported;
-        spec->local = local;
-        // Use the token corresponding to the imported name for location/diagnostics
-        spec->token = idParts.back();
-        node->specifiers.push_back(std::move(spec));
-
-        maybe_consume_semicolon();
-        return node;
     }
-    // Otherwise it's a syntax error
-    Token bad = peek();
-    throw std::runtime_error("Parse error at " + bad.loc.to_string() + ": invalid import syntax after 'tumia'" + "\n --> Traced at: \n" + bad.loc.get_line_trace());
+
+    maybe_consume_semicolon();
+    return seqNode;
 }
-
 std::unique_ptr<StatementNode> Parser::parse_export_declaration() {
     // 'ruhusu' token already consumed by caller
     Token ruhusuTok = tokens[position - 1];

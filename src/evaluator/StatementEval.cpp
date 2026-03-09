@@ -77,6 +77,12 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         return;
     }
 
+    if (auto seqImp = dynamic_cast<SequentialImportDeclarationNode*>(stmt)) {
+        for (const auto& imp : seqImp->imports) {
+            if (imp) evaluate_statement(imp.get(), env, return_value, did_return, lc);
+        }
+        return;
+    }
     if (auto imp = dynamic_cast<ImportDeclarationNode*>(stmt)) {
         // Load the module (may return an exports object even for circular deps)
         ObjectPtr exports = import_module(imp->module_path, imp->module_token, env);
