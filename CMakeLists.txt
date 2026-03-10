@@ -1,9 +1,18 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.28)
 project(SwaziLang VERSION 3.1.0 LANGUAGES C CXX)
+
+# Standard install paths (bin, lib, include, etc.)
+include(GNUInstallDirs)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# --- RPATH: make installed binary find shared libs in the install libdir ---
+set(CMAKE_SKIP_BUILD_RPATH FALSE)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_FULL_LIBDIR}")
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 # Linenoise library
 add_library(linenoise STATIC thirdparty/linenoise/linenoise.c)
@@ -54,12 +63,14 @@ add_custom_target(generate_builtins DEPENDS "${GENERATED_BUILTIN_CPP}")
 # --- END embed builtins ---
 
 
-# Fetch link re2
+# Fetch re2 — EXCLUDE_FROM_ALL on Declare suppresses re2's own install()
+# rules so they don't fire during "make install" (CMake >= 3.28 API).
 include(FetchContent)
 FetchContent_Declare(
   re2
   GIT_REPOSITORY https://github.com/google/re2.git
-  GIT_TAG        2023-11-01  # Use latest stable
+  GIT_TAG        2023-11-01
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(re2)
 
@@ -89,21 +100,23 @@ set_property(TARGET sodium PROPERTY INTERFACE_INCLUDE_DIRECTORIES "${LIBSODIUM_I
 add_dependencies(sodium libsodium_build)
 
 # --- libuv Setup ---
-add_subdirectory(thirdparty/libuv-1.51.0)
+# EXCLUDE_FROM_ALL suppresses libuv's own install() rules (headers, cmake
+# config files, etc.) which would otherwise try to write to /usr/local/include.
+add_subdirectory(thirdparty/libuv-1.51.0 EXCLUDE_FROM_ALL)
 
-# --- nlohmann/json Setup ---
-include(FetchContent)
+# --- nlohmann/json — EXCLUDE_FROM_ALL for same reason as re2 ---
 FetchContent_Declare(
   nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
   URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
 # Build llhttp as a shared library
 set(BUILD_SHARED_LIBS ON)
 set(BUILD_STATIC_LIBS OFF)
-add_subdirectory(thirdparty/llhttp)
+add_subdirectory(thirdparty/llhttp EXCLUDE_FROM_ALL)
 # Reset back if needed
 set(BUILD_SHARED_LIBS OFF)
 
@@ -179,14 +192,44 @@ target_link_libraries(swazi PRIVATE swazi_lib)
 target_link_options(swazi PRIVATE -rdynamic)
 
 # --- INSTALLATION ---
-install(TARGETS swazi DESTINATION bin)
+
+# 1. swazi binary
+install(TARGETS swazi
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# 2. Shared libraries that the installed binary needs at runtime:
+#    - swazi_format (built here as SHARED)
+#    - llhttp_shared (built by thirdparty/llhttp as SHARED)
+#    - uv (libuv shared; excluded from libuv's own install, so we do it here)
+install(TARGETS swazi_format
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS llhttp_shared
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/llhttp
+)
+install(TARGETS uv
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# 3. Public header — install swazi_abi.h so ABI authors can #include <swazi/swazi_abi.h>
+#    without having to copy or download the file manually.
+install(FILES ${CMAKE_SOURCE_DIR}/include/swazi_abi.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/swazi
+)
 
 # --- TESTING ---
 enable_testing()
 
+# googletest — EXCLUDE_FROM_ALL so its install rules don't fire
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/releases/download/v1.17.0/googletest-1.17.0.tar.gz
+  EXCLUDE_FROM_ALL
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
