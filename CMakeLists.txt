@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(SwaziLang VERSION 3.2.0 LANGUAGES C CXX)
+project(SwaziLang VERSION 3.2.1 LANGUAGES C CXX)
 
 # Standard install paths (bin, lib, include, etc.)
 include(GNUInstallDirs)
