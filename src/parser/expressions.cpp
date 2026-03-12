@@ -1348,8 +1348,38 @@ std::unique_ptr<ExpressionNode> Parser::parse_primary() {
         auto node = std::make_unique<NewExpressionNode>();
         node->token = newTok;
 
-        // expect a class identifier or callee expression
+        // Parse the callee. We must support member chains like cc.Car and
+        // cc["Car"], but NOT call parens — those belong to unda's own argument
+        // list below. So we call parse_primary() and then manually consume only
+        // DOT and OPENBRACKET postfix steps, mirroring parse_unary()'s loop but
+        // stopping before '(' to avoid eating unda's argument list.
         node->callee = parse_primary();
+
+        while (true) {
+            if (peek().type == TokenType::DOT) {
+                Token dotTok = consume();
+                expect(TokenType::IDENTIFIER, "Expected identifier after '.' in new-expression callee");
+                Token propTok = tokens[position - 1];
+                auto mem = std::make_unique<MemberExpressionNode>();
+                mem->object = std::move(node->callee);
+                mem->property = propTok.value;
+                mem->token = dotTok;
+                node->callee = std::move(mem);
+                continue;
+            }
+            if (peek().type == TokenType::OPENBRACKET) {
+                Token openIdx = consume();
+                auto idxExpr = parse_expression();
+                expect(TokenType::CLOSEBRACKET, "Expected ']' after index in new-expression callee");
+                auto idxNode = std::make_unique<IndexExpressionNode>();
+                idxNode->object = std::move(node->callee);
+                idxNode->index = std::move(idxExpr);
+                idxNode->token = openIdx;
+                node->callee = std::move(idxNode);
+                continue;
+            }
+            break;
+        }
 
         // optional argument list
         if (match(TokenType::OPENPARENTHESIS)) {
