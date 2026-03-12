@@ -2236,6 +2236,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (mem->property == "size") {
                 return Value{static_cast<double>(buf ? buf->data.size() : 0)};
             }
+            
+            // empty() -> bool, true if empty
+            if (mem->property == "empty") {
+              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                return Value{static_cast<bool>(buf->data.empty())};
+              };
+              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.empty"), native_impl, env, mem->token)};
+            }
 
             // buffer.toStr([encoding]) -> string
             if (mem->property == "toStr" || mem->property == "str") {
@@ -2318,7 +2326,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         "\n --> Traced at:\n" + token.loc.get_line_trace());
                 };
 
-                return Value{std::make_shared<FunctionValue>(std::string("native:buffer."), native_impl, env, mem->token)};
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.toString"), native_impl, env, mem->token)};
             }
 
             // buf.slice(start, end?) -> Buffer
