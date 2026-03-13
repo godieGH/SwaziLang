@@ -2229,6 +2229,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 std::holds_alternative<ObjectPtr>(objVal)};
         }
 
+        // bufferValue
         if (std::holds_alternative<BufferPtr>(objVal)) {
             BufferPtr buf = std::get<BufferPtr>(objVal);
 
@@ -2236,13 +2237,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (mem->property == "size") {
                 return Value{static_cast<double>(buf ? buf->data.size() : 0)};
             }
-            
+
             // empty() -> bool, true if empty
             if (mem->property == "empty") {
-              auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-                return Value{static_cast<bool>(buf->data.empty())};
-              };
-              return Value{std::make_shared<FunctionValue>(std::string("native:buffer.empty"), native_impl, env, mem->token)};
+                auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    return Value{static_cast<bool>(buf->data.empty())};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.empty"), native_impl, env, mem->token)};
             }
 
             // buffer.toStr([encoding]) -> string
@@ -2973,6 +2974,152 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     return Value{buf};
                 };
                 return Value{std::make_shared<FunctionValue>(std::string("native:buffer.writeUInt8"), native_impl, env, mem->token)};
+            }
+
+            // buf.indexOf(needle, byteOffset?) -> number (-1 if not found)
+            // needle: buffer | string | number(byte)
+            if (mem->property == "indexOf" || mem->property == "indexYa") {
+                auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!buf) return Value{static_cast<double>(-1)};
+                    if (args.empty()) {
+                        throw SwaziError("TypeError", "buf.indexOf requires at least 1 argument (needle).", token.loc);
+                    }
+
+                    size_t byteOffset = 0;
+                    if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                        long long off = static_cast<long long>(std::get<double>(args[1]));
+                        if (off < 0) off = std::max(0LL, static_cast<long long>(buf->data.size()) + off);
+                        byteOffset = static_cast<size_t>(std::min(off, static_cast<long long>(buf->data.size())));
+                    }
+
+                    // Build needle bytes
+                    std::vector<uint8_t> needle;
+                    if (std::holds_alternative<BufferPtr>(args[0])) {
+                        BufferPtr nb = std::get<BufferPtr>(args[0]);
+                        if (!nb || nb->data.empty()) return Value{static_cast<double>(byteOffset)};
+                        needle = nb->data;
+                    } else if (std::holds_alternative<std::string>(args[0])) {
+                        const std::string& s = std::get<std::string>(args[0]);
+                        if (s.empty()) return Value{static_cast<double>(byteOffset)};
+                        needle.assign(s.begin(), s.end());
+                    } else if (std::holds_alternative<double>(args[0])) {
+                        needle.push_back(static_cast<uint8_t>(static_cast<int>(std::get<double>(args[0])) & 0xFF));
+                    } else {
+                        throw SwaziError("TypeError", "buf.indexOf needle must be a buffer, string, or byte number.", token.loc);
+                    }
+
+                    if (needle.size() > buf->data.size() - byteOffset) return Value{static_cast<double>(-1)};
+
+                    auto it = std::search(
+                        buf->data.begin() + byteOffset, buf->data.end(),
+                        needle.begin(), needle.end());
+
+                    if (it == buf->data.end()) return Value{static_cast<double>(-1)};
+                    return Value{static_cast<double>(std::distance(buf->data.begin(), it))};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.indexOf"), native_impl, env, mem->token)};
+            }
+
+            // buf.lastIndexOf(needle, byteOffset?) -> number (-1 if not found)
+            if (mem->property == "lastIndexOf") {
+                auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!buf) return Value{static_cast<double>(-1)};
+                    if (args.empty()) {
+                        throw SwaziError("TypeError", "buf.lastIndexOf requires at least 1 argument (needle).", token.loc);
+                    }
+
+                    size_t searchEnd = buf->data.size();  // search up to this index (exclusive)
+                    if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                        long long off = static_cast<long long>(std::get<double>(args[1]));
+                        if (off < 0) off = static_cast<long long>(buf->data.size()) + off;
+                        searchEnd = static_cast<size_t>(std::max(0LL, std::min(off + 1LL, static_cast<long long>(buf->data.size()))));
+                    }
+
+                    std::vector<uint8_t> needle;
+                    if (std::holds_alternative<BufferPtr>(args[0])) {
+                        BufferPtr nb = std::get<BufferPtr>(args[0]);
+                        if (!nb || nb->data.empty()) return Value{static_cast<double>(searchEnd)};
+                        needle = nb->data;
+                    } else if (std::holds_alternative<std::string>(args[0])) {
+                        const std::string& s = std::get<std::string>(args[0]);
+                        if (s.empty()) return Value{static_cast<double>(searchEnd)};
+                        needle.assign(s.begin(), s.end());
+                    } else if (std::holds_alternative<double>(args[0])) {
+                        needle.push_back(static_cast<uint8_t>(static_cast<int>(std::get<double>(args[0])) & 0xFF));
+                    } else {
+                        throw SwaziError("TypeError", "buf.lastIndexOf needle must be a buffer, string, or byte number.", token.loc);
+                    }
+
+                    if (needle.size() > searchEnd) return Value{static_cast<double>(-1)};
+
+                    // search backwards from searchEnd
+                    auto it = std::search(
+                        std::make_reverse_iterator(buf->data.begin() + searchEnd),
+                        std::make_reverse_iterator(buf->data.begin()),
+                        needle.rbegin(), needle.rend());
+
+                    if (it == std::make_reverse_iterator(buf->data.begin())) return Value{static_cast<double>(-1)};
+                    // convert reverse iterator position back to forward index
+                    size_t idx = static_cast<size_t>(std::distance(buf->data.begin(), it.base())) - needle.size();
+                    return Value{static_cast<double>(idx)};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.lastIndexOf"), native_impl, env, mem->token)};
+            }
+
+            // buf.fill(value, start?, end?) -> buf (mutates in place)
+            // value: number(byte) | string(first byte) | buffer(repeating pattern)
+            if (mem->property == "fill") {
+                auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (!buf) return Value{buf};
+                    if (args.empty()) {
+                        throw SwaziError("TypeError", "buf.fill requires at least 1 argument (value).", token.loc);
+                    }
+
+                    size_t start = 0;
+                    size_t end = buf->data.size();
+
+                    if (args.size() >= 2 && std::holds_alternative<double>(args[1])) {
+                        long long s = static_cast<long long>(std::get<double>(args[1]));
+                        if (s < 0) s = std::max(0LL, static_cast<long long>(buf->data.size()) + s);
+                        start = static_cast<size_t>(std::min(s, static_cast<long long>(buf->data.size())));
+                    }
+                    if (args.size() >= 3 && std::holds_alternative<double>(args[2])) {
+                        long long e = static_cast<long long>(std::get<double>(args[2]));
+                        if (e < 0) e = std::max(0LL, static_cast<long long>(buf->data.size()) + e);
+                        end = static_cast<size_t>(std::min(e, static_cast<long long>(buf->data.size())));
+                    }
+
+                    if (start >= end) return Value{buf};
+
+                    // Build fill pattern
+                    std::vector<uint8_t> pattern;
+                    if (std::holds_alternative<double>(args[0])) {
+                        pattern.push_back(static_cast<uint8_t>(static_cast<int>(std::get<double>(args[0])) & 0xFF));
+                    } else if (std::holds_alternative<std::string>(args[0])) {
+                        const std::string& s = std::get<std::string>(args[0]);
+                        if (s.empty())
+                            pattern.push_back(0);
+                        else
+                            pattern.assign(s.begin(), s.end());
+                    } else if (std::holds_alternative<BufferPtr>(args[0])) {
+                        BufferPtr pb = std::get<BufferPtr>(args[0]);
+                        if (!pb || pb->data.empty())
+                            pattern.push_back(0);
+                        else
+                            pattern = pb->data;
+                    } else {
+                        throw SwaziError("TypeError", "buf.fill value must be a byte number, string, or buffer.", token.loc);
+                    }
+
+                    // Tile the pattern across [start, end)
+                    size_t pi = 0;
+                    for (size_t i = start; i < end; ++i, pi = (pi + 1) % pattern.size()) {
+                        buf->data[i] = pattern[pi];
+                    }
+
+                    return Value{buf};
+                };
+                return Value{std::make_shared<FunctionValue>(std::string("native:buffer.fill"), native_impl, env, mem->token)};
             }
 
             // No other properties recognized on buffers yet
