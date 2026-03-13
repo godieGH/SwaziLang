@@ -3928,6 +3928,12 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 return Value{fn};
             };
 
+            if (prop == "empty") {
+                return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+                    return Value{s_val.empty()};
+                });
+            }
+
             // herufiNdogo() -> toLowerCase
             if (prop == "herufiNdogo" || prop == "toLower") {
                 return make_fn([s_val](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
@@ -4041,8 +4047,8 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 });
             }
 
-            // slesi(start?, end?) -> substring-like slice
-            if (prop == "slesi" || prop == "substr") {
+            // substr(start?, end?) -> substring-like slice
+            if (prop == "slice" || prop == "substr") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     long long n = static_cast<long long>(s_val.size());
                     long long start = 0;
@@ -4057,7 +4063,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 });
             }
 
-            // badilisha(old, neu) -> replace first occurrence
+            // badilisha(old, new) -> replace first occurrence
             if (prop == "badilisha" || prop == "replace") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.size() < 2)
@@ -4202,6 +4208,50 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
                     // Return the ASCII/char code as a double
                     return Value{static_cast<double>(static_cast<unsigned char>(s_val[(size_t)idx]))};
+                });
+            }
+
+            // padStart(targetLength, padStr?) -> padStart
+            if (prop == "padStart") {
+                return make_fn([s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<double>(args[0]))
+                        throw SwaziError("TypeError", "padStart requires a target length number.", token.loc);
+                    long long target = static_cast<long long>(std::get<double>(args[0]));
+                    std::string pad = " ";
+                    if (args.size() >= 2 && std::holds_alternative<std::string>(args[1]))
+                        pad = std::get<std::string>(args[1]);
+                    if (pad.empty()) return Value{s_val};
+                    long long current = static_cast<long long>(s_val.size());
+                    if (current >= target) return Value{s_val};
+                    long long needed = target - current;
+                    std::string prefix;
+                    prefix.reserve(static_cast<size_t>(needed));
+                    while (static_cast<long long>(prefix.size()) < needed)
+                        prefix.append(pad);
+                    prefix.resize(static_cast<size_t>(needed));  // trim to exact length
+                    return Value{prefix + s_val};
+                });
+            }
+
+            // padEnd(targetLength, padStr?) -> padEnd
+            if (prop == "padEnd") {
+                return make_fn([s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                    if (args.empty() || !std::holds_alternative<double>(args[0]))
+                        throw SwaziError("TypeError", "padEnd requires a target length number.", token.loc);
+                    long long target = static_cast<long long>(std::get<double>(args[0]));
+                    std::string pad = " ";
+                    if (args.size() >= 2 && std::holds_alternative<std::string>(args[1]))
+                        pad = std::get<std::string>(args[1]);
+                    if (pad.empty()) return Value{s_val};
+                    long long current = static_cast<long long>(s_val.size());
+                    if (current >= target) return Value{s_val};
+                    long long needed = target - current;
+                    std::string suffix;
+                    suffix.reserve(static_cast<size_t>(needed));
+                    while (static_cast<long long>(suffix.size()) < needed)
+                        suffix.append(pad);
+                    suffix.resize(static_cast<size_t>(needed));
+                    return Value{s_val + suffix};
                 });
             }
 
