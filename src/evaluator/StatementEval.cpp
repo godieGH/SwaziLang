@@ -300,6 +300,31 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 return;
             }
 
+            if (std::holds_alternative<BufferPtr>(objVal)) {
+                BufferPtr buf = std::get<BufferPtr>(objVal);
+                if (!buf) {
+                    throw SwaziError("TypeError", "Cannot assign into null buffer.", idx->token.loc);
+                }
+                long long rawIndex = static_cast<long long>(to_number(indexVal, idx->token));
+                if (rawIndex < 0 || (size_t)rawIndex >= buf->data.size()) {
+                    throw SwaziError(
+                        "RangeError",
+                        "Index " + std::to_string(rawIndex) + " is out of bounds (buffer size: " +
+                            std::to_string(buf->data.size()) + "). Index should be from 0-" +
+                            std::to_string(buf->data.size() - 1) + ".",
+                        idx->token.loc);
+                }
+                long long byteVal = static_cast<long long>(to_number(rhs, idx->token));
+                if (byteVal < 0 || byteVal > 255) {
+                    throw SwaziError(
+                        "RangeError",
+                        "Buffer byte value " + std::to_string(byteVal) + " out of range (0-255).",
+                        idx->token.loc);
+                }
+                buf->data[(size_t)rawIndex] = static_cast<uint8_t>(byteVal);
+                return;
+            }
+
             throw std::runtime_error(
                 "TypeError at " + idx->token.loc.to_string() +
                 "\nAttempted index assignment on non-array/non-object value." +

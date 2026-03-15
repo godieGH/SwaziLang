@@ -2528,7 +2528,14 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         for (size_t i = 0; i < toCopy; ++i) {
                             if (std::holds_alternative<double>(arr->elements[i])) {
                                 double val = std::get<double>(arr->elements[i]);
-                                buf->data[offset + i] = static_cast<uint8_t>(static_cast<int>(val) & 0xFF);
+                                long long ival = static_cast<long long>(val);
+                                if (ival < 0 || ival > 255) {
+                                    throw SwaziError("RangeError",
+                                        "buf.set() array element at index " + std::to_string(i) +
+                                            " value " + std::to_string(ival) + " out of range (0-255).",
+                                        token.loc);
+                                }
+                                buf->data[offset + i] = static_cast<uint8_t>(ival);
                             }
                         }
                     } else {
