@@ -2864,11 +2864,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (prop == "writeUInt16LE") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty()) {
-                        throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                        throw SwaziError("TypeError", "buffer.writeUInt16LE(value, [position=0]) requires atleast one argument", token.loc);
                     }
 
                     if (!std::holds_alternative<double>(args[0])) {
-                        throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                        throw SwaziError("TypeError", "Can not writeUInt16LE with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
                     }
 
                     uint16_t value = static_cast<uint16_t>(std::get<double>(args[0]));
@@ -2893,11 +2893,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (prop == "writeUInt16BE") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty()) {
-                        throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                        throw SwaziError("TypeError", "buffer.writeUInt16BE(value, [position=0]) requires atleast one argument", token.loc);
                     }
 
                     if (!std::holds_alternative<double>(args[0])) {
-                        throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                        throw SwaziError("TypeError", "Can not writeUInt16BE with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
                     }
 
                     uint16_t value = static_cast<uint16_t>(std::get<double>(args[0]));
@@ -2923,11 +2923,11 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (prop == "writeUInt32LE") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty()) {
-                        throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                        throw SwaziError("TypeError", "buffer.writeUInt32LE(value, [position=0]) requires atleast one argument", token.loc);
                     }
 
                     if (!std::holds_alternative<double>(args[0])) {
-                        throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                        throw SwaziError("TypeError", "Can not writeUInt32LE with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
                     }
 
                     uint32_t value = static_cast<uint32_t>(std::get<double>(args[0]));
@@ -2954,7 +2954,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (prop == "writeUInt32BE") {
                 auto native_impl = [this, buf](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
                     if (args.empty()) {
-                        throw SwaziError("TypeError", "buffer.writeUInt8(value, [position=0]) requires atleast one argument", token.loc);
+                        throw SwaziError("TypeError", "buffer.writeUInt32BE(value, [position=0]) requires atleast one argument", token.loc);
                     }
 
                     if (!std::holds_alternative<double>(args[0])) {
