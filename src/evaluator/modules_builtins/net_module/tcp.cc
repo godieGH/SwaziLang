@@ -205,6 +205,10 @@ static void try_next_address(ResolveConnectData* rdata) {
         auto inst = rdata->sock_inst;
         delete rdata;
         g_active_tcp_work.fetch_sub(1);
+        {
+            std::lock_guard<std::mutex> lk(g_tcp_sockets_mutex);
+            g_tcp_sockets.erase(inst->socket_id);
+        }
         if (inst->on_error_handler) {
             CallbackPayload* payload = new CallbackPayload(
                 inst->on_error_handler,
@@ -298,10 +302,21 @@ static void on_tcp_connection(uv_stream_t* server, int status) {
         sock_inst->remote_port = ntohs(a->sin_port);
     } else if (addr.ss_family == AF_INET6) {
         struct sockaddr_in6* a = (struct sockaddr_in6*)&addr;
-        char ip[INET6_ADDRSTRLEN];
-        uv_ip6_name(a, ip, sizeof(ip));
-        sock_inst->remote_address = ip;
-        sock_inst->remote_port = ntohs(a->sin6_port);
+        // check if it's IPv4-mapped
+        if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
+            struct sockaddr_in mapped{};
+            mapped.sin_family = AF_INET;
+            memcpy(&mapped.sin_addr, a->sin6_addr.s6_addr + 12, 4);
+            char ip[INET_ADDRSTRLEN];
+            uv_ip4_name(&mapped, ip, sizeof(ip));
+            sock_inst->remote_address = ip;
+            sock_inst->remote_port = ntohs(a->sin6_port);
+        } else {
+            char ip[INET6_ADDRSTRLEN];
+            uv_ip6_name(a, ip, sizeof(ip));
+            sock_inst->remote_address = ip;
+            sock_inst->remote_port = ntohs(a->sin6_port);
+        }
     }
 
     auto socket_obj = std::make_shared<ObjectValue>();
@@ -496,6 +511,9 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
             std::string host = "0.0.0.0";
             FunctionPtr cb = nullptr;
 
+            if (port < 0 || port > 65535)
+                throw SwaziError("TypeError", "Invalid port number", token.loc);
+
             if (args.size() >= 2 && std::holds_alternative<std::string>(args[1]))
                 host = std::get<std::string>(args[1]);
             if (args.size() >= 3 && std::holds_alternative<FunctionPtr>(args[2]))
@@ -514,14 +532,57 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
                 inst->server_handle->data = inst.get();
                 uv_tcp_init(loop, inst->server_handle);
 
-                struct sockaddr_in addr;
-                uv_ip4_addr(host.c_str(), port, &addr);
-                uv_tcp_bind(inst->server_handle, (const struct sockaddr*)&addr, 0);
+                struct sockaddr_storage addr{};
+                int bind_r;
+                struct sockaddr_in a4{};
+                struct sockaddr_in6 a6{};
+
+                if (uv_ip4_addr(host.c_str(), port, &a4) == 0) {
+                    memcpy(&addr, &a4, sizeof(a4));
+                    bind_r = 0;
+                } else if (uv_ip6_addr(host.c_str(), port, &a6) == 0) {
+                    memcpy(&addr, &a6, sizeof(a6));
+                    bind_r = 0;
+                } else {
+                    bind_r = UV_EINVAL;
+                }
+
+                if (bind_r != 0) {
+                    if (cb) {
+                        auto err = std::string("Invalid address: ") + uv_strerror(bind_r);
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {Value{err}})));
+                    }
+                    uv_close((uv_handle_t*)inst->server_handle, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
+                    inst->server_handle = nullptr;
+                    return;
+                }
+
+                int bind_r2 = uv_tcp_bind(inst->server_handle, (const struct sockaddr*)&addr, 0);
+                if (bind_r2 != 0) {
+                    if (cb) {
+                        auto err = std::string("Bind failed: ") + uv_strerror(bind_r2);
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {Value{err}})));
+                    }
+                    uv_close((uv_handle_t*)inst->server_handle, [](uv_handle_t* h) { delete (uv_tcp_t*)h; });
+                    inst->server_handle = nullptr;
+                    return;
+                }
 
                 int r = uv_listen((uv_stream_t*)inst->server_handle, 128, on_tcp_connection);
                 if (cb) {
                     if (r == 0) {
-                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {})));
+                        struct sockaddr_storage bound{};
+                        int len = sizeof(bound);
+                        uv_tcp_getsockname(inst->server_handle, (struct sockaddr*)&bound, &len);
+                        int actual_port = (bound.ss_family == AF_INET)
+                            ? ntohs(reinterpret_cast<struct sockaddr_in*>(&bound)->sin_port)
+                            : ntohs(reinterpret_cast<struct sockaddr_in6*>(&bound)->sin6_port);
+                        inst->port = actual_port;  // update so it's accurate from this point on
+
+                        auto info = std::make_shared<ObjectValue>();
+                        info->properties["port"] = {Value{(double)inst->port}, false, false, false, Token()};
+                        info->properties["address"] = {Value{inst->host}, false, false, false, Token()};
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {std::monostate{}, info})));
                     } else {
                         auto err = std::string("Listen failed: ") + uv_strerror(r);
                         enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {Value{err}})));
@@ -773,6 +834,10 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
                     g_active_tcp_work.fetch_sub(1);
                     auto inst = rdata->sock_inst;
                     delete rdata;
+                    {
+                        std::lock_guard<std::mutex> lk(g_tcp_sockets_mutex);
+                        g_tcp_sockets.erase(inst->socket_id);
+                    }
                     if (inst->on_error_handler) {
                         auto err = std::string("DNS resolution failed: ") + uv_strerror(status);
                         enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler, {Value{err}})));
@@ -793,6 +858,10 @@ std::shared_ptr<ObjectValue> make_tcp_exports(EnvPtr env, Evaluator* evaluator) 
             delete static_cast<ResolveConnectData*>(resolve_req->data);
             delete resolve_req;
             g_active_tcp_work.fetch_sub(1);
+            {
+                std::lock_guard<std::mutex> lk(g_tcp_sockets_mutex);
+                g_tcp_sockets.erase(sock_id);  // missing
+            }
             if (sock_inst->on_error_handler) {
                 auto err = std::string("DNS resolve initiation failed: ") + uv_strerror(r);
                 enqueue_callback_global(static_cast<void*>(new CallbackPayload(sock_inst->on_error_handler, {Value{err}})));

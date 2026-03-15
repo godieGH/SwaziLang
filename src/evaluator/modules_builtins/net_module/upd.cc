@@ -24,6 +24,7 @@ struct UdpSocketInstance {
     FunctionPtr on_close_handler;
     std::string bound_address;
     int bound_port = 0;
+    std::string socket_type;  // "udp4" or "udp6"
 
     ~UdpSocketInstance() {
         // Safety: ensure work counter is decremented on destruction
@@ -85,10 +86,20 @@ static void udp_recv_cb(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf,
             sender_port = ntohs(addr_in->sin_port);
         } else if (addr->sa_family == AF_INET6) {
             struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)addr;
-            char ip[INET6_ADDRSTRLEN];
-            uv_ip6_name(addr_in6, ip, sizeof(ip));
-            sender_addr = ip;
-            sender_port = ntohs(addr_in6->sin6_port);
+            if (IN6_IS_ADDR_V4MAPPED(&addr_in6->sin6_addr)) {
+                struct sockaddr_in mapped{};
+                mapped.sin_family = AF_INET;
+                memcpy(&mapped.sin_addr, addr_in6->sin6_addr.s6_addr + 12, 4);
+                char ip[INET_ADDRSTRLEN];
+                uv_ip4_name(&mapped, ip, sizeof(ip));
+                sender_addr = ip;
+                sender_port = ntohs(addr_in6->sin6_port);
+            } else {
+                char ip[INET6_ADDRSTRLEN];
+                uv_ip6_name(addr_in6, ip, sizeof(ip));
+                sender_addr = ip;
+                sender_port = ntohs(addr_in6->sin6_port);
+            }
         }
 
         // Create buffer with received data
@@ -104,7 +115,7 @@ static void udp_recv_cb(uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf,
         rinfo->properties["address"] = {Value{sender_addr}, false, false, true, tok};
         rinfo->properties["port"] = {Value{static_cast<double>(sender_port)}, false, false, true, tok};
         rinfo->properties["family"] = {
-            Value{addr->sa_family == AF_INET ? std::string("IPv4") : std::string("IPv6")},
+            Value{sender_addr.find(':') == std::string::npos ? std::string("IPv4") : std::string("IPv6")},
             false, false, true, tok};
         rinfo->properties["size"] = {Value{static_cast<double>(nread)}, false, false, true, tok};
 
@@ -150,6 +161,7 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
         }
 
         auto inst = std::make_shared<UdpSocketInstance>();
+        inst->socket_type = type;
         long long sock_id = g_next_udp_socket_id.fetch_add(1);
 
         // Increment work counter and mark it
@@ -217,13 +229,13 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
         });
 
         // socket.bind(port, address?, callback?)
-        auto bind_impl = [inst, sock_id](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
+        auto bind_impl = [inst, sock_id, loop](const std::vector<Value>& args, EnvPtr, const Token& token) -> Value {
             if (args.empty()) {
                 throw SwaziError("TypeError", "bind requires port", token.loc);
             }
 
             int port = static_cast<int>(NetHelpers::value_to_number(args[0]));
-            std::string address = "0.0.0.0";
+            std::string address = (inst->socket_type == "udp6") ? "::" : "0.0.0.0";
             FunctionPtr cb = nullptr;
 
             if (args.size() >= 2 && std::holds_alternative<std::string>(args[1])) {
@@ -236,46 +248,109 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 cb = std::get<FunctionPtr>(args[1]);
             }
 
+            if (port < 0 || port > 65535) {
+                throw SwaziError("TypeError", "Invalid port number", token.loc);
+            }
+
             inst->bound_port = port;
             inst->bound_address = address;
 
-            scheduler_run_on_loop([inst, port, address, cb]() {
+            scheduler_run_on_loop([inst, port, address, cb, loop]() {
                 if (!inst->udp_handle) {
                     if (cb) {
                         auto err_msg = std::string("Bind failed: socket not initialized");
-                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {Value{err_msg}})));
                     }
                     return;
                 }
 
-                // Detect IPv6 by presence of ':'
-                bool is_ipv6 = (address.find(':') != std::string::npos);
-                int r;
+                // Try parse as IP literal first — no DNS cost
+                struct sockaddr_storage addr{};
+                struct sockaddr_in a4{};
+                struct sockaddr_in6 a6{};
+                bool parsed = false;
 
-                if (is_ipv6) {
-                    struct sockaddr_in6 addr6;
-                    r = uv_ip6_addr(address.c_str(), port, &addr6);
-                    if (r == 0) {
-                        r = uv_udp_bind(inst->udp_handle, (const struct sockaddr*)&addr6, UV_UDP_REUSEADDR);
+                if (uv_ip4_addr(address.c_str(), port, &a4) == 0) {
+                    if (inst->socket_type == "udp6") {
+                        if (cb) enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                            {Value{std::string("Cannot bind IPv4 address on udp6 socket")}})));
+                        return;
                     }
-                } else {
-                    struct sockaddr_in addr4;
-                    r = uv_ip4_addr(address.c_str(), port, &addr4);
-                    if (r == 0) {
-                        r = uv_udp_bind(inst->udp_handle, (const struct sockaddr*)&addr4, UV_UDP_REUSEADDR);
+                    memcpy(&addr, &a4, sizeof(a4));
+                    parsed = true;
+                } else if (uv_ip6_addr(address.c_str(), port, &a6) == 0) {
+                    if (inst->socket_type == "udp4") {
+                        if (cb) enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                            {Value{std::string("Cannot bind IPv6 address on udp4 socket")}})));
+                        return;
                     }
+                    memcpy(&addr, &a6, sizeof(a6));
+                    parsed = true;
                 }
 
-                if (cb) {
-                    if (r == 0) {
-                        CallbackPayload* payload = new CallbackPayload(cb, {});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    } else {
-                        auto err_msg = std::string("Bind failed: ") + uv_strerror(r);
-                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
+                if (parsed) {
+                    int r = uv_udp_bind(inst->udp_handle, (const struct sockaddr*)&addr, UV_UDP_REUSEADDR);
+                    if (cb) {
+                        if (r == 0)
+                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {})));
+                        else
+                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                                {Value{std::string("Bind failed: ") + uv_strerror(r)}})));
                     }
+                    return;
+                }
+
+                // Not an IP literal — resolve via DNS (bind happens once, acceptable cost)
+                struct BindResolveCtx {
+                    std::shared_ptr<UdpSocketInstance> inst;
+                    int port;
+                    FunctionPtr cb;
+                };
+                auto* rctx = new BindResolveCtx{inst, port, cb};
+                auto* resolve_req = new uv_getaddrinfo_t;
+                resolve_req->data = rctx;
+
+                struct addrinfo hints{};
+                hints.ai_family = (inst->socket_type == "udp6") ? AF_INET6 : AF_INET;
+                hints.ai_socktype = SOCK_DGRAM;
+
+                int gr = uv_getaddrinfo(loop, resolve_req, [](uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
+                        auto* rctx = static_cast<BindResolveCtx*>(req->data);
+                        delete req;
+
+                        if (status < 0 || !res) {
+                            if (rctx->cb)
+                                enqueue_callback_global(static_cast<void*>(new CallbackPayload(rctx->cb,
+                                    {Value{std::string("DNS resolution failed: ") + uv_strerror(status)}})));
+                            delete rctx;
+                            if (res) uv_freeaddrinfo(res);
+                            return;
+                        }
+
+                        struct sockaddr_storage addr{};
+                        memcpy(&addr, res->ai_addr, res->ai_addrlen);
+                        if (addr.ss_family == AF_INET)
+                            reinterpret_cast<struct sockaddr_in*>(&addr)->sin_port = htons(rctx->port);
+                        else
+                            reinterpret_cast<struct sockaddr_in6*>(&addr)->sin6_port = htons(rctx->port);
+                        uv_freeaddrinfo(res);
+
+                        int r = uv_udp_bind(rctx->inst->udp_handle, (const struct sockaddr*)&addr, UV_UDP_REUSEADDR);
+                        if (rctx->cb) {
+                            if (r == 0)
+                                enqueue_callback_global(static_cast<void*>(new CallbackPayload(rctx->cb, {})));
+                            else
+                                enqueue_callback_global(static_cast<void*>(new CallbackPayload(rctx->cb,
+                                    {Value{std::string("Bind failed: ") + uv_strerror(r)}})));
+                        }
+                        delete rctx; }, address.c_str(), nullptr, &hints);
+
+                if (gr != 0) {
+                    if (cb)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                            {Value{std::string("DNS resolve failed: ") + uv_strerror(gr)}})));
+                    delete static_cast<BindResolveCtx*>(resolve_req->data);
+                    delete resolve_req;
                 }
             });
             return std::monostate{};
@@ -301,25 +376,16 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
             // Add size validation
             const size_t MAX_UDP_PAYLOAD = 65507;
             if (data.size() > MAX_UDP_PAYLOAD) {
-                // Trigger error event asynchronously
                 if (inst->on_error_handler) {
-                    FunctionPtr err_handler = inst->on_error_handler;
                     auto err_msg = std::string("UDP payload size (") +
                         std::to_string(data.size()) +
                         " bytes) exceeds maximum of " +
                         std::to_string(MAX_UDP_PAYLOAD) + " bytes";
-
-                    CallbackPayload* payload = new CallbackPayload(err_handler, {Value{err_msg}});
-                    enqueue_callback_global(static_cast<void*>(payload));
+                    enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler, {Value{err_msg}})));
                 }
-
-                // Also notify send callback with error
                 if (cb) {
-                    auto err_msg = std::string("Message too large");
-                    CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                    enqueue_callback_global(static_cast<void*>(payload));
+                    enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {Value{std::string("Message too large")}})));
                 }
-
                 return std::monostate{};
             }
 
@@ -328,65 +394,66 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 auto warning = std::string("Warning: Large UDP packet (") +
                     std::to_string(data.size()) +
                     " bytes) may be fragmented. Consider splitting data.";
-                CallbackPayload* payload = new CallbackPayload(
-                    inst->on_error_handler, {Value{warning}});
-                enqueue_callback_global(static_cast<void*>(payload));
+                enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler, {Value{warning}})));
             }
 
             scheduler_run_on_loop([inst, data, port, address, cb]() {
                 if (!inst->udp_handle) {
-                    if (inst->on_error_handler) {
-                        auto err_msg = std::string("Socket not initialized");
-                        CallbackPayload* payload = new CallbackPayload(inst->on_error_handler, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
-                    if (cb) {
-                        auto err_msg = std::string("Send failed: socket not initialized");
-                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
+                    if (inst->on_error_handler)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler,
+                            {Value{std::string("Socket not initialized")}})));
+                    if (cb)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                            {Value{std::string("Send failed: socket not initialized")}})));
                     return;
                 }
 
-                // Detect IPv6 by presence of ':'
-                bool is_ipv6 = (address.find(':') != std::string::npos);
-                struct sockaddr_storage addr_storage;
-                int addr_result;
+                // Try both parsers — no string inspection, let inet_pton decide
+                struct sockaddr_storage addr_storage{};
+                struct sockaddr_in a4{};
+                struct sockaddr_in6 a6{};
 
-                if (is_ipv6) {
-                    struct sockaddr_in6* addr6 = (struct sockaddr_in6*)&addr_storage;
-                    addr_result = uv_ip6_addr(address.c_str(), port, addr6);
+                if (uv_ip4_addr(address.c_str(), port, &a4) == 0) {
+                    if (inst->socket_type == "udp6") {
+                        if (inst->on_error_handler)
+                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler,
+                                {Value{std::string("Cannot send to IPv4 address on udp6 socket")}})));
+                        if (cb)
+                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                                {Value{std::string("Family mismatch")}})));
+                        return;
+                    }
+                    memcpy(&addr_storage, &a4, sizeof(a4));
+                } else if (uv_ip6_addr(address.c_str(), port, &a6) == 0) {
+                    if (inst->socket_type == "udp4") {
+                        if (inst->on_error_handler)
+                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler,
+                                {Value{std::string("Cannot send to IPv6 address on udp4 socket")}})));
+                        if (cb)
+                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                                {Value{std::string("Family mismatch")}})));
+                        return;
+                    }
+                    memcpy(&addr_storage, &a6, sizeof(a6));
                 } else {
-                    struct sockaddr_in* addr4 = (struct sockaddr_in*)&addr_storage;
-                    addr_result = uv_ip4_addr(address.c_str(), port, addr4);
-                }
-
-                if (addr_result != 0) {
-                    if (inst->on_error_handler) {
-                        auto err_msg = std::string("Invalid address: ") + uv_strerror(addr_result);
-                        CallbackPayload* payload = new CallbackPayload(inst->on_error_handler, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
-                    if (cb) {
-                        auto err_msg = std::string("Invalid address");
-                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
+                    // Not a valid IP literal — hostnames are not allowed in send()
+                    if (inst->on_error_handler)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler,
+                            {Value{std::string("send() requires an IP address, not a hostname")}})));
+                    if (cb)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                            {Value{std::string("Invalid address")}})));
                     return;
                 }
 
                 char* buf = static_cast<char*>(malloc(data.size()));
                 if (!buf) {
-                    if (inst->on_error_handler) {
-                        auto err_msg = std::string("Memory allocation failed");
-                        CallbackPayload* payload = new CallbackPayload(inst->on_error_handler, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
-                    if (cb) {
-                        auto err_msg = std::string("Memory allocation failed");
-                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
-                    }
+                    if (inst->on_error_handler)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler,
+                            {Value{std::string("Memory allocation failed")}})));
+                    if (cb)
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
+                            {Value{std::string("Memory allocation failed")}})));
                     return;
                 }
 
@@ -406,28 +473,21 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 req->data = ctx;
 
                 int result = uv_udp_send(req, inst->udp_handle, &uvbuf, 1,
-                    (const struct sockaddr*)&addr_storage,  // Use addr_storage instead of addr
+                    (const struct sockaddr*)&addr_storage,
                     [](uv_udp_send_t* req, int status) {
                         auto* ctx = static_cast<SendContext*>(req->data);
 
                         if (status != 0) {
                             if (ctx->error_handler) {
                                 auto err_msg = std::string("Send failed: ") + uv_strerror(status);
-                                CallbackPayload* payload = new CallbackPayload(
-                                    ctx->error_handler, {Value{err_msg}});
-                                enqueue_callback_global(static_cast<void*>(payload));
+                                enqueue_callback_global(static_cast<void*>(new CallbackPayload(ctx->error_handler, {Value{err_msg}})));
                             }
-
                             if (ctx->callback) {
-                                auto err_msg = std::string("Send failed");
-                                CallbackPayload* payload = new CallbackPayload(
-                                    ctx->callback, {Value{err_msg}});
-                                enqueue_callback_global(static_cast<void*>(payload));
+                                enqueue_callback_global(static_cast<void*>(new CallbackPayload(ctx->callback, {Value{std::string("Send failed")}})));
                             }
                         } else {
                             if (ctx->callback) {
-                                CallbackPayload* payload = new CallbackPayload(ctx->callback, {});
-                                enqueue_callback_global(static_cast<void*>(payload));
+                                enqueue_callback_global(static_cast<void*>(new CallbackPayload(ctx->callback, {})));
                             }
                         }
 
@@ -439,13 +499,10 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                 if (result != 0) {
                     if (inst->on_error_handler) {
                         auto err_msg = std::string("Send initiation failed: ") + uv_strerror(result);
-                        CallbackPayload* payload = new CallbackPayload(inst->on_error_handler, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler, {Value{err_msg}})));
                     }
                     if (cb) {
-                        auto err_msg = std::string("Send failed");
-                        CallbackPayload* payload = new CallbackPayload(cb, {Value{err_msg}});
-                        enqueue_callback_global(static_cast<void*>(payload));
+                        enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb, {Value{std::string("Send failed")}})));
                     }
                     free(buf);
                     delete ctx;
@@ -580,12 +637,22 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
                         info->properties["family"] = {Value{std::string("IPv4")}, false, false, true, tok};
                     } else if (addr.ss_family == AF_INET6) {
                         struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&addr;
-                        char ip[INET6_ADDRSTRLEN];
-                        uv_ip6_name(addr_in6, ip, sizeof(ip));
-
-                        info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
-                        info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in6->sin6_port))}, false, false, true, tok};
-                        info->properties["family"] = {Value{std::string("IPv6")}, false, false, true, tok};
+                        if (IN6_IS_ADDR_V4MAPPED(&addr_in6->sin6_addr)) {
+                            struct sockaddr_in mapped{};
+                            mapped.sin_family = AF_INET;
+                            memcpy(&mapped.sin_addr, addr_in6->sin6_addr.s6_addr + 12, 4);
+                            char ip[INET_ADDRSTRLEN];
+                            uv_ip4_name(&mapped, ip, sizeof(ip));
+                            info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
+                            info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in6->sin6_port))}, false, false, true, tok};
+                            info->properties["family"] = {Value{std::string("IPv4")}, false, false, true, tok};
+                        } else {
+                            char ip[INET6_ADDRSTRLEN];
+                            uv_ip6_name(addr_in6, ip, sizeof(ip));
+                            info->properties["address"] = {Value{std::string(ip)}, false, false, true, tok};
+                            info->properties["port"] = {Value{static_cast<double>(ntohs(addr_in6->sin6_port))}, false, false, true, tok};
+                            info->properties["family"] = {Value{std::string("IPv6")}, false, false, true, tok};
+                        }
                     }
                 }
             }
