@@ -2958,7 +2958,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
 
                     if (!std::holds_alternative<double>(args[0])) {
-                        throw SwaziError("TypeError", "Can not writeUInt8 with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
+                        throw SwaziError("TypeError", "Can not writeUInt32BE with a non numeric value. The first argument should be a 1 byte numeric value 0 - 255", token.loc);
                     }
 
                     uint32_t value = static_cast<uint32_t>(std::get<double>(args[0]));
