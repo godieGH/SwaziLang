@@ -415,15 +415,17 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
 
                 if (uv_ip4_addr(address.c_str(), port, &a4) == 0) {
                     if (inst->socket_type == "udp6") {
-                        if (inst->on_error_handler)
-                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(inst->on_error_handler,
-                                {Value{std::string("Cannot send to IPv4 address on udp6 socket")}})));
-                        if (cb)
-                            enqueue_callback_global(static_cast<void*>(new CallbackPayload(cb,
-                                {Value{std::string("Family mismatch")}})));
-                        return;
+                        // dual-stack: convert IPv4 to IPv4-mapped IPv6
+                        memset(&a6, 0, sizeof(a6));
+                        a6.sin6_family = AF_INET6;
+                        a6.sin6_port = htons(port);
+                        a6.sin6_addr.s6_addr[10] = 0xff;
+                        a6.sin6_addr.s6_addr[11] = 0xff;
+                        memcpy(&a6.sin6_addr.s6_addr[12], &a4.sin_addr, 4);
+                        memcpy(&addr_storage, &a6, sizeof(a6));
+                    } else {
+                        memcpy(&addr_storage, &a4, sizeof(a4));
                     }
-                    memcpy(&addr_storage, &a4, sizeof(a4));
                 } else if (uv_ip6_addr(address.c_str(), port, &a6) == 0) {
                     if (inst->socket_type == "udp4") {
                         if (inst->on_error_handler)
