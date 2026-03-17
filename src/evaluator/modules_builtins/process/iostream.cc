@@ -495,28 +495,39 @@ static StdStreamStatePtr create_std_stream(int fd, const std::string& name, EnvP
     state->is_tty = (type == UV_TTY);
 
     if (state->is_tty) {
-        state->tty_handle = new uv_tty_t;
-        int r = uv_tty_init(loop, state->tty_handle, fd, 0);
-        if (r != 0) {
-            delete state->tty_handle;
-            state->tty_handle = nullptr;
-            state->is_tty = false;
+        int duped = dup(fd);
+        if (duped >= 0) {
+            state->tty_handle = new uv_tty_t;
+            int r = uv_tty_init(loop, state->tty_handle, duped, 0);
+            if (r != 0) {
+                delete state->tty_handle;
+                state->tty_handle = nullptr;
+                close(duped);
+                state->is_tty = false;
+            } else {
+                uv_tty_set_mode(state->tty_handle, UV_TTY_MODE_NORMAL);
+            }
         } else {
-            uv_tty_set_mode(state->tty_handle, UV_TTY_MODE_NORMAL);
+            state->is_tty = false;
         }
     }
 
     if (!state->is_tty) {
-        state->pipe_handle = new uv_pipe_t;
-        int r = uv_pipe_init(loop, state->pipe_handle, 0);
-        if (r != 0) {
-            delete state->pipe_handle;
-            state->pipe_handle = nullptr;
-        } else {
-            r = uv_pipe_open(state->pipe_handle, fd);
+        int duped = dup(fd);
+        if (duped >= 0) {
+            state->pipe_handle = new uv_pipe_t;
+            int r = uv_pipe_init(loop, state->pipe_handle, 0);
             if (r != 0) {
                 delete state->pipe_handle;
                 state->pipe_handle = nullptr;
+                close(duped);
+            } else {
+                r = uv_pipe_open(state->pipe_handle, duped);
+                if (r != 0) {
+                    delete state->pipe_handle;
+                    state->pipe_handle = nullptr;
+                    close(duped);
+                }
             }
         }
     }
