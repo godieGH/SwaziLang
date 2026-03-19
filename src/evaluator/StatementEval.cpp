@@ -1022,6 +1022,104 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 return;
             }
 
+            auto ord_it = obj->properties.find("__ordered_store__");
+            if (ord_it != obj->properties.end() &&
+                std::holds_alternative<ArrayPtr>(ord_it->second.value)) {
+                ArrayPtr store = std::get<ArrayPtr>(ord_it->second.value);
+                if (!store) {
+                    if (frame) frame->loop_states.erase(loop_id);
+                    return;
+                }
+
+                // Snapshot keys in order on first entry
+                if (!resuming && state) {
+                    state->keys_snapshot.clear();
+                    for (auto& pv : store->elements) {
+                        if (std::holds_alternative<ArrayPtr>(pv)) {
+                            ArrayPtr pair = std::get<ArrayPtr>(pv);
+                            if (pair && !pair->elements.empty() &&
+                                std::holds_alternative<std::string>(pair->elements[0])) {
+                                state->keys_snapshot.push_back(
+                                    std::get<std::string>(pair->elements[0]));
+                            }
+                        }
+                    }
+                    state->current_index = 0;
+                }
+
+                std::vector<std::string> local_keys_ord;
+                std::vector<std::string>& keys = state ? state->keys_snapshot : local_keys_ord;
+
+                if (!state) {
+                    for (auto& pv : store->elements) {
+                        if (std::holds_alternative<ArrayPtr>(pv)) {
+                            ArrayPtr pair = std::get<ArrayPtr>(pv);
+                            if (pair && !pair->elements.empty() &&
+                                std::holds_alternative<std::string>(pair->elements[0])) {
+                                keys.push_back(std::get<std::string>(pair->elements[0]));
+                            }
+                        }
+                    }
+                }
+
+                size_t start_index = (state && resuming) ? state->current_index : 0;
+
+                for (size_t i = start_index; i < keys.size(); ++i) {
+                    if (state) state->current_index = i;
+
+                    // Pull value from store by position (store and keys_snapshot are parallel)
+                    Value field_value = std::monostate{};
+                    if (i < store->elements.size() &&
+                        std::holds_alternative<ArrayPtr>(store->elements[i])) {
+                        ArrayPtr pair = std::get<ArrayPtr>(store->elements[i]);
+                        if (pair && pair->elements.size() >= 2)
+                            field_value = pair->elements[1];
+                    }
+
+                    if (fin->valueVar)
+                        loopEnv->values[fin->valueVar->name] = {keys[i], false};
+                    if (fin->indexVar)
+                        loopEnv->values[fin->indexVar->name] = {field_value, false};
+
+                    auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
+                    for (size_t j = 0; j < fin->body.size(); ++j) {
+                        auto& s = fin->body[j];
+
+                        if (resuming && state && j < state->body_statement_index)
+                            continue;
+
+                        evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+
+                        if (state) state->body_statement_index = j + 1;
+
+                        if (did_return && *did_return) {
+                            if (frame) frame->loop_states.erase(loop_id);
+                            return;
+                        }
+                        if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                    }
+
+                    if (state) {
+                        state->body_statement_index = 0;
+                        resuming = false;
+                    }
+
+                    if (loopCtrl->did_break) {
+                        loopCtrl->did_break = false;
+                        if (frame) frame->loop_states.erase(loop_id);
+                        break;
+                    }
+                    if (loopCtrl->did_continue) {
+                        loopCtrl->did_continue = false;
+                        continue;
+                    }
+                }
+
+                if (frame) frame->loop_states.erase(loop_id);
+                return;
+            }
+
             // Check if this is a generator object (has __generator__ property)
             auto gen_it = obj->properties.find("__generator__");
             if (gen_it != obj->properties.end() &&
@@ -1082,7 +1180,8 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 state->current_index = 0;
             }
 
-            std::vector<std::string>& keys = state ? state->keys_snapshot : *(new std::vector<std::string>());
+            std::vector<std::string> local_keys_obj;
+            std::vector<std::string>& keys = state ? state->keys_snapshot : local_keys_obj;
             if (!state) {
                 for (auto& p : obj->properties) keys.push_back(p.first);
             }
@@ -1203,11 +1302,70 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             return;
         }
 
+        else if (std::holds_alternative<BufferPtr>(iterableVal)) {
+            BufferPtr buf = std::get<BufferPtr>(iterableVal);
+            if (!buf) {
+                if (frame) frame->loop_states.erase(loop_id);
+                return;
+            }
+
+            size_t start_index = (state && resuming) ? state->current_index : 0;
+
+            for (size_t i = start_index; i < buf->data.size(); ++i) {
+                if (state) state->current_index = i;
+
+                if (fin->valueVar) {
+                    loopEnv->values[fin->valueVar->name] = {static_cast<double>(buf->data[i]), false};
+                }
+                if (fin->indexVar) {
+                    loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
+                }
+
+                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+
+                for (size_t j = 0; j < fin->body.size(); ++j) {
+                    auto& s = fin->body[j];
+
+                    if (resuming && state && j < state->body_statement_index) {
+                        continue;
+                    }
+
+                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+
+                    if (state) state->body_statement_index = j + 1;
+
+                    if (did_return && *did_return) {
+                        if (frame) frame->loop_states.erase(loop_id);
+                        return;
+                    }
+                    if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                }
+
+                if (state) {
+                    state->body_statement_index = 0;
+                    resuming = false;
+                }
+
+                if (loopCtrl->did_break) {
+                    loopCtrl->did_break = false;
+                    if (frame) frame->loop_states.erase(loop_id);
+                    break;
+                }
+                if (loopCtrl->did_continue) {
+                    loopCtrl->did_continue = false;
+                    continue;
+                }
+            }
+
+            if (frame) frame->loop_states.erase(loop_id);
+            return;
+        }
+
         else {
             if (frame) frame->loop_states.erase(loop_id);
             throw SwaziError(
                 "TypeError",
-                "Cannot iterate over a non-array/non-object/non-range value in 'kwa kila' loop.",
+                "Cannot iterate over a non-iterable value in 'kwa kila' loop. Expected array, buffer, object, range, or string.",
                 fin->token.loc);
         }
     }
