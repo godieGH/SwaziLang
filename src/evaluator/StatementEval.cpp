@@ -710,7 +710,18 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 if (!to_bool(condVal)) break;
             }
 
-            auto bodyEnv = std::make_shared<Environment>(forEnv);
+            EnvPtr bodyEnv;
+            if (resuming && state && state->body_env) {
+                bodyEnv = state->body_env;
+            } else {
+                bodyEnv = std::make_shared<Environment>(forEnv);
+                if (state) state->body_env = bodyEnv;
+                if (auto vd = dynamic_cast<VariableDeclarationNode*>(fn->init.get())) {
+                    auto it = forEnv->values.find(vd->identifier);
+                    if (it != forEnv->values.end())
+                        bodyEnv->values[vd->identifier] = it->second;
+                }
+            }
 
             // run body
             for (size_t i = 0; i < fn->body.size(); ++i) {
@@ -736,6 +747,8 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
             // Reset for next iteration
             if (state) {
                 state->body_statement_index = 0;
+                state->body_env = nullptr;
+                resuming = false;
             }
 
             // handle break
@@ -817,7 +830,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 }
 
                 // Fresh body env per iteration — closures capture their own scope
-                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                EnvPtr bodyEnv;
+                if (resuming && state && state->body_env) {
+                    bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                } else {
+                    bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                    if (state) state->body_env = bodyEnv;
+                    if (fin->valueVar) {
+                        auto it = loopEnv->values.find(fin->valueVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->valueVar->name] = it->second;
+                    }
+                    if (fin->indexVar) {
+                        auto it = loopEnv->values.find(fin->indexVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->indexVar->name] = it->second;
+                    }
+                }
 
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
@@ -841,6 +870,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
+                    state->body_env = nullptr;
                     resuming = false;  // Clear resuming flag after first iteration completes
                 }
 
@@ -898,7 +928,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     }
 
                     // Fresh body env per iteration
-                    auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                    EnvPtr bodyEnv;
+                    if (resuming && state && state->body_env) {
+                        bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                    } else {
+                        bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                        if (state) state->body_env = bodyEnv;
+                        if (fin->valueVar) {
+                            auto it = loopEnv->values.find(fin->valueVar->name);
+                            if (it != loopEnv->values.end())
+                                bodyEnv->values[fin->valueVar->name] = it->second;
+                        }
+                        if (fin->indexVar) {
+                            auto it = loopEnv->values.find(fin->indexVar->name);
+                            if (it != loopEnv->values.end())
+                                bodyEnv->values[fin->indexVar->name] = it->second;
+                        }
+                    }
 
                     for (auto& s : fin->body) {
                         evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
@@ -950,7 +996,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 }
 
                 // Fresh body env per iteration
-                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                EnvPtr bodyEnv;
+                if (resuming && state && state->body_env) {
+                    bodyEnv = state->body_env;
+                } else {
+                    bodyEnv = std::make_shared<Environment>(loopEnv);
+                    if (state) state->body_env = bodyEnv;
+                    if (fin->valueVar) {
+                        auto it = loopEnv->values.find(fin->valueVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->valueVar->name] = it->second;
+                    }
+                    if (fin->indexVar) {
+                        auto it = loopEnv->values.find(fin->indexVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->indexVar->name] = it->second;
+                    }
+                }
 
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
@@ -974,6 +1036,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
+                    state->body_env = nullptr;
                     resuming = false;
                 }
 
@@ -1081,8 +1144,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     if (fin->indexVar)
                         loopEnv->values[fin->indexVar->name] = {field_value, false};
 
-                    auto bodyEnv = std::make_shared<Environment>(loopEnv);
-
+                    EnvPtr bodyEnv;
+                    if (resuming && state && state->body_env) {
+                        bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                    } else {
+                        bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                        if (state) state->body_env = bodyEnv;
+                        if (fin->valueVar) {
+                            auto it = loopEnv->values.find(fin->valueVar->name);
+                            if (it != loopEnv->values.end())
+                                bodyEnv->values[fin->valueVar->name] = it->second;
+                        }
+                        if (fin->indexVar) {
+                            auto it = loopEnv->values.find(fin->indexVar->name);
+                            if (it != loopEnv->values.end())
+                                bodyEnv->values[fin->indexVar->name] = it->second;
+                        }
+                    }
                     for (size_t j = 0; j < fin->body.size(); ++j) {
                         auto& s = fin->body[j];
 
@@ -1102,6 +1180,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                     if (state) {
                         state->body_statement_index = 0;
+                        state->body_env = nullptr;
                         resuming = false;
                     }
 
@@ -1141,15 +1220,44 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     }
 
                     // Fresh body env per iteration
-                    auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                    EnvPtr bodyEnv;
+                    if (resuming && state && state->body_env) {
+                        bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                    } else {
+                        bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                        if (state) state->body_env = bodyEnv;
+                        if (fin->valueVar) {
+                            auto it = loopEnv->values.find(fin->valueVar->name);
+                            if (it != loopEnv->values.end())
+                                bodyEnv->values[fin->valueVar->name] = it->second;
+                        }
+                        if (fin->indexVar) {
+                            auto it = loopEnv->values.find(fin->indexVar->name);
+                            if (it != loopEnv->values.end())
+                                bodyEnv->values[fin->indexVar->name] = it->second;
+                        }
+                    }
 
-                    for (auto& s : fin->body) {
+                    for (size_t j = 0; j < fin->body.size(); ++j) {
+                        auto& s = fin->body[j];
+
+                        if (resuming && state && j < state->body_statement_index) continue;
+
                         evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+
+                        if (state) state->body_statement_index = j + 1;
+
                         if (did_return && *did_return) {
                             if (frame) frame->loop_states.erase(loop_id);
                             return;
                         }
                         if (loopCtrl->did_break || loopCtrl->did_continue) break;
+                    }
+
+                    if (state) {
+                        state->body_statement_index = 0;
+                        state->body_env = nullptr;
+                        resuming = false;
                     }
 
                     if (loopCtrl->did_break) {
@@ -1202,7 +1310,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 }
 
                 // Fresh body env per iteration
-                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                EnvPtr bodyEnv;
+                if (resuming && state && state->body_env) {
+                    bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                } else {
+                    bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                    if (state) state->body_env = bodyEnv;
+                    if (fin->valueVar) {
+                        auto it = loopEnv->values.find(fin->valueVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->valueVar->name] = it->second;
+                    }
+                    if (fin->indexVar) {
+                        auto it = loopEnv->values.find(fin->indexVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->indexVar->name] = it->second;
+                    }
+                }
 
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
@@ -1226,6 +1350,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
+                    state->body_env = nullptr;
                     resuming = false;
                 }
 
@@ -1260,7 +1385,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 }
 
                 // Fresh body env per iteration
-                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                EnvPtr bodyEnv;
+                if (resuming && state && state->body_env) {
+                    bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                } else {
+                    bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                    if (state) state->body_env = bodyEnv;
+                    if (fin->valueVar) {
+                        auto it = loopEnv->values.find(fin->valueVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->valueVar->name] = it->second;
+                    }
+                    if (fin->indexVar) {
+                        auto it = loopEnv->values.find(fin->indexVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->indexVar->name] = it->second;
+                    }
+                }
 
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
@@ -1284,6 +1425,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
+                    state->body_env = nullptr;
                     resuming = false;
                 }
                 if (loopCtrl->did_break) {
@@ -1321,7 +1463,23 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     loopEnv->values[fin->indexVar->name] = {static_cast<double>(i), false};
                 }
 
-                auto bodyEnv = std::make_shared<Environment>(loopEnv);
+                EnvPtr bodyEnv;
+                if (resuming && state && state->body_env) {
+                    bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+                } else {
+                    bodyEnv = std::make_shared<Environment>(loopEnv);  // new iteration — fresh env
+                    if (state) state->body_env = bodyEnv;
+                    if (fin->valueVar) {
+                        auto it = loopEnv->values.find(fin->valueVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->valueVar->name] = it->second;
+                    }
+                    if (fin->indexVar) {
+                        auto it = loopEnv->values.find(fin->indexVar->name);
+                        if (it != loopEnv->values.end())
+                            bodyEnv->values[fin->indexVar->name] = it->second;
+                    }
+                }
 
                 for (size_t j = 0; j < fin->body.size(); ++j) {
                     auto& s = fin->body[j];
@@ -1343,6 +1501,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
                 if (state) {
                     state->body_statement_index = 0;
+                    state->body_env = nullptr;
                     resuming = false;
                 }
 
@@ -1399,8 +1558,13 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                 break;
             }
 
-            auto bodyEnv = std::make_shared<Environment>(env);
-
+            EnvPtr bodyEnv;
+            if (resuming && state && state->body_env) {
+                bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+            } else {
+                bodyEnv = std::make_shared<Environment>(env);  // new iteration — fresh env
+                if (state) state->body_env = bodyEnv;
+            }
             for (size_t j = 0; j < wn->body.size(); ++j) {
                 auto& s = wn->body[j];
 
@@ -1423,6 +1587,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             if (state) {
                 state->body_statement_index = 0;
+                state->body_env = nullptr;
                 resuming = false;  // Clear resuming flag after first iteration completes
             }
 
@@ -1464,7 +1629,13 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         }
 
         do {
-            auto bodyEnv = std::make_shared<Environment>(env);
+            EnvPtr bodyEnv;
+            if (resuming && state && state->body_env) {
+                bodyEnv = state->body_env;  // mid-iteration resume — restore saved env
+            } else {
+                bodyEnv = std::make_shared<Environment>(env);  // new iteration — fresh env
+                if (state) state->body_env = bodyEnv;
+            }
 
             for (size_t j = 0; j < dwn->body.size(); ++j) {
                 auto& s = dwn->body[j];
@@ -1488,6 +1659,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
             if (state) {
                 state->body_statement_index = 0;
+                state->body_env = nullptr;
                 resuming = false;  // Clear resuming flag after first iteration completes
             }
 
@@ -1520,6 +1692,7 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         if (frame) frame->loop_states.erase(loop_id);
         return;
     }
+
     if (auto bs = dynamic_cast<BreakStatementNode*>(stmt)) {
         if (lc) lc->did_break = true;
         return;

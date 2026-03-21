@@ -44,7 +44,8 @@ struct CallFrame {
 
     // Loop state persistence for async/generator contexts
     struct LoopState {
-        EnvPtr loop_env;             // The forEnv/loopEnv
+        EnvPtr loop_env;  // The forEnv/loopEnv
+        EnvPtr body_env;
         size_t iteration_count = 0;  // Track which iteration we're on
         size_t body_statement_index = 0;
         Value current_value;          // For for-in loops (current element/key)
