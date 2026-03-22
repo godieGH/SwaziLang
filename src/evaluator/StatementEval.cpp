@@ -640,22 +640,51 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
     }
 
     if (auto ifn = dynamic_cast<IfStatementNode*>(stmt)) {
-        Value condVal = evaluate_expression(ifn->condition.get(), env);
-        if (to_bool(condVal)) {
-            auto blockEnv = std::make_shared<Environment>(env);
-            for (auto& s : ifn->then_body) {
-                evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
-                if (did_return && *did_return) return;
-                if (lc && (lc->did_break || lc->did_continue)) return;
-            }
-        } else if (ifn->has_else) {
-            auto blockEnv = std::make_shared<Environment>(env);
-            for (auto& s : ifn->else_body) {
-                evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
-                if (did_return && *did_return) return;
-                if (lc && (lc->did_break || lc->did_continue)) return;
+        void* node_id = static_cast<void*>(ifn);
+        CallFramePtr frame = current_frame();
+
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame && frame->has_loop_state(node_id)) {
+            resuming = true;
+            state = &frame->loop_states[node_id];
+        } else if (frame) {
+            state = &frame->loop_states[node_id];
+            state->body_statement_index = 0;
+            // current_index: 1=then-branch, 2=else-branch, 0=neither
+            Value condVal = evaluate_expression(ifn->condition.get(), env);
+            state->current_index = to_bool(condVal) ? 1 : (ifn->has_else ? 2 : 0);
+            state->body_env = std::make_shared<Environment>(env);
+        }
+
+        size_t branch = state ? state->current_index : 0;
+
+        if (branch == 1 || branch == 2) {
+            auto& body = (branch == 1) ? ifn->then_body : ifn->else_body;
+            auto blockEnv = (state && state->body_env)
+                ? state->body_env
+                : std::make_shared<Environment>(env);
+            if (state && !state->body_env) state->body_env = blockEnv;
+
+            for (size_t j = 0; j < body.size(); ++j) {
+                if (resuming && state && j < state->body_statement_index) continue;
+
+                evaluate_statement(body[j].get(), blockEnv, return_value, did_return, lc);
+
+                if (state) state->body_statement_index = j + 1;
+                if (did_return && *did_return) {
+                    if (frame) frame->loop_states.erase(node_id);
+                    return;
+                }
+                if (lc && (lc->did_break || lc->did_continue)) {
+                    if (frame) frame->loop_states.erase(node_id);
+                    return;
+                }
             }
         }
+
+        if (frame) frame->loop_states.erase(node_id);
         return;
     }
 
@@ -1705,109 +1734,192 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
 
     // --- DoStatementNode (fanya) ---
     if (auto dn = dynamic_cast<DoStatementNode*>(stmt)) {
-        auto bodyEnv = std::make_shared<Environment>(env);
+        void* node_id = static_cast<void*>(dn);
+        CallFramePtr frame = current_frame();
 
-        for (auto& s : dn->body) {
-            evaluate_statement(s.get(), bodyEnv, return_value, did_return, lc);
-            if (did_return && *did_return) return;
-            if (lc && (lc->did_break || lc->did_continue)) return;
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame && frame->has_loop_state(node_id)) {
+            resuming = true;
+            state = &frame->loop_states[node_id];
+        } else if (frame) {
+            state = &frame->loop_states[node_id];
+            state->body_statement_index = 0;
+            state->body_env = std::make_shared<Environment>(env);
         }
 
+        auto bodyEnv = (state && state->body_env)
+            ? state->body_env
+            : std::make_shared<Environment>(env);
+        if (state && !state->body_env) state->body_env = bodyEnv;
+
+        for (size_t j = 0; j < dn->body.size(); ++j) {
+            if (resuming && state && j < state->body_statement_index) continue;
+
+            evaluate_statement(dn->body[j].get(), bodyEnv, return_value, did_return, lc);
+
+            if (state) state->body_statement_index = j + 1;
+            if (did_return && *did_return) {
+                if (frame) frame->loop_states.erase(node_id);
+                return;
+            }
+            if (lc && (lc->did_break || lc->did_continue)) {
+                if (frame) frame->loop_states.erase(node_id);
+                return;
+            }
+        }
+
+        if (frame) frame->loop_states.erase(node_id);
         return;
     }
 
     if (auto sn = dynamic_cast<SwitchNode*>(stmt)) {
-        // Evaluate the discriminant (the switch condition expression)
-        Value switchVal = evaluate_expression(sn->discriminant.get(), env);
-
-        CaseNode* defaultCase = nullptr;
-        bool matched = false;
+        void* node_id = static_cast<void*>(sn);
+        CallFramePtr frame = current_frame();
 
         LoopControl local_lc;
         LoopControl* loopCtrl = lc ? lc : &local_lc;
 
-        for (auto& casePtr : sn->cases) {
-            CaseNode* cn = casePtr.get();
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
 
-            // If this is the default case (kaida), remember it for later
-            if (!cn->test) {
-                defaultCase = cn;
-                continue;
+        if (frame && frame->has_loop_state(node_id)) {
+            resuming = true;
+            state = &frame->loop_states[node_id];
+        } else if (frame) {
+            state = &frame->loop_states[node_id];
+            state->body_statement_index = 0;
+            state->body_env = std::make_shared<Environment>(env);
+
+            // Find the matched case — only on first entry
+            Value switchVal = evaluate_expression(sn->discriminant.get(), env);
+            state->current_index = SIZE_MAX;  // SIZE_MAX = no match
+
+            for (size_t ci = 0; ci < sn->cases.size(); ++ci) {
+                if (!sn->cases[ci]->test) continue;  // skip default
+                Value caseVal = evaluate_expression(sn->cases[ci]->test.get(), env);
+                if (is_equal(switchVal, caseVal)) {
+                    state->current_index = ci;
+                    break;
+                }
             }
-
-            // Evaluate case test expression
-            Value caseVal = evaluate_expression(cn->test.get(), env);
-
-            // Check equality (reuse your equals() or same helper you use elsewhere)
-            if (!matched && is_equal(switchVal, caseVal)) {
-                matched = true;
-            }
-
-            // If already matched, execute this case body (fall-through unless simama)
-            if (matched) {
-                auto bodyEnv = std::make_shared<Environment>(env);
-
-                for (auto& s : cn->body) {
-                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
-                    if (did_return && *did_return) return;
-                    if (loopCtrl->did_break) {
-                        loopCtrl->did_break = false;  // reset for outer flow
-                        return;                       // exit entire switch
+            // fall back to default (kaida) if no match
+            if (state->current_index == SIZE_MAX) {
+                for (size_t ci = 0; ci < sn->cases.size(); ++ci) {
+                    if (!sn->cases[ci]->test) {
+                        state->current_index = ci;
+                        break;
                     }
-                    if (loopCtrl->did_continue) return;
                 }
             }
         }
 
-        // No case matched, execute default if present
-        if (!matched && defaultCase) {
-            auto bodyEnv = std::make_shared<Environment>(env);
+        if (!state || state->current_index == SIZE_MAX) {
+            if (frame) frame->loop_states.erase(node_id);
+            return;  // nothing matched
+        }
 
-            for (auto& s : defaultCase->body) {
-                evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
-                if (did_return && *did_return) return;
+        auto bodyEnv = (state && state->body_env)
+            ? state->body_env
+            : std::make_shared<Environment>(env);
+        if (state && !state->body_env) state->body_env = bodyEnv;
+
+        size_t start_ci = state->current_index;
+
+        for (size_t ci = start_ci; ci < sn->cases.size(); ++ci) {
+            CaseNode* cn = sn->cases[ci].get();
+
+            for (size_t j = 0; j < cn->body.size(); ++j) {
+                // skip already-executed statements only in the case we suspended in
+                if (resuming && state && ci == start_ci && j < state->body_statement_index) continue;
+
+                // track which case+stmt we are at before executing
+                if (state) {
+                    state->current_index = ci;
+                    state->body_statement_index = j;  // not yet done — suspend point is j
+                }
+
+                evaluate_statement(cn->body[j].get(), bodyEnv, return_value, did_return, loopCtrl);
+
+                // only reached if no suspension/yield thrown
+                if (state) state->body_statement_index = j + 1;
+
+                if (did_return && *did_return) {
+                    if (frame) frame->loop_states.erase(node_id);
+                    return;
+                }
                 if (loopCtrl->did_break) {
                     loopCtrl->did_break = false;
-                    return;  // exit switch
+                    if (frame) frame->loop_states.erase(node_id);
+                    return;
                 }
-                if (loopCtrl->did_continue) return;
+                if (loopCtrl->did_continue) {
+                    if (frame) frame->loop_states.erase(node_id);
+                    return;
+                }
             }
+
+            // case body completed — reset for next fall-through case
+            if (state) state->body_statement_index = 0;
+            resuming = false;
         }
 
+        if (frame) frame->loop_states.erase(node_id);
         return;
     }
-
     if (auto tcf = dynamic_cast<TryCatchNode*>(stmt)) {
+        void* node_id = static_cast<void*>(tcf);
+        CallFramePtr frame = current_frame();
+
+        CallFrame::LoopState* state = nullptr;
+        bool resuming = false;
+
+        if (frame && frame->has_loop_state(node_id)) {
+            resuming = true;
+            state = &frame->loop_states[node_id];
+        } else if (frame) {
+            state = &frame->loop_states[node_id];
+            state->body_statement_index = 0;
+            state->body_env = std::make_shared<Environment>(env);
+        }
+
         bool hadException = false;
         std::exception_ptr eptr;
 
-        // Try block (use a separate env)
-
         {
-            auto tryEnv = std::make_shared<Environment>(env);
+            auto tryEnv = (state && state->body_env)
+                ? state->body_env
+                : std::make_shared<Environment>(env);
+            if (state && !state->body_env) state->body_env = tryEnv;
+
             try {
-                for (auto& s : tcf->tryBlock) {
-                    evaluate_statement(s.get(), tryEnv, return_value, did_return, lc);
-                    // don't return here — break so finally can run
+                for (size_t j = 0; j < tcf->tryBlock.size(); ++j) {
+                    if (resuming && state && j < state->body_statement_index) continue;
+
+                    evaluate_statement(tcf->tryBlock[j].get(), tryEnv, return_value, did_return, lc);
+
+                    if (state) state->body_statement_index = j + 1;
                     if (did_return && *did_return) break;
                     if (lc && (lc->did_break || lc->did_continue)) break;
                 }
             } catch (const SuspendExecution&) {
-                // This is NOT an error — it's the "await" suspension control-flow.
-                // Re-throw so the async machinery can keep the frame and resume later.
+                throw;
+            } catch (const GeneratorYield&) {
+                throw;
+            } catch (const GeneratorReturn&) {
                 throw;
             } catch (...) {
-                // Real runtime exception — capture for catch-block handling.
                 hadException = true;
                 eptr = std::current_exception();
             }
         }
 
+        if (frame) frame->loop_states.erase(node_id);
+
         // Catch block (if an exception occurred)
         if (hadException) {
             auto catchEnv = std::make_shared<Environment>(env);
-
-            // bind errorVar if provided
             if (!tcf->errorVar.empty()) {
                 try {
                     std::rethrow_exception(eptr);
@@ -1819,7 +1931,6 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
                     catchEnv->set(tcf->errorVar, var);
                 }
             }
-
             for (auto& s : tcf->catchBlock) {
                 evaluate_statement(s.get(), catchEnv, return_value, did_return, lc);
                 if (did_return && *did_return) break;
