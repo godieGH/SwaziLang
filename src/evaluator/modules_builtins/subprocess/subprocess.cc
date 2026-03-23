@@ -11,14 +11,20 @@
 // back into the runtime thread via Scheduler's runner.
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "AsyncBridge.hpp"
 #include "SwaziError.hpp"
@@ -35,6 +41,14 @@ extern char** environ;
 // Use _environ on Windows
 #define environ _environ
 extern char** _environ;
+#endif
+
+#ifdef _WIN32
+#define SWAZI_POPEN _popen
+#define SWAZI_PCLOSE _pclose
+#else
+#define SWAZI_POPEN popen
+#define SWAZI_PCLOSE pclose
 #endif
 
 // Small helper to make Token placeholders for native functions
@@ -759,6 +773,61 @@ static Value native_spawn(const std::vector<Value>& args, EnvPtr /*env*/, const 
     return Value{child_obj};
 }
 
+static Value native_exec_sync(const std::vector<Value>& args, EnvPtr, const Token& token) {
+    if (args.empty() || !std::holds_alternative<std::string>(args[0]))
+        throw SwaziError("TypeError", "execSync requires a string command", token.loc);
+
+    std::string cmd = std::get<std::string>(args[0]);
+
+#ifdef _WIN32
+    char tmp_err_buf[L_tmpnam];
+    tmpnam_s(tmp_err_buf, sizeof(tmp_err_buf));
+    std::string tmp_err = tmp_err_buf;
+#else
+    const char* tmpdir = getenv("TMPDIR");
+    if (!tmpdir || tmpdir[0] == '\0') tmpdir = "/tmp";
+
+    auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::mt19937_64 rng(now ^ (uint64_t)getpid());
+    std::uniform_int_distribution<uint64_t> dist;
+    std::ostringstream tmp_ss;
+    tmp_ss << tmpdir << "/swazi_stderr_" << std::hex << dist(rng) << dist(rng);
+    std::string tmp_err = tmp_ss.str();
+#endif
+
+    std::string full_cmd = cmd + " 2>" + tmp_err;
+    std::string out_buf, err_buf;
+    int exit_code = 0;
+
+    FILE* fp = SWAZI_POPEN(full_cmd.c_str(), "r");
+    if (!fp) throw SwaziError("Error", "execSync: popen failed", token.loc);
+
+    char chunk[4096];
+    while (fgets(chunk, sizeof(chunk), fp))
+        out_buf += chunk;
+
+    int status = SWAZI_PCLOSE(fp);
+#ifndef _WIN32
+    exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#else
+    exit_code = status;
+#endif
+
+    FILE* ef = fopen(tmp_err.c_str(), "r");
+    if (ef) {
+        while (fgets(chunk, sizeof(chunk), ef))
+            err_buf += chunk;
+        fclose(ef);
+        std::remove(tmp_err.c_str());
+    }
+
+    auto res = std::make_shared<ObjectValue>();
+    res->properties["stdout"] = {Value{out_buf}, false, false, true, Token{}};
+    res->properties["stderr"] = {Value{err_buf}, false, false, true, Token{}};
+    res->properties["code"] = {Value{static_cast<double>(exit_code)}, false, false, true, Token{}};
+    return Value{res};
+}
+
 // Factory
 std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* evaluator) {
     auto obj = std::make_shared<ObjectValue>();
@@ -901,6 +970,9 @@ std::shared_ptr<ObjectValue> make_subprocess_exports(EnvPtr env, Evaluator* eval
     auto fn_exec = std::make_shared<FunctionValue>(
         "native:subprocess.exec", native_exec_impl, nullptr, t);
     obj->properties["exec"] = PropertyDescriptor{Value{fn_exec}, false, false, false, t};
+
+    auto fn_exec_sync = std::make_shared<FunctionValue>("native:subprocess.execSync", native_exec_sync, nullptr, t);
+    obj->properties["execSync"] = PropertyDescriptor{Value{fn_exec_sync}, false, false, false, t};
 
     auto fn_spawn = std::make_shared<FunctionValue>("native:subprocess.spawn", native_spawn, nullptr, t);
     obj->properties["spawn"] = PropertyDescriptor{Value{fn_spawn}, false, false, false, t};

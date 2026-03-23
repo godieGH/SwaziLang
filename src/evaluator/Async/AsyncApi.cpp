@@ -18,6 +18,7 @@
 
 static std::mutex g_timers_mutex;
 static std::atomic<long long> g_next_timer_id{1};
+
 struct TimerEntry {
     long long id;
     std::atomic<bool> cancelled;
@@ -28,7 +29,14 @@ struct TimerEntry {
 
     // uv handle pointer (if using libuv)
     uv_timer_t* uv_handle = nullptr;
+
+    // metadata / handle object support
+    std::atomic<long long> tick_count{0};
+    std::string type;  // "timeout" | "interval" | "nap"
+    long long created_at_ms = 0;
+    ObjectPtr handle_obj;  // live JS object returned to user (may be null for internal timers)
 };
+
 static std::unordered_map<long long, std::shared_ptr<TimerEntry>> g_timers;
 
 // Forward declaration: check whether any timers exist (used by run_event_loop).
@@ -95,6 +103,20 @@ void Evaluator::run_event_loop() {
 // If not available (no scheduler / no uv loop) we fall back to the original
 // thread-based implementation for compatibility.
 
+// Helper: sync tickCount and cancelled onto the live JS handle object (called on fire/cancel).
+static void sync_handle_obj_tick(TimerEntry* te) {
+    if (!te || !te->handle_obj) return;
+    Token t;
+    te->handle_obj->properties["tickCount"] = {
+        Value{static_cast<double>(te->tick_count.load())}, false, false, true, t};
+}
+
+static void sync_handle_obj_cancelled(TimerEntry* te) {
+    if (!te || !te->handle_obj) return;
+    Token t;
+    te->handle_obj->properties["cancelled"] = {Value{true}, false, false, true, t};
+}
+
 // Timer callback called on the scheduler's loop thread.
 static void uv_timer_callback(uv_timer_t* handle) {
     if (!handle) return;
@@ -103,10 +125,18 @@ static void uv_timer_callback(uv_timer_t* handle) {
     if (te->cancelled.load()) {
         return;
     }
+
+    // increment tick count and sync to JS object
+    te->tick_count.fetch_add(1);
+    sync_handle_obj_tick(te);
+
     if (te->cb) enqueue_callback(te->cb, te->args);
 
     // For single-shot timers, cleanup: stop & close the uv handle and remove entry.
     if (te->interval_ms <= 0) {
+        // mark cancelled on JS handle object so user can observe it
+        sync_handle_obj_cancelled(te);
+
         // stop and close the handle
         uv_timer_stop(handle);
         // schedule close with a close callback to free handle memory
@@ -124,8 +154,12 @@ static void uv_timer_callback(uv_timer_t* handle) {
     }
 }
 
-// Create/cancel timer helpers
-static long long create_timer(long long delay_ms, long long interval_ms, FunctionPtr cb, const std::vector<Value>& args) {
+// Create timer — returns the shared_ptr<TimerEntry> so callers can build the JS handle object.
+// type should be "timeout", "interval", or "nap".
+static std::shared_ptr<TimerEntry> create_timer(
+    long long delay_ms, long long interval_ms,
+    FunctionPtr cb, const std::vector<Value>& args,
+    const std::string& type = "") {
     auto te = std::make_shared<TimerEntry>();
     te->id = g_next_timer_id.fetch_add(1);
     te->cancelled.store(false);
@@ -133,6 +167,11 @@ static long long create_timer(long long delay_ms, long long interval_ms, Functio
     te->interval_ms = interval_ms;
     te->cb = cb;
     te->args = args;
+    te->type = type;
+    te->created_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+
     {
         std::lock_guard<std::mutex> lk(g_timers_mutex);
         g_timers[te->id] = te;
@@ -180,7 +219,7 @@ static long long create_timer(long long delay_ms, long long interval_ms, Functio
             uint64_t repeat = (te_copy->interval_ms > 0) ? static_cast<uint64_t>(te_copy->interval_ms) : 0;
             uv_timer_start(timer_handle, uv_timer_callback, static_cast<uint64_t>(te_copy->delay_ms), repeat);
         });
-        return te->id;
+        return te;
     }
 
     // Fallback: if no uv loop, create a thread as before (single-shot or repeating).
@@ -188,14 +227,24 @@ static long long create_timer(long long delay_ms, long long interval_ms, Functio
         if (te->delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(te->delay_ms));
         while (true) {
             if (te->cancelled.load()) break;
+
+            // increment tick count and sync to JS object
+            te->tick_count.fetch_add(1);
+            sync_handle_obj_tick(te.get());
+
             if (te->cb) enqueue_callback(te->cb, te->args);
-            if (te->interval_ms <= 0) break;  // single-shot done
+            if (te->interval_ms <= 0) {
+                // single-shot done — mark cancelled on JS object
+                sync_handle_obj_cancelled(te.get());
+                break;
+            }
             long long slept = 0;
             const long long slice = 50;
             while (slept < te->interval_ms) {
                 if (te->cancelled.load()) break;
                 long long remaining = te->interval_ms - slept;
-                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>(std::min<long long>(slice, remaining))));
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    static_cast<long long>(std::min<long long>(slice, remaining))));
                 slept += slice;
             }
             if (te->cancelled.load()) break;
@@ -209,7 +258,7 @@ static long long create_timer(long long delay_ms, long long interval_ms, Functio
         enqueue_callback_global(static_cast<void*>(wake));
     }).detach();
 
-    return te->id;
+    return te;
 }
 
 static void cancel_timer(long long id) {
@@ -222,6 +271,7 @@ static void cancel_timer(long long id) {
     }
     if (!te) return;
     te->cancelled.store(true);
+    sync_handle_obj_cancelled(te.get());
 
     // If a uv handle exists, schedule its stop/close on the loop thread.
     if (te->uv_handle) {
@@ -268,13 +318,58 @@ static bool is_function_value(const Value& v) {
     return std::holds_alternative<FunctionPtr>(v);
 }
 
+// Build the JS timer handle object from a TimerEntry.
+// Must be called AFTER cancel_timer is defined.
+static ObjectPtr make_timer_handle(std::shared_ptr<TimerEntry> te) {
+    auto obj = std::make_shared<ObjectValue>();
+    Token t;
+    t.type = TokenType::IDENTIFIER;
+    t.loc = TokenLocation("<timer>", 0, 0, 0);
+
+    obj->properties["id"] = {Value{static_cast<double>(te->id)}, false, false, true, t};
+    obj->properties["type"] = {Value{te->type}, false, false, true, t};
+    obj->properties["delay"] = {Value{static_cast<double>(te->delay_ms)}, false, false, true, t};
+    obj->properties["interval"] = {Value{static_cast<double>(te->interval_ms)}, false, false, true, t};
+    obj->properties["createdAt"] = {Value{static_cast<double>(te->created_at_ms)}, false, false, true, t};
+    obj->properties["tickCount"] = {Value{static_cast<double>(0)}, false, false, true, t};
+    obj->properties["cancelled"] = {Value{false}, false, false, true, t};
+
+    // .cancel() — cleaner alternative to clearTimeout(handle.id)
+    auto cancel_impl = [te](const std::vector<Value>&, EnvPtr, const Token&) -> Value {
+        cancel_timer(te->id);
+        return std::monostate{};
+    };
+    auto fn_cancel = std::make_shared<FunctionValue>("native:timer.cancel", cancel_impl, nullptr, t);
+    obj->properties["cancel"] = {Value{fn_cancel}, false, false, false, t};
+
+    // store back-reference so uv_timer_callback can update tickCount/cancelled live
+    te->handle_obj = obj;
+
+    return obj;
+}
+
+// Extract id from either a plain number or a timer handle object.
+static long long extract_timer_id(const Value& v) {
+    if (std::holds_alternative<double>(v))
+        return static_cast<long long>(std::get<double>(v));
+    if (std::holds_alternative<ObjectPtr>(v)) {
+        auto obj = std::get<ObjectPtr>(v);
+        auto it = obj->properties.find("id");
+        if (it != obj->properties.end() && std::holds_alternative<double>(it->second.value))
+            return static_cast<long long>(std::get<double>(it->second.value));
+    }
+    return -1;
+}
+
 // Given args vector, try to extract (delay_ms, cb, rest_args).
 // Accepts two common forms:
 //   1) (ms, cb, ...rest)
 //   2) (cb, ms, ...rest)
 // Returns tuple(delay_ms, cbPtr, vector<rest>).
-static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(const std::vector<Value>& args, const Token& token) {
-    if (args.size() < 2) throw std::runtime_error("Timer requires at least 2 arguments (ms, cb) or (cb, ms) at " + token.loc.to_string());
+static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(
+    const std::vector<Value>& args, const Token& token) {
+    if (args.size() < 2) throw std::runtime_error(
+        "Timer requires at least 2 arguments (ms, cb) or (cb, ms) at " + token.loc.to_string());
 
     // form A: first is number, second is function
     if (!args.empty() && std::holds_alternative<double>(args[0]) && is_function_value(args[1])) {
@@ -295,7 +390,8 @@ static std::tuple<long long, FunctionPtr, std::vector<Value>> parse_timer_args(c
     }
 
     // Not recognized
-    throw std::runtime_error("Timer: expected arguments (ms, cb, ...) or (cb, ms, ...) at " + token.loc.to_string());
+    throw std::runtime_error(
+        "Timer: expected arguments (ms, cb, ...) or (cb, ms, ...) at " + token.loc.to_string());
 }
 
 // Builtin factory: make_timers_exports (extended with tolerant timers and nap)
@@ -304,8 +400,10 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
 
     // timers.queueMacrotask(cb, ...args)
     auto native_queueMacrotask = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("timers.queueMacrotask requires callback at " + token.loc.to_string());
-        if (!is_function_value(args[0])) throw std::runtime_error("timers.queueMacrotask first arg must be a function at " + token.loc.to_string());
+        if (args.empty()) throw std::runtime_error(
+            "timers.queueMacrotask requires callback at " + token.loc.to_string());
+        if (!is_function_value(args[0])) throw std::runtime_error(
+            "timers.queueMacrotask first arg must be a function at " + token.loc.to_string());
         FunctionPtr cb = std::get<FunctionPtr>(args[0]);
         std::vector<Value> cb_args;
         for (size_t i = 1; i < args.size(); ++i) cb_args.push_back(args[i]);
@@ -315,62 +413,73 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     Token tsub;
     tsub.type = TokenType::IDENTIFIER;
     tsub.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_sub = std::make_shared<FunctionValue>(std::string("native:timers.queueMacrotask"), native_queueMacrotask, nullptr, tsub);
+    auto fn_sub = std::make_shared<FunctionValue>(
+        std::string("native:timers.queueMacrotask"), native_queueMacrotask, nullptr, tsub);
     obj->properties["queueMacrotask"] = PropertyDescriptor{fn_sub, false, false, false, tsub};
 
     // timers.setTimeout(ms, cb) or (cb, ms)
+    // Returns a timer handle object with id, type, delay, tickCount, createdAt, cancel().
     auto native_setTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         long long ms;
         FunctionPtr cb;
         std::vector<Value> rest;
         std::tie(ms, cb, rest) = parse_timer_args(args, token);
-        long long id = create_timer(ms, 0, cb, rest);
-        return Value{static_cast<double>(id)};
+        auto te = create_timer(ms, 0, cb, rest, "timeout");
+        return Value{make_timer_handle(te)};
     };
     Token tSet;
     tSet.type = TokenType::IDENTIFIER;
     tSet.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_set = std::make_shared<FunctionValue>(std::string("native:timers.setTimeout"), native_setTimeout, nullptr, tSet);
+    auto fn_set = std::make_shared<FunctionValue>(
+        std::string("native:timers.setTimeout"), native_setTimeout, nullptr, tSet);
     obj->properties["setTimeout"] = PropertyDescriptor{fn_set, false, false, false, tSet};
 
-    // timers.clearTimeout(id)
+    // timers.clearTimeout(id | handle)
+    // Accepts both the old numeric id and the new handle object for backward compat.
     auto native_clearTimeout = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("timers.clearTimeout requires id at " + token.loc.to_string());
-        if (!std::holds_alternative<double>(args[0])) throw std::runtime_error("timers.clearTimeout id must be number at " + token.loc.to_string());
-        long long id = static_cast<long long>(std::get<double>(args[0]));
+        if (args.empty()) throw std::runtime_error(
+            "timers.clearTimeout requires id at " + token.loc.to_string());
+        long long id = extract_timer_id(args[0]);
+        if (id == -1) throw std::runtime_error(
+            "timers.clearTimeout id must be a number or timer handle at " + token.loc.to_string());
         cancel_timer(id);
         return std::monostate{};
     };
     Token tClear;
     tClear.type = TokenType::IDENTIFIER;
     tClear.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_clear = std::make_shared<FunctionValue>(std::string("native:timers.clearTimeout"), native_clearTimeout, nullptr, tClear);
+    auto fn_clear = std::make_shared<FunctionValue>(
+        std::string("native:timers.clearTimeout"), native_clearTimeout, nullptr, tClear);
     obj->properties["clearTimeout"] = PropertyDescriptor{fn_clear, false, false, false, tClear};
 
     // timers.setInterval(ms, cb) or (cb, ms)
+    // Returns a timer handle object.
     auto native_setInterval = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
         long long ms;
         FunctionPtr cb;
         std::vector<Value> rest;
         std::tie(ms, cb, rest) = parse_timer_args(args, token);
-        long long id = create_timer(ms, ms, cb, rest);
-        return Value{static_cast<double>(id)};
+        auto te = create_timer(ms, ms, cb, rest, "interval");
+        return Value{make_timer_handle(te)};
     };
     Token tInt;
     tInt.type = TokenType::IDENTIFIER;
     tInt.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_int = std::make_shared<FunctionValue>(std::string("native:timers.setInterval"), native_setInterval, nullptr, tInt);
+    auto fn_int = std::make_shared<FunctionValue>(
+        std::string("native:timers.setInterval"), native_setInterval, nullptr, tInt);
     obj->properties["setInterval"] = PropertyDescriptor{fn_int, false, false, false, tInt};
 
-    // timers.clearInterval(id) -> same as clearTimeout
+    // timers.clearInterval(id | handle) -> same logic as clearTimeout
     obj->properties["clearInterval"] = obj->properties["clearTimeout"];
 
     // timers.nap(ms, cb?) — accept either (ms, cb) or (cb, ms) or (ms) (no cb).
-    // when used with only one arg ms it returns a promise so can be used to suspend awated promise
+    // When used with only one numeric arg returns a Promise (awaitable sleep).
+    // When used with cb returns a timer handle object.
     auto native_nap = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("timers.nap requires at least ms argument at " + token.loc.to_string());
+        if (args.empty()) throw std::runtime_error(
+            "timers.nap requires at least ms argument at " + token.loc.to_string());
 
-        // If single numeric arg: schedule timer with no callback and return id
+        // Single numeric arg: return a Promise that resolves after delay
         if (args.size() == 1 && std::holds_alternative<double>(args[0])) {
             auto promise = std::make_shared<PromiseValue>();
             promise->state = PromiseValue::State::PENDING;
@@ -388,28 +497,29 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
                         } catch (...) {}
                     });
                 }
-
                 return std::monostate{};
             };
 
             long long ms = value_to_ms(args[0]);
-            long long id = create_timer(ms, 0, nullptr, {});
-            auto resolver_fn = std::make_shared<FunctionValue>(
-                "nap_resolver", resolver, nullptr, token);
 
-            create_timer(ms, 0, resolver_fn, {});
+            // Internal timer with no cb just to keep the event loop alive for the delay.
+            create_timer(ms, 0, nullptr, {}, "nap");
+
+            auto resolver_fn = std::make_shared<FunctionValue>("nap_resolver", resolver, nullptr, token);
+            create_timer(ms, 0, resolver_fn, {}, "nap");
+
             return promise;
         }
 
-        // If two args in either order where one is number and other function -> schedule
+        // Two-arg form: schedule with callback, return timer handle
         if (args.size() >= 2) {
             try {
                 long long ms;
                 FunctionPtr cb;
                 std::vector<Value> rest;
                 std::tie(ms, cb, rest) = parse_timer_args(args, token);
-                long long id = create_timer(ms, 0, cb, rest);
-                return Value{static_cast<double>(id)};
+                auto te = create_timer(ms, 0, cb, rest, "nap");
+                return Value{make_timer_handle(te)};
             } catch (const std::exception& e) {
                 throw;
             }
@@ -420,19 +530,21 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     Token tNap;
     tNap.type = TokenType::IDENTIFIER;
     tNap.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_nap = std::make_shared<FunctionValue>(std::string("native:timers.nap"), native_nap, nullptr, tNap);
+    auto fn_nap = std::make_shared<FunctionValue>(
+        std::string("native:timers.nap"), native_nap, nullptr, tNap);
     obj->properties["nap"] = PropertyDescriptor{fn_nap, false, false, false, tNap};
 
     // timers.queueMicrotask(cb, ...args)
     auto native_queueMicrotask = [](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
-        if (args.empty()) throw std::runtime_error("timers.queueMicrotask requires callback at " + token.loc.to_string());
-        if (!is_function_value(args[0])) throw std::runtime_error("timers.queueMicrotask first arg must be a function at " + token.loc.to_string());
+        if (args.empty()) throw std::runtime_error(
+            "timers.queueMicrotask requires callback at " + token.loc.to_string());
+        if (!is_function_value(args[0])) throw std::runtime_error(
+            "timers.queueMicrotask first arg must be a function at " + token.loc.to_string());
         FunctionPtr cb = std::get<FunctionPtr>(args[0]);
         std::vector<Value> cb_args;
         for (size_t i = 1; i < args.size(); ++i) cb_args.push_back(args[i]);
 
         // Build the boxed payload and hand to the scheduler bridge that enqueues microtasks.
-        // CallbackPayload is the same type used by enqueue_callback.
         CallbackPayload* box = new CallbackPayload(cb, cb_args);
         enqueue_microtask_global(static_cast<void*>(box));
         return std::monostate{};
@@ -440,7 +552,8 @@ std::shared_ptr<ObjectValue> make_timers_exports(EnvPtr /*env*/) {
     Token tmicro;
     tmicro.type = TokenType::IDENTIFIER;
     tmicro.loc = TokenLocation("<timers>", 0, 0, 0);
-    auto fn_micro = std::make_shared<FunctionValue>(std::string("native:timers.queueMicrotask"), native_queueMicrotask, nullptr, tmicro);
+    auto fn_micro = std::make_shared<FunctionValue>(
+        std::string("native:timers.queueMicrotask"), native_queueMicrotask, nullptr, tmicro);
     obj->properties["queueMicrotask"] = PropertyDescriptor{fn_micro, false, false, false, tmicro};
 
     return obj;
