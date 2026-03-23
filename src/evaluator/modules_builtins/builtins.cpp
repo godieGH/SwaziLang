@@ -1617,6 +1617,36 @@ std::shared_ptr<ObjectValue> make_process_exports(EnvPtr env, Evaluator* evaluat
         obj->properties["unsetEnv"] = PropertyDescriptor{fn, false, false, false, Token()};
     }
 
+    // process.env -> object (all environment variables)
+    {
+        auto fn = make_native_fn("process.env", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
+            auto obj = std::make_shared<ObjectValue>();
+            obj->is_frozen = true;
+#ifdef _WIN32
+            LPCH envBlock = GetEnvironmentStrings();
+            for (LPCH p = envBlock; *p; p += strlen(p) + 1) {
+                std::string entry(p);
+                auto idx = entry.find('=');
+                if (idx == std::string::npos || idx == 0) continue;
+                std::string key = entry.substr(0, idx);
+                std::string val = entry.substr(idx + 1);
+                obj->properties[key] = PropertyDescriptor{Value{val}, false, false, false, Token()};
+            }
+            FreeEnvironmentStrings(envBlock);
+#else
+            for (char** ep = environ; *ep; ++ep) {
+                std::string entry(*ep);
+                auto idx = entry.find('=');
+                if (idx == std::string::npos || idx == 0) continue;
+                std::string key = entry.substr(0, idx);
+                std::string val = entry.substr(idx + 1);
+                obj->properties[key] = PropertyDescriptor{Value{val}, false, false, false, Token()};
+            }
+#endif
+            return Value{obj}; }, env);
+        obj->properties["env"] = PropertyDescriptor{fn, false, true, true, Token()};
+    }
+
     // process.pid() -> number
     {
         auto fn = make_native_fn("process.pid", [](const std::vector<Value>& /*args*/, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
