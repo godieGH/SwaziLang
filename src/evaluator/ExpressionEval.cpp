@@ -4280,18 +4280,18 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
             if (prop == "isInt") {
                 return Value{std::isfinite(num) && std::floor(num) == num};
             }
-            if (prop == "nidesimali" || prop == "isDec") {
+            if (prop == "isDecimal" || prop == "isDec") {
                 return Value{std::isfinite(num) && std::floor(num) != num};
             }
-            if (prop == "nichanya" || prop == "isPos") {
+            if (prop == "isPositive" || prop == "isPos") {
                 return Value{num > 0};
             }
-            if (prop == "nihasi" || prop == "isNeg") {
+            if (prop == "isNegative" || prop == "isNeg") {
                 return Value{num < 0};
             }
 
             // boolean "is" properties: odd, even, prime
-            if (prop == "niwitiri" || prop == "nishufwa" || prop == "nitasa" || prop == "isEven" || prop == "isOdd" || prop == "isPrime") {
+            if (prop == "isEven" || prop == "isOdd" || prop == "isPrime") {
                 if (!std::isfinite(num) || std::floor(num) != num) {
                     return Value{false};
                 }
@@ -4301,13 +4301,13 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
                 long long n = static_cast<long long>(std::llround(num));
 
-                if (prop == "niwitiri" || prop == "isEven") {
+                if (prop == "isOdd") {
                     return Value{(n % 2) != 0};
                 }
-                if (prop == "nishufwa" || prop == "isOdd") {
+                if (prop == "isEven") {
                     return Value{(n % 2) == 0};
                 }
-                if (prop == "nitasa" || prop == "isPrime") {
+                if (prop == "isPrime") {
                     if (n < 2) return Value{false};
                     if (n % 2 == 0) return Value{n == 2};
                     long long limit = static_cast<long long>(std::sqrt((long double)n));
