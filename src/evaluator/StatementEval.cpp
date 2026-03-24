@@ -643,48 +643,90 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         void* node_id = static_cast<void*>(ifn);
         CallFramePtr frame = current_frame();
 
+        // ── Global scope (no frame): use simple synchronous path ─────────────
+        // This restores the original behaviour: kama works everywhere, not just
+        // inside async functions. No frame means no suspension can occur here.
+        if (!frame) {
+            Value condVal = evaluate_expression(ifn->condition.get(), env);
+            if (to_bool(condVal)) {
+                auto blockEnv = std::make_shared<Environment>(env);
+                for (auto& s : ifn->then_body) {
+                    evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
+                    if (did_return && *did_return) return;
+                    if (lc && (lc->did_break || lc->did_continue)) return;
+                }
+            } else if (ifn->has_else) {
+                auto blockEnv = std::make_shared<Environment>(env);
+                for (auto& s : ifn->else_body) {
+                    evaluate_statement(s.get(), blockEnv, return_value, did_return, lc);
+                    if (did_return && *did_return) return;
+                    if (lc && (lc->did_break || lc->did_continue)) return;
+                }
+            }
+            return;
+        }
+
+        // ── Inside a function frame: await-aware path ─────────────────────────
+        // current_index encoding:
+        //   SIZE_MAX = condition not yet evaluated (suspended mid-condition)
+        //   0        = neither branch (condition was false, no else)
+        //   1        = then-branch
+        //   2        = else-branch
         CallFrame::LoopState* state = nullptr;
         bool resuming = false;
 
-        if (frame && frame->has_loop_state(node_id)) {
+        if (frame->has_loop_state(node_id)) {
             resuming = true;
             state = &frame->loop_states[node_id];
-        } else if (frame) {
+
+            // We suspended during condition evaluation — re-evaluate it now with
+            // the resolved value and pick a branch, then run from the top.
+            if (state->current_index == SIZE_MAX) {
+                Value condVal = evaluate_expression(ifn->condition.get(), env);
+                state->current_index = to_bool(condVal) ? 1 : (ifn->has_else ? 2 : 0);
+                state->body_statement_index = 0;
+                resuming = false;  // fresh start in the chosen branch
+            }
+        } else {
             state = &frame->loop_states[node_id];
             state->body_statement_index = 0;
-            // current_index: 1=then-branch, 2=else-branch, 0=neither
+            state->body_env = std::make_shared<Environment>(env);
+            // Mark as "condition not yet decided" before we call evaluate_expression.
+            // If the condition contains await and throws SuspendExecution, the state
+            // is already in loop_states with SIZE_MAX, so the resume path above will
+            // re-evaluate the condition correctly.
+            state->current_index = SIZE_MAX;
             Value condVal = evaluate_expression(ifn->condition.get(), env);
             state->current_index = to_bool(condVal) ? 1 : (ifn->has_else ? 2 : 0);
-            state->body_env = std::make_shared<Environment>(env);
         }
 
-        size_t branch = state ? state->current_index : 0;
+        size_t branch = state->current_index;
 
         if (branch == 1 || branch == 2) {
             auto& body = (branch == 1) ? ifn->then_body : ifn->else_body;
-            auto blockEnv = (state && state->body_env)
+            auto blockEnv = state->body_env
                 ? state->body_env
                 : std::make_shared<Environment>(env);
-            if (state && !state->body_env) state->body_env = blockEnv;
+            if (!state->body_env) state->body_env = blockEnv;
 
             for (size_t j = 0; j < body.size(); ++j) {
-                if (resuming && state && j < state->body_statement_index) continue;
+                if (resuming && j < state->body_statement_index) continue;
 
                 evaluate_statement(body[j].get(), blockEnv, return_value, did_return, lc);
 
-                if (state) state->body_statement_index = j + 1;
+                state->body_statement_index = j + 1;
                 if (did_return && *did_return) {
-                    if (frame) frame->loop_states.erase(node_id);
+                    frame->loop_states.erase(node_id);
                     return;
                 }
                 if (lc && (lc->did_break || lc->did_continue)) {
-                    if (frame) frame->loop_states.erase(node_id);
+                    frame->loop_states.erase(node_id);
                     return;
                 }
             }
         }
 
-        if (frame) frame->loop_states.erase(node_id);
+        frame->loop_states.erase(node_id);
         return;
     }
 
@@ -1781,13 +1823,58 @@ void Evaluator::evaluate_statement(StatementNode* stmt, EnvPtr env, Value* retur
         LoopControl local_lc;
         LoopControl* loopCtrl = lc ? lc : &local_lc;
 
+        // ── Global scope (no frame): simple synchronous path ─────────────────
+        if (!frame) {
+            Value switchVal = evaluate_expression(sn->discriminant.get(), env);
+            CaseNode* defaultCase = nullptr;
+            bool matched = false;
+
+            for (auto& casePtr : sn->cases) {
+                CaseNode* cn = casePtr.get();
+                if (!cn->test) {
+                    defaultCase = cn;
+                    continue;
+                }
+                Value caseVal = evaluate_expression(cn->test.get(), env);
+                if (!matched && is_equal(switchVal, caseVal)) matched = true;
+
+                if (matched) {
+                    auto bodyEnv = std::make_shared<Environment>(env);
+                    for (auto& s : cn->body) {
+                        evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+                        if (did_return && *did_return) return;
+                        if (loopCtrl->did_break) {
+                            loopCtrl->did_break = false;
+                            return;
+                        }
+                        if (loopCtrl->did_continue) return;
+                    }
+                }
+            }
+
+            if (!matched && defaultCase) {
+                auto bodyEnv = std::make_shared<Environment>(env);
+                for (auto& s : defaultCase->body) {
+                    evaluate_statement(s.get(), bodyEnv, return_value, did_return, loopCtrl);
+                    if (did_return && *did_return) return;
+                    if (loopCtrl->did_break) {
+                        loopCtrl->did_break = false;
+                        return;
+                    }
+                    if (loopCtrl->did_continue) return;
+                }
+            }
+            return;
+        }
+
+        // ── Inside a function frame: await-aware path ─────────────────────────
         CallFrame::LoopState* state = nullptr;
         bool resuming = false;
 
-        if (frame && frame->has_loop_state(node_id)) {
+        if (frame->has_loop_state(node_id)) {
             resuming = true;
             state = &frame->loop_states[node_id];
-        } else if (frame) {
+        } else {
             state = &frame->loop_states[node_id];
             state->body_statement_index = 0;
             state->body_env = std::make_shared<Environment>(env);
