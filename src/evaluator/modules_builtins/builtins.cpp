@@ -1001,9 +1001,23 @@ static std::string json_stringify_value_enhanced(
     if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
 
     if (std::holds_alternative<double>(v)) {
-        std::ostringstream ss;
-        ss << std::get<double>(v);
-        return ss.str();
+        double d = std::get<double>(v);
+
+        // JSON spec: NaN and Infinity serialize as null
+        if (std::isnan(d) || std::isinf(d)) return "null";
+
+        // Integer-valued doubles (covers unix seconds, millis, IDs, etc.)
+        // 1e15 is the safe threshold before doubles lose integer precision
+        if (d == std::floor(d) && std::abs(d) <= 1.0e15) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.0f", d);
+            return std::string(buf);
+        }
+
+        // Floating-point: use enough precision to round-trip without scientific notation
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.17g", d);
+        return std::string(buf);
     }
 
     if (std::holds_alternative<std::string>(v)) {
