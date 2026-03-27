@@ -36,4 +36,10 @@ kazi _noop() {
 }
 
 // Export public API
-ruhusu { _range, _sleep, _identity, _noop }
+data exports =({ 
+  _range, 
+  _sleep, 
+  _identity, 
+  _noop
+})
+ruhusu exports
