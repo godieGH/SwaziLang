@@ -16,7 +16,7 @@ static bool is_stack_near_limit() {
     uintptr_t current_sp = reinterpret_cast<uintptr_t>(&stack_var);
 
     // First call initializes the baseline
-    static uintptr_t stack_start = current_sp;
+    static thread_local uintptr_t stack_start = current_sp;
 
     // Calculate bytes used
     uintptr_t stack_used = (stack_start > current_sp)

@@ -1268,6 +1268,9 @@ class Evaluator {
     // Public wrapper that lets native builtins synchronously invoke interpreter-callable functions.
     // This is a thin public forwarder to the private call_function implementation.
     Value invoke_function(FunctionPtr fn, const std::vector<Value>& args, EnvPtr caller_env, const Token& callToken);
+    // Drive the event loop to completion and clean up — used by workers in function-mode
+    // workers that call invoke_function directly instead of evaluate().
+    void run_loop();
 
     void fulfill_promise(PromisePtr p, const Value& value);
     void reject_promise(PromisePtr p, const Value& reason);

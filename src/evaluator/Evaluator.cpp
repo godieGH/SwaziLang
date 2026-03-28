@@ -9,14 +9,16 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "AsyncBridge.hpp"
 #include "ClassRuntime.hpp"
 #include "Frame.hpp"
 #include "Scheduler.hpp"
 #include "SwaziError.hpp"
 #include "colors.hpp"
 #include "globals.hpp"
+#include "worker.hpp"
+
 namespace fs = std::filesystem;
-#include "AsyncBridge.hpp"
 
 Evaluator::~Evaluator() = default;
 
@@ -110,6 +112,7 @@ void Evaluator::evaluate(ProgramNode* program) {
         std::cerr << "Unknown error while running async callbacks\n";
     }
     sweep_external_data();
+    join_all_workers();
 }
 void Evaluator::populate_module_metadata(EnvPtr env, const std::string& resolved_path, const std::string& module_name, bool is_main) {
     if (!env) return;
@@ -345,4 +348,15 @@ void Evaluator::check_deprecated(FunctionPtr fn, const Token& calltok) {
               << calltok.loc.get_line_trace() << std::endl;
 
     deprecations.insert(fn);
+}
+
+void Evaluator::run_loop() {
+    try {
+        run_event_loop();
+    } catch (const std::exception& e) {
+        std::cerr << "Error while running async callbacks: " << e.what() << "\n";
+    } catch (...) {
+        std::cerr << "Unknown error while running async callbacks\n";
+    }
+    sweep_external_data();
 }

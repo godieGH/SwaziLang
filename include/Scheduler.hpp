@@ -3,6 +3,7 @@
 #ifndef SWAZI_SCHEDULER_HPP
 #define SWAZI_SCHEDULER_HPP
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -55,7 +56,7 @@ class Scheduler {
     uv_async_t async_handle_;
     bool async_initialized = false;
 
-    bool should_stop = false;
+    std::atomic<bool> should_stop{false};
 };
 
 // Bridge functions (type-erased) — unchanged.

@@ -23,6 +23,7 @@
 #include "time.hpp"
 #include "token.hpp"
 #include "url_class.hpp"
+#include "worker.hpp"
 
 // Helper: build a TokenLocation from a user-supplied object value (if possible).
 // The user-provided object may contain fields like:
@@ -1846,4 +1847,5 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
     // -----------------------
     // End Promise runtime
     // -----------------------
+    init_worker(env, evaluator);
 }

@@ -5,12 +5,11 @@
 // Use local header path for libuv
 #include "uv.h"
 
-static Scheduler* g_scheduler_instance = nullptr;
-static std::function<void(void*)> g_scheduler_runner = nullptr;
-
+static thread_local Scheduler* g_scheduler_instance = nullptr;
+static thread_local std::function<void(void*)> g_scheduler_runner = nullptr;
 // Tick callback registered by owner (e.g., Evaluator) to run unhandled-rejection checks.
 // Invoked on the scheduler/loop thread.
-static std::function<void()> g_tick_callback = nullptr;
+static thread_local std::function<void()> g_tick_callback = nullptr;
 
 // libuv async callback used to wake the scheduler loop and make it process tasks.
 // This runs on the loop thread.

@@ -12,6 +12,7 @@
 #include "Scheduler.hpp"
 #include "builtins.hpp"
 #include "evaluator.hpp"
+#include "worker.hpp"
 
 // libuv
 #include "uv.h"
@@ -91,7 +92,8 @@ void Evaluator::run_event_loop() {
                 http_has_active_work() ||
                 http_fetch_has_active_work() ||
                 uv_module_has_active_handles() ||
-                addon_threads_exist();
+                addon_threads_exist() ||
+                worker_threads_exist();
         });
         return;
     }
