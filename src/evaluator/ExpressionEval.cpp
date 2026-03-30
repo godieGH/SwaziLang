@@ -4631,10 +4631,10 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                 prop == "slice" || prop == "splice" || prop == "includes" || prop == "sort" ||
                 prop == "reverse" || prop == "extend" || prop == "unshift" || prop == "insert" ||
                 prop == "shift" || prop == "removeAll" || prop == "pop" || prop == "push" ||
-                prop == "urefu" || prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" ||
+                prop == "urefu" || prop == "indexOf" || prop == "indexYa" || prop == "tafutaIndex" || prop == "findIndex" ||
                 prop == "ongeza" || prop == "toa" || prop == "ondoa" || prop == "ondoaMwanzo" ||
                 prop == "ongezaMwanzo" || prop == "ingiza" || prop == "slesi" || prop == "clear" ||
-                prop == "badili" || prop == "tafuta" || prop == "kuna" || prop == "panga" ||
+                prop == "badili" || prop == "tafuta" || prop == "find" || prop == "kuna" || prop == "panga" ||
                 prop == "geuza" || prop == "chambua" || prop == "punguza" ||
                 prop == "unganisha" || prop == "ondoaZote" || prop == "pachika" || prop == "kwaKila" || prop == "forEach" || prop == "fill" || prop == "every" || prop == "some" || prop == "baadhi") {
                 auto native_impl = [this, arr, prop](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
@@ -4821,7 +4821,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
 
                     // find: tafuta(fn)
-                    if (prop == "tafuta") {
+                    if (prop == "tafuta" || prop == "find") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
                             throw std::runtime_error(
                                 "TypeError at " + token.loc.to_string() +
@@ -4837,7 +4837,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                     }
 
                     // findIndex: tafutaIndex(fn)
-                    if (prop == "tafutaIndex") {
+                    if (prop == "tafutaIndex" || prop == "findIndex") {
                         if (args.empty() || !std::holds_alternative<FunctionPtr>(args[0])) {
                             throw std::runtime_error(
                                 "TypeError at " + token.loc.to_string() +
