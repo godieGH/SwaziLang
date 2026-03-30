@@ -124,6 +124,40 @@ std::string to_property_key(const Value& v, const Token& token) {
         token.loc);
 }
 
+static std::string translate_replacement(const std::string& repl,
+    const std::string& fullMatch,
+    size_t offset,
+    const std::string& original) {
+    std::string out;
+    for (size_t i = 0; i < repl.size(); ++i) {
+        if (repl[i] == '$' && i + 1 < repl.size()) {
+            char next = repl[i + 1];
+            if (std::isdigit(next)) {
+                out += '\\';
+                out += next;
+                ++i;  // $1 -> \1
+            } else if (next == '&') {
+                out += fullMatch;
+                ++i;  // $& -> full match
+            } else if (next == '`') {
+                out += original.substr(0, offset);
+                ++i;  // $` -> before match
+            } else if (next == '\'') {
+                out += original.substr(offset + fullMatch.size());
+                ++i;  // $' -> after match
+            } else if (next == '$') {
+                out += '$';
+                ++i;  // $$ -> literal
+            } else {
+                out += repl[i];
+            }
+        } else {
+            out += repl[i];
+        }
+    }
+    return out;
+}
+
 }  // anonymous namespace
 
 inline uint32_t to_uint32(double d) {
@@ -1842,7 +1876,7 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
                         }
 
                         std::string str = to_string_value(args[0], true);
-                        std::string replacement = to_string_value(args[1], true);
+                        std::string replacement = translate_replacement(to_string_value(args[1], true), "", 0, "");
                         re2::RE2& re = regex->getCompiled();
 
                         std::string result = str;
@@ -4072,44 +4106,198 @@ Value Evaluator::evaluate_expression(ExpressionNode* expr, EnvPtr env) {
 
             // badilisha(old, new) -> replace first occurrence
             if (prop == "badilisha" || prop == "replace") {
-                return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (args.size() < 2)
-                        throw std::runtime_error(
-                            "TypeError at " + token.loc.to_string() +
-                            "\nstr.badilisha requires 2 arguments (old, new)." +
-                            "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        throw SwaziError("TypeError", "str.replace requires 2 arguments", token.loc);
+
+                    bool replacerIsFunc = std::holds_alternative<FunctionPtr>(args[1]);
+                    bool patternIsRegex = std::holds_alternative<RegexPtr>(args[0]);
+
+                    // ── regex path ──────────────────────────────────────────────
+                    if (patternIsRegex) {
+                        RegexPtr regex = std::get<RegexPtr>(args[0]);
+                        re2::RE2& re = regex->getCompiled();
+                        int numGroups = re.NumberOfCapturingGroups() + 1;  // +1 for full match
+
+                        std::string result;
+                        std::string remaining = s_val;
+                        size_t offset = 0;
+                        bool didReplace = false;
+
+                        while (true) {
+                            std::vector<re2::StringPiece> groups(numGroups);
+                            if (!re.Match(remaining, 0, remaining.size(),
+                                    re2::RE2::UNANCHORED, groups.data(), numGroups))
+                                break;
+
+                            size_t matchStart = groups[0].data() - remaining.data();
+                            size_t matchLen = groups[0].size();
+
+                            // append everything before this match
+                            result.append(remaining, 0, matchStart);
+
+                            std::string fullMatch(groups[0].data(), matchLen);
+                            std::string replacement;
+
+                            if (replacerIsFunc) {
+                                FunctionPtr fn = std::get<FunctionPtr>(args[1]);
+                                std::vector<Value> fnArgs;
+                                fnArgs.push_back(Value{fullMatch});  // match
+                                for (int i = 1; i < numGroups; ++i)  // capture groups
+                                    fnArgs.push_back(Value{std::string(groups[i].data(), groups[i].size())});
+                                fnArgs.push_back(Value{static_cast<double>(offset + matchStart)});  // offset
+                                fnArgs.push_back(Value{s_val});                                     // original string
+                                Value ret = call_function(fn, fnArgs, callEnv, token);
+                                replacement = to_string_value(ret);
+                            } else {
+                                std::string repl = translate_replacement(to_string_value(args[1]), fullMatch, offset + matchStart, s_val);
+                                std::string rewritten;
+                                re.Rewrite(&rewritten, repl, groups.data(), numGroups);
+                                replacement = rewritten;
+                            }
+
+                            result.append(replacement);
+                            offset += matchStart + matchLen;
+                            remaining = remaining.substr(matchStart + matchLen);
+                            didReplace = true;
+
+                            if (!regex->global) break;
+                            if (matchLen == 0) {  // zero-width match guard
+                                if (!remaining.empty()) {
+                                    result += remaining[0];
+                                    remaining = remaining.substr(1);
+                                    ++offset;
+                                } else
+                                    break;
+                            }
+                        }
+
+                        result.append(remaining);
+                        return Value{result};
+                    }
+
+                    // ── plain string path ────────────────────────────────────────
                     std::string oldv = to_string_value(args[0]);
-                    std::string newv = to_string_value(args[1]);
                     std::string out = s_val;
                     size_t pos = out.find(oldv);
-                    if (pos != std::string::npos) out.replace(pos, oldv.size(), newv);
+
+                    if (pos != std::string::npos) {
+                        std::string replacement;
+                        if (replacerIsFunc) {
+                            FunctionPtr fn = std::get<FunctionPtr>(args[1]);
+                            std::vector<Value> fnArgs = {
+                                Value{oldv},
+                                Value{static_cast<double>(pos)},
+                                Value{s_val}};
+                            Value ret = call_function(fn, fnArgs, callEnv, token);
+                            replacement = to_string_value(ret);
+                        } else {
+                            replacement = to_string_value(args[1]);
+                        }
+                        out.replace(pos, oldv.size(), replacement);
+                    }
+
                     return Value{out};
                 });
             }
-
             // badilishaZote(old, new) -> replace all occurrences
             if (prop == "badilishaZote" || prop == "replaceAll") {
-                return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& token) -> Value {
+                return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr callEnv, const Token& token) -> Value {
                     if (args.size() < 2)
-                        throw std::runtime_error(
-                            "TypeError at " + token.loc.to_string() +
-                            "\nstr.badilishaZote requires 2 arguments (old, new)." +
-                            "\n --> Traced at:\n" + token.loc.get_line_trace());
+                        throw SwaziError("TypeError", "str.replaceAll requires 2 arguments", token.loc);
+
+                    bool replacerIsFunc = std::holds_alternative<FunctionPtr>(args[1]);
+                    bool patternIsRegex = std::holds_alternative<RegexPtr>(args[0]);
+
+                    if (patternIsRegex) {
+                        RegexPtr regex = std::get<RegexPtr>(args[0]);
+                        re2::RE2& re = regex->getCompiled();
+                        int numGroups = re.NumberOfCapturingGroups() + 1;
+
+                        if (patternIsRegex && !regex->global)
+                            throw SwaziError("TypeError",
+                                "str.replaceAll requires a global regex — add the 'g' flag", token.loc);
+
+                        std::string result;
+                        std::string remaining = s_val;
+                        size_t offset = 0;
+
+                        while (true) {
+                            std::vector<re2::StringPiece> groups(numGroups);
+                            if (!re.Match(remaining, 0, remaining.size(),
+                                    re2::RE2::UNANCHORED, groups.data(), numGroups))
+                                break;
+
+                            size_t matchStart = groups[0].data() - remaining.data();
+                            size_t matchLen = groups[0].size();
+
+                            result.append(remaining, 0, matchStart);
+
+                            std::string fullMatch(groups[0].data(), matchLen);
+                            std::string replacement;
+
+                            if (replacerIsFunc) {
+                                FunctionPtr fn = std::get<FunctionPtr>(args[1]);
+                                std::vector<Value> fnArgs;
+                                fnArgs.push_back(Value{fullMatch});
+                                for (int i = 1; i < numGroups; ++i)
+                                    fnArgs.push_back(Value{std::string(groups[i].data(), groups[i].size())});
+                                fnArgs.push_back(Value{static_cast<double>(offset + matchStart)});
+                                fnArgs.push_back(Value{s_val});
+                                Value ret = call_function(fn, fnArgs, callEnv, token);
+                                replacement = to_string_value(ret);
+                            } else {
+                                std::string repl = translate_replacement(to_string_value(args[1]), fullMatch, offset + matchStart, s_val);
+                                std::string rewritten;
+                                re.Rewrite(&rewritten, repl, groups.data(), numGroups);
+                                replacement = rewritten;
+                            }
+
+                            result.append(replacement);
+                            offset += matchStart + matchLen;
+                            remaining = remaining.substr(matchStart + matchLen);
+
+                            if (matchLen == 0) {
+                                if (!remaining.empty()) {
+                                    result += remaining[0];
+                                    remaining = remaining.substr(1);
+                                    ++offset;
+                                } else
+                                    break;
+                            }
+                        }
+
+                        result.append(remaining);
+                        return Value{result};
+                    }
+
+                    // plain string path — all occurrences
                     std::string oldv = to_string_value(args[0]);
-                    std::string newv = to_string_value(args[1]);
-                    if (oldv.empty()) return Value{s_val};  // avoid infinite loop
-                    std::string out;
+                    if (oldv.empty()) return Value{s_val};
+
+                    std::string result;
                     size_t pos = 0, prev = 0;
                     while ((pos = s_val.find(oldv, prev)) != std::string::npos) {
-                        out.append(s_val, prev, pos - prev);
-                        out.append(newv);
+                        result.append(s_val, prev, pos - prev);
+
+                        if (replacerIsFunc) {
+                            FunctionPtr fn = std::get<FunctionPtr>(args[1]);
+                            std::vector<Value> fnArgs = {
+                                Value{oldv},
+                                Value{static_cast<double>(pos)},
+                                Value{s_val}};
+                            Value ret = call_function(fn, fnArgs, callEnv, token);
+                            result.append(to_string_value(ret));
+                        } else {
+                            result.append(to_string_value(args[1]));
+                        }
+
                         prev = pos + oldv.size();
                     }
-                    out.append(s_val, prev, std::string::npos);
-                    return Value{out};
+                    result.append(s_val, prev, std::string::npos);
+                    return Value{result};
                 });
             }
-
             // orodhesha(separator?) -> split into ArrayPtr
             if (prop == "orodhesha" || prop == "split") {
                 return make_fn([this, s_val](const std::vector<Value>& args, EnvPtr /*callEnv*/, const Token& /*token*/) -> Value {
