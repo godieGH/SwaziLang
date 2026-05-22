@@ -48,13 +48,13 @@ const std::string bright_white = "\033[97m";
 
 static std::string value_type_name(const Value& v) {
     if (std::holds_alternative<std::monostate>(v)) return "null";
-    if (std::holds_alternative<double>(v)) return "namba";
-    if (std::holds_alternative<std::string>(v)) return "neno";
+    if (std::holds_alternative<double>(v)) return "number";
+    if (std::holds_alternative<std::string>(v)) return "string";
     if (std::holds_alternative<bool>(v)) return "bool";
-    if (std::holds_alternative<FunctionPtr>(v)) return "kazi";
-    if (std::holds_alternative<ArrayPtr>(v)) return "orodha";
+    if (std::holds_alternative<FunctionPtr>(v)) return "func";
+    if (std::holds_alternative<ArrayPtr>(v)) return "array";
     if (std::holds_alternative<ObjectPtr>(v)) return "object";
-    if (std::holds_alternative<ClassPtr>(v)) return "muundo";
+    if (std::holds_alternative<ClassPtr>(v)) return "struct";
     if (std::holds_alternative<HoleValue>(v)) return "emptyhole";
     if (std::holds_alternative<PromisePtr>(v)) return "promise";
     if (std::holds_alternative<BufferPtr>(v)) return "buffer";
@@ -144,7 +144,7 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         return use_color ? Color::yellow + ss.str() + Color::reset : ss.str();
     }
     if (std::holds_alternative<bool>(v)) {
-        std::string s = std::get<bool>(v) ? "kweli" : "sikweli";
+        std::string s = std::get<bool>(v) ? "true" : "false";
         return use_color ? Color::bright_magenta + s + Color::reset : s;
     }
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
@@ -165,8 +165,8 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         }
 
         std::string s = use_color
-            ? (std::string(Color::bright_cyan) + "[" + prefix + "kazi " + name + "]" + Color::reset)
-            : ("[" + prefix + "kazi " + name + "]");
+            ? (std::string(Color::bright_cyan) + "[" + prefix + "func " + name + "]" + Color::reset)
+            : ("[" + prefix + "func " + name + "]");
         return s;
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
@@ -271,10 +271,10 @@ std::string Evaluator::to_string_value(const Value& v, bool no_color) {
         ClassPtr cp = std::get<ClassPtr>(v);
         if (!cp) {
             std::ostringstream ss;
-            ss << "[muundo <null>]";
+            ss << "[struct <null>]";
             return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
         }
-        std::string label = "[muundo " + cp->name + "]";
+        std::string label = "[struct " + cp->name + "]";
         std::string out;
         if (use_color)
             out = Color::bright_blue + label + Color::reset;
@@ -998,7 +998,7 @@ std::string Evaluator::print_value(
     }
 
     if (std::holds_alternative<bool>(v)) {
-        std::string s = std::get<bool>(v) ? "kweli" : "sikweli";
+        std::string s = std::get<bool>(v) ? "true" : "false";
         return use_color ? (Color::bright_magenta + s + Color::reset) : s;
     }
 
@@ -1019,7 +1019,7 @@ std::string Evaluator::print_value(
             prefix = "Async->";
         }
 
-        ss << "[" << prefix << "kazi " << nm << "]";
+        ss << "[" << prefix << "func " << nm << "]";
         return use_color ? (Color::bright_cyan + ss.str() + Color::reset) : ss.str();
     }
     if (std::holds_alternative<ArrayPtr>(v)) {
@@ -1397,12 +1397,12 @@ std::string Evaluator::print_value(
         ClassPtr cp = std::get<ClassPtr>(v);
         if (!cp) {
             std::ostringstream ss;
-            ss << "[muundo " << "<null>" << "]";
+            ss << "[struct " << "<null>" << "]";
             return use_color ? (Color::bright_blue + ss.str() + Color::reset) : ss.str();
         }
 
         // label only
-        std::string label = "[muundo " + cp->name + "]";
+        std::string label = "[struct " + cp->name + "]";
         std::string out;
         if (use_color)
             out = Color::bright_blue + label + Color::reset;
@@ -1765,7 +1765,7 @@ std::string Evaluator::print_object(
                     label << "[Getter]";
                     if (use_color) oss << Color::cyan;
                 } else {
-                    label << "[" << (f->is_async ? "Async->" : "") << "tabia " << nm << "]";
+                    label << "[" << (f->is_async ? "Async->" : "") << "meth " << nm << "]";
                     if (use_color) oss << Color::bright_cyan;
                 }
 

@@ -1056,11 +1056,15 @@ void init_globals(EnvPtr env, Evaluator* evaluator) {
 
     add_fn("ainaya", builtin_ainaya);
     add_fn("Orodha", builtin_orodha);
+    add_fn("Array", builtin_orodha);
     add_fn("Bool", builtin_bool);
     add_fn("Namba", builtin_namba);
+    add_fn("Number", builtin_namba);
     add_fn("parseInt", builtin_parseInt);
     add_fn("Neno", builtin_neno);
+    add_fn("String", builtin_neno);
     add_fn("soma", builtin_soma);
+    add_fn("readLine", builtin_soma);
     add_fn("Makosa", builtin_throw);
     add_fn("Error", builtin_Error);
     add_fn("thibitisha", builtin_thibitisha);

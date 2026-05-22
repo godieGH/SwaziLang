@@ -65,11 +65,11 @@ inline std::string value_to_string(const Value& v) {
             return oss.str();
         }
     }
-    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "kweli" : "sikweli";
+    if (std::holds_alternative<bool>(v)) return std::get<bool>(v) ? "true" : "false";
     if (std::holds_alternative<std::string>(v)) return std::get<std::string>(v);
-    if (std::holds_alternative<ArrayPtr>(v)) return "[orodha]";
+    if (std::holds_alternative<ArrayPtr>(v)) return "[array]";
     if (std::holds_alternative<ObjectPtr>(v)) return "{object}";
-    if (std::holds_alternative<FunctionPtr>(v)) return "[kazi]";
-    if (std::holds_alternative<ClassPtr>(v)) return "<muundo>";
+    if (std::holds_alternative<FunctionPtr>(v)) return "[func]";
+    if (std::holds_alternative<ClassPtr>(v)) return "<struct>";
     return "unknown";
 }

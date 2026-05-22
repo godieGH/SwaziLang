@@ -272,7 +272,7 @@ TEST(ParserFunctions, RestParameters) {
 }
 
 TEST(ParserFunctions, MixedParameters) {
-    string src = "kazi func(a, b = 5, ...rest):\n  rudisha a\n";
+    string src = "kazi fname(a, b = 5, ...rest):\n  rudisha a\n";
     ASSERT_NO_THROW(parseProgram(src));
 }
 
@@ -384,7 +384,7 @@ TEST(ParserExpressions, OptionalMember) {
 }
 
 TEST(ParserExpressions, OptionalCall) {
-    string src = "data x = func?.()\n";
+    string src = "data x = fname?.()\n";
     ASSERT_NO_THROW(parseProgram(src));
 }
 

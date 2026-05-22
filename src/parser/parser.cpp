@@ -523,43 +523,65 @@ std::unique_ptr<StatementNode> Parser::parse_statement() {
         return parse_try_catch();
     }
 
-    if (p.type == TokenType::KAZI) {
-        consume();  // consume 'kazi'
-        Token kaziTok = tokens[position - 1];
+    {
+        // pre async modifier
+        bool pre_async = false;
 
-        bool is_generator = false;
-        bool is_async = false;
+        if (peek().type == TokenType::ASYNC &&
+            peek_next().type == TokenType::KAZI) {
+            consume();  // consume async
+            pre_async = true;
+        }
 
-        // Check for generator marker
-        if (peek().type == TokenType::STAR) {
+        if (peek().type == TokenType::KAZI) {
+            size_t function_start = position;
+
+            consume();  // consume 'kazi'
+            Token kaziTok = tokens[position - 1];
+
+            bool is_generator = false;
+            bool is_async = pre_async;
+            
+
+            // generator marker
+            if (peek().type == TokenType::STAR) {
+                consume();
+                is_generator = true;
+            }
+
+            // async after kazi
+            if (peek().type == TokenType::ASYNC) {
+                // reject duplicate async
+                if (is_async) {
+                    throw SwaziError(
+                        "SyntaxError",
+                        "Duplicate async modifier",
+                        peek().loc);
+                }
+
+                consume();
+                is_async = true;
+            }
+
+            // reject async generators
+            if (is_async && is_generator) {
+                throw SwaziError(
+                    "SyntaxError",
+                    "Async functions cannot be generators",
+                    kaziTok.loc);
+            }
+
+            // sequential form
+            if (peek().type == TokenType::OPENPARENTHESIS) {
+                return parse_sequential_functions(is_async, is_generator);
+            }
+
+            // fallback
+            position = function_start;
             consume();
-            is_generator = true;
-        }
 
-        // Check for async modifier
-        if (peek().type == TokenType::ASYNC) {
-            consume();
-            is_async = true;
+            return parse_function_declaration(is_async, is_generator);
         }
-
-        // Reject async generators
-        if (is_async && is_generator) {
-            throw SwaziError("SyntaxError",
-                "Async functions cannot be generators", kaziTok.loc);
-        }
-
-        // Check for sequential form: kazi (...) or kazi* (...) or kazi async (...)
-        if (peek().type == TokenType::OPENPARENTHESIS) {
-            return parse_sequential_functions(is_async, is_generator);
-        }
-
-        // Otherwise parse single function (existing logic, but need to preserve modifiers)
-        // Rewind position to before 'kazi' consumption and call existing parser
-        position--;                    // back to 'kazi'
-        if (is_generator) position--;  // back to '*'
-        if (is_async) position--;      // back to 'async'
-        consume();                     // re-consume 'kazi'
-        return parse_function_declaration();
     }
 
     if (p.type == TokenType::MUUNDO) {

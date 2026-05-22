@@ -1114,6 +1114,59 @@ void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size
     int tok_length = static_cast<int>(i - start_index);
     add_token(out, TokenType::NUMBER, val, tok_line, tok_col, tok_length);
 }
+
+// reserved keywords
+/**
+ * data, let
+ * chapisha, println
+ * andika, print
+ * thabiti
+ * kazi, func
+ * tabia, meth
+ * chagua, switch
+ * ikiwa, case
+ * kaida, default
+ * rudisha, return
+ * kweli, true
+ * sikweli, false
+ * na, and
+ * ni, is
+ * au, or
+ * si, not
+ * sawa, eq
+ * sisawa, noteq
+ * ainaya, typeof
+ * tumia, use
+ * kutoka, from
+ * ruhusu, export
+ * muundo, struct
+ * rithi, extends
+ * unda, new
+ * supa, super
+ * futa, drop
+ * this, self
+ * kama, if
+ * vinginevyo, sivyo, else
+ * jaribu, try
+ * makosa
+ * kisha
+ * tupa, throw
+ * kwa, for
+ * kila, each
+ * katika, in
+ * ktk
+ * wakati, while
+ * fanya, do
+ * simama, break
+ * endelea, continue
+ * null, nan, inf
+ * __block__, __line__, __debug__
+ * ASYNC, async
+ * await, subiri
+ * yield
+ * step
+ */
+
 void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string id;
     while (!eof()) {
@@ -1126,61 +1179,96 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
 
     static const std::unordered_map<std::string, TokenType> keywords = {
         {"data", TokenType::DATA},
+        {"let", TokenType::DATA},
         {"chapisha", TokenType::CHAPISHA},
+        {"println", TokenType::CHAPISHA},
         {"andika", TokenType::ANDIKA},
+        {"print", TokenType::ANDIKA},
         {"thabiti", TokenType::CONSTANT},
         {"kazi", TokenType::KAZI},
+        {"func", TokenType::KAZI},
         {"tabia", TokenType::TABIA},
+        {"meth", TokenType::TABIA},
         {"chagua", TokenType::CHAGUA},
+        {"switch", TokenType::CHAGUA},
         {"ikiwa", TokenType::IKIWA},
+        {"case", TokenType::IKIWA},
         {"kaida", TokenType::KAIDA},
+        {"default", TokenType::KAIDA},
         {"rudisha", TokenType::RUDISHA},
+        {"return", TokenType::RUDISHA},
         {"kweli", TokenType::BOOLEAN},
+        {"true", TokenType::BOOLEAN},
         {"sikweli", TokenType::BOOLEAN},
+        {"false", TokenType::BOOLEAN},
         {"na", TokenType::AND},
+        {"and", TokenType::AND},
         {"ni", TokenType::NI},
+        {"is", TokenType::NI},
         {"au", TokenType::OR},
+        {"or", TokenType::OR},
         {"si", TokenType::NOT},
+        {"not", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
+        {"eq", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
+        {"noteq", TokenType::NOTEQUAL},
 
         {"ainaya", TokenType::AINA},
+        {"typeof", TokenType::AINA},
 
         // module / import / export
         {"tumia", TokenType::TUMIA},    // import
+        {"use", TokenType::TUMIA},      // import
         {"kutoka", TokenType::KUTOKA},  // from
+        {"from", TokenType::KUTOKA},    // from
         {"ruhusu", TokenType::RUHUSU},  // export
+        {"export", TokenType::RUHUSU},  // export
 
         // calsses keywords
         {"muundo", TokenType::MUUNDO},
+        {"struct", TokenType::MUUNDO},
         {"rithi", TokenType::RITHI},
+        {"extends", TokenType::RITHI},
         {"unda", TokenType::UNDA},
+        {"new", TokenType::UNDA},
         {"supa", TokenType::SUPA},
         {"super", TokenType::SUPA},
         {"futa", TokenType::FUTA},
+        {"drop", TokenType::FUTA},
         {"this", TokenType::SELF},
         {"self", TokenType::SELF},
 
         // control-flow keywords
-        {"kama", TokenType::KAMA},              // if
+        {"kama", TokenType::KAMA},  // if
+        {"if", TokenType::KAMA},
         {"vinginevyo", TokenType::VINGINEVYO},  // else
         {"sivyo", TokenType::VINGINEVYO},       // else alias
+        {"else", TokenType::VINGINEVYO},
 
         {"jaribu", TokenType::JARIBU},
+        {"try", TokenType::JARIBU},
         {"makosa", TokenType::MAKOSA},
         {"kisha", TokenType::KISHA},
         {"tupa", TokenType::THROW},
         {"throw", TokenType::THROW},
 
         // loop-related keywords
-        {"kwa", TokenType::FOR},  // for-like loop
+        {"kwa", TokenType::FOR},
+        {"for", TokenType::FOR},  // for-like loop
         {"kila", TokenType::KILA},
+        {"each", TokenType::KILA},
         {"katika", TokenType::KATIKA},
+        {"in", TokenType::KATIKA},
         {"ktk", TokenType::KATIKA},
         {"wakati", TokenType::WHILE},
+        {"while", TokenType::WHILE},
         {"fanya", TokenType::DOWHILE},
+        {"do", TokenType::DOWHILE},
         {"simama", TokenType::SIMAMA},
+        {"break", TokenType::SIMAMA},
         {"endelea", TokenType::ENDELEA},
+        {"continue", TokenType::ENDELEA},
 
         // keyword literals and constants
         {"null", TokenType::NULL_LITERAL},  // null token

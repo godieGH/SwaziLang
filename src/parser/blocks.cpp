@@ -60,15 +60,16 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
         bool is_static = false;
         bool is_private = false;
         bool is_locked = false;
-        while (peek().type == TokenType::STAR || peek().type == TokenType::AT_SIGN || peek().type == TokenType::AMPERSAND) {
-            Token mod = consume();
-            if (mod.type == TokenType::STAR)
-                is_static = true;
-            else if (mod.type == TokenType::AT_SIGN)
-                is_private = true;
-            else if (mod.type == TokenType::AMPERSAND)
-                is_locked = true;
-        }
+        bool is_async = false;
+        
+        while (peek().type == TokenType::STAR || peek().type == TokenType::AT_SIGN ||
+       peek().type == TokenType::AMPERSAND || peek().type == TokenType::ASYNC) {
+    Token mod = consume();
+    if (mod.type == TokenType::STAR)       is_static = true;
+    else if (mod.type == TokenType::AT_SIGN)   is_private = true;
+    else if (mod.type == TokenType::AMPERSAND) is_locked = true;
+    else if (mod.type == TokenType::ASYNC)     is_async = true;
+}
 
         if (t.type == TokenType::NEWLINE ||
             (braceStyle && (t.type == TokenType::INDENT || t.type == TokenType::DEDENT))) {
@@ -81,7 +82,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
         // METHOD: 'tabia' <method-name or thabiti or ...>
         if (cur.type == TokenType::TABIA) {
             consume();  // consume 'tabia'
-            auto method = parse_class_method(is_private, is_static, is_locked, className,
+            auto method = parse_class_method(is_private, is_static, is_locked, is_async, className,
                 /*isCtor=*/false,
                 /*isDtor=*/false,
                 /*braceStyle=*/braceStyle);
@@ -102,7 +103,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
                 throw SwaziError("SyntaxError", "Destructor name must match class name '" + className + "'.", nameTok.loc);
             }
 
-            auto method = parse_class_method(is_private, is_static, is_locked, className,
+            auto method = parse_class_method(is_private, is_static, is_locked, false, className,
                 /*isCtor=*/false,
                 /*isDtor=*/true,
                 /*braceStyle=*/braceStyle);
@@ -131,7 +132,7 @@ std::unique_ptr<ClassBodyNode> Parser::parse_class_body(const std::string& class
             // If the identifier equals the class name -> constructor (preferred)
             if (cur.value == className) {
                 // do NOT pre-consume name; let parse_class_method handle it
-                auto ctor = parse_class_method(is_private, is_static, is_locked, className,
+                auto ctor = parse_class_method(is_private, is_static, is_locked, false /* constructor can not be async */, className,
                     /*isCtor=*/true,
                     /*isDtor=*/false,
                     /*braceStyle=*/braceStyle);
@@ -186,6 +187,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     bool is_private,
     bool is_static,
     bool is_locked,
+    bool pre_async,
     const std::string& className,
     bool isCtor,
     bool isDtor,
@@ -208,6 +210,7 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     node->is_constructor = isCtor;
     node->is_destructor = isDtor;
     node->is_getter = false;
+    node->is_async = pre_async;
 
     // Generators are NOT allowed for tabia/methods per rule.
     if (peek().type == TokenType::STAR) {
@@ -215,6 +218,9 @@ std::unique_ptr<ClassMethodNode> Parser::parse_class_method(
     }
 
     if (peek().type == TokenType::ASYNC) {
+      if (node->is_async) {
+        throw SwaziError("SyntaxError", "Duplicate async modifier", peek().loc);
+    }
         consume();
         node->is_async = true;
     }

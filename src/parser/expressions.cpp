@@ -482,7 +482,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_template_literal() {
     return node;
 }
 
-std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
+std::unique_ptr<ExpressionNode> Parser::parse_tabia_method(bool pre_async) {
     struct AsyncScopeGuard {
         Parser& parser;
         bool prev;
@@ -511,11 +511,14 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
         throw SwaziError("SyntaxError", "Generator methods ('tabia*') are not supported — generators are only allowed for top-level `kazi*` functions.", startTok.loc);
     }
 
-    bool is_async = false;
+     func->is_async = pre_async;
+
     if (peek().type == TokenType::ASYNC) {
+        if (func->is_async) {
+            throw SwaziError("SyntaxError", "Duplicate async modifier", peek().loc);
+        }
         consume();
-        is_async = true;
-        func->is_async = is_async;
+        func->is_async = true;
     }
 
     // optional 'thabiti' keyword -> getter flag (allow either dedicated token or identifier)
@@ -525,7 +528,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_tabia_method() {
         is_getter = true;
     }
 
-    if (is_getter && is_async) {
+    if (is_getter && func->is_async) {
         throw SwaziError("SyntaxError", "tabia thabiti — getters cannot be declared ASYNC", startTok.loc);
     }
 
@@ -788,8 +791,8 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
 
         bool is_private_flag = false;
         bool is_locked_flag = false;
-        Token privateTok,
-            lockedTok;
+        Token privateTok, lockedTok;
+        bool is_async_flag = false;
 
         while (true) {
             if (peek().type == TokenType::AT_SIGN) {
@@ -800,8 +803,12 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
                 lockedTok = consume();
                 is_locked_flag = true;
                 skip_formatting();
+            } else if (peek().type == TokenType::ASYNC) {
+                consume();
+                is_async_flag = true;
+                skip_formatting();
             } else {
-                break;  // no more modifiers
+                break;
             }
         }
 
@@ -809,7 +816,7 @@ std::unique_ptr<ExpressionNode> Parser::parse_object_expression() {
         if ((peek().type == TokenType::TABIA) ||
             (peek().type == TokenType::IDENTIFIER && peek().value == "tabia")) {
             // parse method expression (consumes the tabia token and body)
-            auto methodExpr = parse_tabia_method();
+            auto methodExpr = parse_tabia_method(is_async_flag);
 
             // move into PropertyNode
             auto prop = std::make_unique<PropertyNode>();

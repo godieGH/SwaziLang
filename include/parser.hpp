@@ -58,7 +58,7 @@ class Parser {
     std::unique_ptr<ExpressionNode> parse_template_literal();
 
     std::unique_ptr<ExpressionNode> parse_object_expression();
-    std::unique_ptr<ExpressionNode> parse_tabia_method();
+    std::unique_ptr<ExpressionNode> parse_tabia_method(bool pre_async);
     std::unique_ptr<ExpressionNode> parse_lambda();
 
     std::unique_ptr<StatementNode> parse_import_declaration();
@@ -78,13 +78,14 @@ class Parser {
     std::unique_ptr<StatementNode> parse_sequential_functions(bool outer_is_async, bool outer_is_generator);
 
     // function parsing
-    std::unique_ptr<StatementNode> parse_function_declaration();
+    std::unique_ptr<StatementNode> parse_function_declaration(bool is_async = false, bool is_generator = false);
     std::unique_ptr<StatementNode> parse_class_declaration();
     std::unique_ptr<ClassBodyNode> parse_class_body(const std::string& className, bool braceStyle = false);
     std::unique_ptr<ClassMethodNode> parse_class_method(
         bool is_private,
         bool is_static,
         bool is_locked,
+        bool is_async,
         const std::string& className,
         bool isCtor = false,
         bool isDtor = false,

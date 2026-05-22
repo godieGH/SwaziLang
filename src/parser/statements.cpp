@@ -257,7 +257,7 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
                     std::string imported = impTok.value;
                     std::string local = imported;
                     skip_formatting();
-                    if (peek().type == TokenType::KAMA) {
+                    if (peek().value == "kama" || peek().value == "as") {
                         consume();  // 'kama'
                         skip_formatting();
                         expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' in import alias");
@@ -325,7 +325,7 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
             }
 
             skip_formatting();
-            if (peek().type == TokenType::KAMA) {
+            if (peek().value == "kama" || peek().value == "as") {
                 consume();  // 'kama'
                 skip_formatting();
                 expect(TokenType::IDENTIFIER, "Expected identifier after 'kama' for import alias");
@@ -1171,7 +1171,7 @@ std::unique_ptr<StatementNode> Parser::parse_sequential_functions(bool outer_is_
 
     return seqFunc;
 }
-std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
+std::unique_ptr<StatementNode> Parser::parse_function_declaration(bool is_async, bool is_generator) {
     struct AsyncScopeGuard {
         Parser& parser;
         bool prev;
@@ -1196,8 +1196,11 @@ std::unique_ptr<StatementNode> Parser::parse_function_declaration() {
 
     // The 'kazi' token was already consumed by parse_statement
     auto funcNode = std::make_unique<FunctionDeclarationNode>();
-
-    // NEW: optional generator marker immediately after 'kazi': `kazi* name ...`
+    
+    funcNode->is_async = is_async;
+    funcNode->is_generator = is_generator;
+    
+    // optional generator marker immediately after 'kazi': `kazi* name ...`
     if (peek().type == TokenType::STAR) {
         consume();
         funcNode->is_generator = true;
@@ -1617,8 +1620,19 @@ std::unique_ptr<StatementNode> Parser::parse_try_catch() {
     // --- parse try block ---
     parse_block_into(node->tryBlock);
 
+    auto match_keyword_alias = [&](TokenType keyword, const std::string& alias) -> bool {
+        if (match(keyword)) return true;
+
+        if (peek().type == TokenType::IDENTIFIER && peek().value == alias) {
+            consume();
+            return true;
+        }
+
+        return false;
+    };
+
     // --- parse catch (MAKOSA) ---
-    if (match(TokenType::MAKOSA)) {
+    if (match_keyword_alias(TokenType::MAKOSA, "catch")) {
         // optional error variable: either IDENTIFIER or ( IDENTIFIER )
         if (match(TokenType::IDENTIFIER)) {
             // match() consumed the identifier, so the token is at tokens[position-1]
@@ -1641,7 +1655,7 @@ std::unique_ptr<StatementNode> Parser::parse_try_catch() {
     }
 
     // --- optional finally (KISHA) ---
-    if (match(TokenType::KISHA)) {
+    if (match_keyword_alias(TokenType::KISHA, "finally")) {
         parse_block_into(node->finallyBlock);
     }
 
