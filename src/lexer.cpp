@@ -1166,7 +1166,6 @@ void Lexer::scan_number(std::vector<Token>& out, int tok_line, int tok_col, size
  * yield
  * step
  */
-
 void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, int tok_col, size_t start_index) {
     std::string id;
     while (!eof()) {
@@ -1202,17 +1201,17 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"sikweli", TokenType::BOOLEAN},
         {"false", TokenType::BOOLEAN},
         {"na", TokenType::AND},
-        {"and", TokenType::AND},
+        //{"and", TokenType::AND},
         {"ni", TokenType::NI},
         {"is", TokenType::NI},
         {"au", TokenType::OR},
-        {"or", TokenType::OR},
+        //{"or", TokenType::OR},
         {"si", TokenType::NOT},
-        {"not", TokenType::NOT},
+        //{"not", TokenType::NOT},
         {"sawa", TokenType::EQUALITY},
-        {"eq", TokenType::EQUALITY},
+        //{"eq", TokenType::EQUALITY},
         {"sisawa", TokenType::NOTEQUAL},
-        {"noteq", TokenType::NOTEQUAL},
+        //{"noteq", TokenType::NOTEQUAL},
 
         {"ainaya", TokenType::AINA},
         {"typeof", TokenType::AINA},
@@ -1221,7 +1220,6 @@ void Lexer::scan_identifier_or_keyword(std::vector<Token>& out, int tok_line, in
         {"tumia", TokenType::TUMIA},    // import
         {"use", TokenType::TUMIA},      // import
         {"kutoka", TokenType::KUTOKA},  // from
-        {"from", TokenType::KUTOKA},    // from
         {"ruhusu", TokenType::RUHUSU},  // export
         {"export", TokenType::RUHUSU},  // export
 
