@@ -207,6 +207,11 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
             peek().type == TokenType::INDENT ||
             peek().type == TokenType::DEDENT) consume();
     };
+    auto match_kutoka = [&]() -> bool {
+        if (peek().type == TokenType::KUTOKA) { consume(); return true; }
+        if (peek().type == TokenType::IDENTIFIER && peek().value == "from") { consume(); return true; }
+        return false;
+    };
 
     // Case A: side-effect only — not comma-chainable, return immediately
     if (peek().type == TokenType::STRING || peek().type == TokenType::SINGLE_QUOTED_STRING) {
@@ -226,7 +231,7 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
         node->token = tumiaTok;
         consume();  // '*'
         node->import_all = true;
-        expect(TokenType::KUTOKA, "Expected 'kutoka' after '*' in `tumia` statements");
+        if (!match_kutoka()) expect(TokenType::KUTOKA, "Expected 'kutoka' or 'from' after '*' in `tumia` statements");
         expect(TokenType::STRING, "Expected module string after 'kutoka' in `tumia` statements");
         Token pathTok = tokens[position - 1];
         node->module_path = pathTok.value;
@@ -282,7 +287,7 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
             skip_formatting();
             expect(TokenType::CLOSEBRACE, "Expected '}' after import specifiers");
             skip_formatting();
-            expect(TokenType::KUTOKA, "Expected 'kutoka' after import specifiers");
+            if (!match_kutoka()) expect(TokenType::KUTOKA, "Expected 'kutoka' or 'from' after import specifiers");
             skip_formatting();
             expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
             Token pathTok = tokens[position - 1];
@@ -333,8 +338,7 @@ std::unique_ptr<StatementNode> Parser::parse_import_declaration() {
             }
 
             skip_formatting();
-            if (peek().type == TokenType::KUTOKA) {
-                consume();  // 'kutoka'
+            if (match_kutoka()) {
                 skip_formatting();
                 expect(TokenType::STRING, "Expected module string after 'kutoka' in import");
                 Token pathTok = tokens[position - 1];
