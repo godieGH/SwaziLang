@@ -562,7 +562,23 @@ std::shared_ptr<ObjectValue> make_udp_exports(EnvPtr env, Evaluator* evaluator) 
         };
         auto is_open_fn = std::make_shared<FunctionValue>("socket.isOpen", is_open_impl, nullptr, stok);
         socket_obj->properties["isOpen"] = {Value{is_open_fn}, false, false, true, stok};
-
+        
+        // socket.setBroadcast(true|false) 
+        auto set_broadcast_impl = [inst](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
+            bool on = true;
+            if (!args.empty()) {
+                if (std::holds_alternative<bool>(args[0])) on = std::get<bool>(args[0]);
+                else on = NetHelpers::value_to_number(args[0]) != 0;
+            }
+            scheduler_run_on_loop([inst, on]() {
+                if (inst->udp_handle && !inst->closed.load())
+                    uv_udp_set_broadcast(inst->udp_handle, on ? 1 : 0);
+            });
+            return std::monostate{};
+        };
+        auto set_broadcast_fn = std::make_shared<FunctionValue>("socket.setBroadcast", set_broadcast_impl, nullptr, stok);
+        socket_obj->properties["setBroadcast"] = {Value{set_broadcast_fn}, false, false, true, stok};
+        
         // socket.close(callback?)
         auto close_impl = [inst, sock_id](const std::vector<Value>& args, EnvPtr, const Token&) -> Value {
             FunctionPtr cb = (!args.empty() && std::holds_alternative<FunctionPtr>(args[0]))
